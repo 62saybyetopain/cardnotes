@@ -90,17 +90,28 @@ export default function App() {
 
   const refreshIpadCards = useCallback(async () => {
     try {
-      const r = await api.listCards({
-        tag_id: filter.tagId,
-        unclassified: filter.unclassified,
-        curation_status: filter.curationStatus,
-        limit: 200,
-      });
-      setIpadCardList(r.items);
+      if (boardId) {
+        const b = await api.getBoard(boardId);
+        const cardSummaries: CardSummary[] = b.cards.map((c) => ({
+          id: c.card_id,
+          title: c.title,
+          snippet: c.body.slice(0, 160),
+          updated_at: c.updated_at,
+        }));
+        setIpadCardList(cardSummaries);
+      } else {
+        const r = await api.listCards({
+          tag_id: filter.tagId,
+          unclassified: filter.unclassified,
+          curation_status: filter.curationStatus,
+          limit: 200,
+        });
+        setIpadCardList(r.items);
+      }
     } catch (e) {
       report(e, "載入卡片清單失敗");
     }
-  }, [filter, report]);
+  }, [boardId, filter, report]);
 
   useEffect(() => {
     void Promise.all([refreshTags(), refreshBoards(), refreshIpadCards()]).finally(() => setBooted(true));
@@ -119,7 +130,6 @@ export default function App() {
     [centerEditing],
   );
 
-  // 點擊 @ 引用超連結時：在右方欄【搜尋】頁面下半部開啟該卡片預覽，不洗掉目前正在編輯的卡片
   const openCardPreview = useCallback((id: string) => {
     setPreviewCardId(id);
     setRightOpen(true);
@@ -148,13 +158,21 @@ export default function App() {
 
   const createCard = async () => {
     try {
-      const card = await api.createCard(filter.tagId ? [filter.tagId] : []); // 在某抽屜被選取時新增，自動歸檔
+      const card = await api.createCard(filter.tagId ? [filter.tagId] : []);
       setRightOpen(true);
       setTab(centerEditing ? "relations" : "content");
       setSelected(card.id);
-      if (boardId) await boardRef.current?.addCard(card.id);
+      if (boardId) {
+        if (boardRef.current) {
+          await boardRef.current.addCard(card.id);
+        } else {
+          // 純前端／iPad 模式無畫布時，直接寫入白板關聯
+          await api.addToBoard(boardId, card.id, 100, 100);
+        }
+      }
       void refreshTags();
       void refreshBoards();
+      void refreshIpadCards();
       bump();
     } catch (e) {
       report(e, "新增卡片失敗");
@@ -162,30 +180,45 @@ export default function App() {
   };
 
   const addToBoard = async (id: string) => {
-    await boardRef.current?.addCard(id);
+    if (boardRef.current) {
+      await boardRef.current.addCard(id);
+    } else if (boardId) {
+      await api.addToBoard(boardId, id, 100, 100);
+    }
     void refreshBoards();
+    void refreshIpadCards();
   };
 
   const onSaved = useCallback(
     (c: CardDetail) => {
       notifyCardTitleUpdated(c.id, c.title);
       boardRef.current?.updateCard({ id: c.id, title: c.title, body: c.body });
+      setIpadCardList((prev) =>
+        prev.map((item) =>
+          item.id === c.id
+            ? { ...item, title: c.title, snippet: c.body.slice(0, 160), updated_at: c.updated_at }
+            : item,
+        ),
+      );
       void refreshTags();
     },
     [refreshTags],
   );
 
+  // 刪除卡片：立即從 ipadCardList 與畫布中移除，不需重新整理立即生效
   const onCardDeleted = useCallback(
     (id: string) => {
       notifyCardDeleted(id);
       boardRef.current?.removeCard(id);
+      setIpadCardList((prev) => prev.filter((item) => item.id !== id));
       setSelected(null);
       setCenterEditing(false);
       void refreshTags();
       void refreshBoards();
+      void refreshIpadCards();
       bump();
     },
-    [refreshBoards, refreshTags, bump],
+    [refreshBoards, refreshIpadCards, refreshTags, bump],
   );
 
   const onLinkDeleted = useCallback(
@@ -345,6 +378,8 @@ export default function App() {
             <IPadCardView
               cards={ipadCardList}
               selectedCardId={selected}
+              boardId={boardId}
+              boards={boards}
               tags={tags}
               onSelectCard={selectCard}
               onCreateCard={() => void createCard()}

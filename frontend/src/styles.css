@@ -457,6 +457,26 @@ summary .add { float: right; border: 0; background: transparent; }
 .diff-pane-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .diff-pane-body { margin: 0; white-space: pre-wrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; max-height: 180px; overflow-y: auto; color: var(--text); }
 
+.p2p-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px dashed #10b981;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  margin-top: 8px;
+}
+.p2p-code-display {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: #10b981;
+  font-family: ui-monospace, monospace;
+}
+
 /* iPad 與獨立觸控清單排版 */
 .ipad-view {
   position: absolute;

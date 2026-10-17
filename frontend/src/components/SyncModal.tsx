@@ -1,7 +1,9 @@
 // @depends-on ../api.ts (api)
+// @depends-on ../lib/p2p.ts (generatePairingCode, startP2PReceiver)
 // @depends-on ../types.ts (SyncPackage, SyncDiffReport, SyncCardDiff)
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { generatePairingCode, startP2PReceiver } from "../lib/p2p";
 import type { SyncCardDiff, SyncDiffReport, SyncPackage } from "../types";
 
 interface Props {
@@ -19,7 +21,58 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
   const [selectedNewCardIds, setSelectedNewCardIds] = useState<Set<string>>(new Set());
   const [selectedUpdateCardIds, setSelectedUpdateCardIds] = useState<Set<string>>(new Set());
   const [viewingDiffCard, setViewingDiffCard] = useState<SyncCardDiff | null>(null);
+  const [p2pListening, setP2pListening] = useState(false);
+  const [pairingCode, setPairingCode] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const stopReceiverRef = useRef<(() => void) | null>(null);
+
+  // 關閉視窗時自動斷開 P2P 監聽
+  useEffect(() => {
+    return () => {
+      stopReceiverRef.current?.();
+    };
+  }, []);
+
+  const handleStartP2P = () => {
+    if (p2pListening) {
+      stopReceiverRef.current?.();
+      setP2pListening(false);
+      setPairingCode(null);
+      return;
+    }
+
+    const code = generatePairingCode();
+    setPairingCode(code);
+    setP2pListening(true);
+    info(`已開啟 P2P 配對接收，請在 iPad 輸入連線碼：${code}`);
+
+    const stop = startP2PReceiver(
+      code,
+      async (receivedPkg) => {
+        info("⚡ 成功接收到來自 iPad 的同步封包！正在比對資料庫差異…");
+        setComparing(true);
+        setPkg(receivedPkg);
+        try {
+          const res: SyncDiffReport = await api.syncDiff(receivedPkg);
+          setDiff(res);
+          setSelectedNewCardIds(new Set(res.cards_new.map((c: { id: string }) => c.id)));
+          setSelectedUpdateCardIds(new Set(res.cards_updated.map((c: SyncCardDiff) => c.id)));
+          info(`已載入差異：${res.cards_new.length} 張新增、${res.cards_updated.length} 張待更新`);
+        } catch (err) {
+          report(err, "比對同步封包失敗");
+        } finally {
+          setComparing(false);
+        }
+      },
+      (err) => {
+        report(err, "P2P 監聽發生錯誤");
+        setP2pListening(false);
+        setPairingCode(null);
+      },
+    );
+
+    stopReceiverRef.current = stop;
+  };
 
   const exportBackup = async () => {
     try {
@@ -150,10 +203,10 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
 
         <div className="sync-top-actions">
           <button type="button" onClick={() => void exportBackup()}>
-            📥 匯出電腦端完整備份 (JSON)
+            📥 匯出電腦完整備份 (JSON)
           </button>
-          <button type="button" className="primary" onClick={() => fileInputRef.current?.click()}>
-            📤 讀取 iPad / 備份檔案比對…
+          <button type="button" onClick={() => fileInputRef.current?.click()}>
+            📤 選取檔案手動比對…
           </button>
           <input
             ref={fileInputRef}
@@ -162,7 +215,22 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
             style={{ display: "none" }}
             onChange={(e) => void handleFileSelect(e)}
           />
+          <button
+            type="button"
+            className={`primary${p2pListening ? " on" : ""}`}
+            style={{ marginLeft: "auto", background: p2pListening ? "#d97706" : "#10b981", borderColor: "transparent" }}
+            onClick={handleStartP2P}
+          >
+            {p2pListening ? `連線碼 [ ${pairingCode} ]（點擊關閉）` : "⚡ 開啟 P2P 配對接收"}
+          </button>
         </div>
+
+        {p2pListening && !diff && (
+          <div className="p2p-banner">
+            <span>📡 等待 iPad 連線中… 請在 iPad 點「⚡ P2P 傳送到電腦」並輸入連線碼：</span>
+            <span className="p2p-code-display">{pairingCode}</span>
+          </div>
+        )}
 
         {comparing && <div className="muted pad">正在比對資料庫差異…</div>}
 
