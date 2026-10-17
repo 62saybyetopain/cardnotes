@@ -6,6 +6,8 @@ import {
   LINK_STATUS_LABELS,
   RELATION_COLORS,
   RELATION_LABELS,
+  type BoardCard,
+  type BoardData,
   type BoardLink,
   type CardDetail,
   type CardLink,
@@ -31,6 +33,8 @@ export type TabKey = "content" | "search" | "relations";
 interface Props {
   selectedCardId: string | null;
   previewCardId?: string | null;
+  boardId?: string | null;
+  centerEditing?: boolean;
   tags: Tag[];
   filter: Filter;
   version: number; // 外部觸發資料變化（連結、標籤）時遞增，觸發重新載入卡片
@@ -127,7 +131,7 @@ export function RightPanel(p: Props) {
   const [loadError, setLoadError] = useState("");
   const [nonce, setNonce] = useState(0); // 只有「捨棄修改重新載入」才重建編輯器
   const [fetchTick, setFetchTick] = useState(0);
-  const { selectedCardId, version, report } = p;
+  const { selectedCardId, version, report, centerEditing, boardId } = p;
   const activeTab: TabKey = p.hideContentTab && p.tab === "content" ? "relations" : p.tab;
   const visibleTabs = p.hideContentTab ? ALL_TABS.filter(([k]) => k !== "content") : ALL_TABS;
 
@@ -163,24 +167,41 @@ export function RightPanel(p: Props) {
       )}
       <div className="right-head">
         <div className="tabs" role="tablist">
-          {visibleTabs.map(([k, label]) => (
-            <button key={k} role="tab" aria-selected={activeTab === k} className={activeTab === k ? "on" : ""} onClick={() => p.onTab(k)}>
-              {label}
-            </button>
-          ))}
+          {visibleTabs.map(([k, label]) => {
+            const displayLabel = k === "content" && centerEditing ? "白板卡片" : label;
+            return (
+              <button key={k} role="tab" aria-selected={activeTab === k} className={activeTab === k ? "on" : ""} onClick={() => p.onTab(k)}>
+                {displayLabel}
+              </button>
+            );
+          })}
         </div>
       </div>
       <div className="right-body">
         {activeTab === "search" && <SearchTab {...p} />}
-        {activeTab !== "search" && !selectedCardId && <div className="empty">在白板上點選一張卡片，或按「新增卡片」。</div>}
-        {activeTab !== "search" && selectedCardId && loadError && (
+        {activeTab === "content" && centerEditing && (
+          <BoardCardsTab
+            boardId={boardId ?? null}
+            selectedCardId={selectedCardId}
+            version={version}
+            onJumpToCard={p.onSelectCard}
+            report={report}
+            info={p.info}
+          />
+        )}
+        {activeTab !== "search" && !(activeTab === "content" && centerEditing) && !selectedCardId && (
+          <div className="empty">在白板上點選一張卡片，或按「新增卡片」。</div>
+        )}
+        {activeTab !== "search" && !(activeTab === "content" && centerEditing) && selectedCardId && loadError && (
           <div className="banner danger">
             載入卡片失敗：{loadError}
             <button onClick={refetch}>重試</button>
           </div>
         )}
-        {activeTab !== "search" && selectedCardId && !loadError && !card && <div className="empty">載入中…</div>}
-        {activeTab === "content" && card && (
+        {activeTab !== "search" && !(activeTab === "content" && centerEditing) && selectedCardId && !loadError && !card && (
+          <div className="empty">載入中…</div>
+        )}
+        {activeTab === "content" && !centerEditing && card && (
           <ContentTab
             card={card}
             tags={p.tags}
@@ -964,6 +985,205 @@ function RelationsTab(props: {
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+function BoardCardsTab(props: {
+  boardId: string | null;
+  selectedCardId: string | null;
+  version: number;
+  onJumpToCard(id: string): void;
+  report(e: unknown, prefix?: string): void;
+  info(text: string): void;
+}) {
+  const { boardId, selectedCardId, version, onJumpToCard, report, info } = props;
+  const [boardData, setBoardData] = useState<BoardData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [filterText, setFilterText] = useState("");
+  const [previewCardId, setPreviewCardId] = useState<string | null>(null);
+  const [paneOpen, setPaneOpen] = useState(true);
+  const [previewCard, setPreviewCard] = useState<CardDetail | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewErr, setPreviewErr] = useState("");
+
+  useEffect(() => {
+    if (!boardId) {
+      setBoardData(null);
+      return;
+    }
+    let alive = true;
+    setLoading(true);
+    api
+      .getBoard(boardId)
+      .then((b) => alive && setBoardData(b))
+      .catch((e) => alive && report(e, "載入白板卡片清單失敗"))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [boardId, version, report]);
+
+  useEffect(() => {
+    if (!previewCardId || !paneOpen) {
+      setPreviewCard(null);
+      setPreviewErr("");
+      return;
+    }
+    let alive = true;
+    setPreviewLoading(true);
+    setPreviewErr("");
+    api
+      .getCard(previewCardId)
+      .then((c) => alive && setPreviewCard(c))
+      .catch((e) => alive && setPreviewErr(e instanceof Error ? e.message : String(e)))
+      .finally(() => alive && setPreviewLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [previewCardId, paneOpen, version]);
+
+  const copyPreviewBody = async () => {
+    if (!previewCard) return;
+    try {
+      await navigator.clipboard.writeText(previewCard.body);
+      info("已複製卡片內文");
+    } catch (e) {
+      report(e, "複製失敗");
+    }
+  };
+
+  if (!boardId) {
+    return <div className="empty">尚未選取任何白板。</div>;
+  }
+
+  const cards: BoardCard[] = boardData?.cards ?? [];
+  const q = filterText.trim().toLowerCase();
+  const filtered: BoardCard[] = q
+    ? cards.filter((c: BoardCard) => (c.title || "").toLowerCase().includes(q) || (c.body || "").toLowerCase().includes(q))
+    : cards;
+
+  return (
+    <div className={`search search-split${paneOpen ? " with-preview" : ""}`}>
+      <div className="search-upper">
+        <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+          <input
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
+            placeholder="搜尋此白板內的卡片…"
+            aria-label="搜尋此白板卡片"
+            style={{ flex: 1 }}
+          />
+          <button
+            type="button"
+            className={paneOpen ? "on" : ""}
+            onClick={() => setPaneOpen((o) => !o)}
+            title="開啟或收合下方預覽區"
+          >
+            {paneOpen ? "▾ 收合預覽" : "▸ 展開預覽"}
+          </button>
+        </div>
+
+        <div className="filter-badge" style={{ display: "flex", justifyContent: "space-between" }}>
+          <span>白板「{boardData?.name || ""}」：{cards.length} 張卡片</span>
+          <span className="muted" style={{ fontSize: 11 }}>雙擊卡片跳轉編輯</span>
+        </div>
+
+        {loading && <div className="empty">載入白板卡片中…</div>}
+        {!loading && filtered.length === 0 && <div className="empty">此白板尚無符合的卡片</div>}
+
+        <ul className="results">
+          {filtered.map((c: BoardCard) => {
+            const isEditing = c.card_id === selectedCardId;
+            const isPreviewed = paneOpen && previewCardId === c.card_id;
+            return (
+              <li
+                key={c.card_id}
+                className={isPreviewed ? "previewing-row" : undefined}
+                onDoubleClick={(e) => {
+                  e.preventDefault();
+                  onJumpToCard(c.card_id);
+                }}
+                title="單擊下方預覽，雙擊立即跳轉中央編輯"
+              >
+                <button
+                  type="button"
+                  className="result-main"
+                  onClick={() => {
+                    setPreviewCardId(c.card_id);
+                    setPaneOpen(true);
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    {isEditing && (
+                      <span className="facet-badge" style={{ background: "var(--accent)", color: "#fff" }}>
+                        編輯中
+                      </span>
+                    )}
+                    <strong>{c.title || "（無標題）"}</strong>
+                  </div>
+                  <span className="snippet">{c.body.slice(0, 160)}</span>
+                </button>
+                <button
+                  type="button"
+                  className={isEditing ? "primary" : ""}
+                  onClick={() => onJumpToCard(c.card_id)}
+                  title="將中央面板切換至此卡片編輯"
+                >
+                  {isEditing ? "當前" : "跳轉"}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      {paneOpen && (
+        <div className="search-preview-pane" role="region" aria-label="白板卡片內容預覽區">
+          <div className="search-preview-head">
+            <strong className="search-preview-title">
+              {previewCard ? previewCard.title || "（無標題）" : "卡片內容預覽"}
+            </strong>
+            <div className="search-preview-actions">
+              {previewCard && (
+                <>
+                  <button type="button" onClick={() => void copyPreviewBody()} title="複製整篇 Markdown 內文">
+                    複製內文
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => onJumpToCard(previewCard.id)}
+                    title="跳轉中央編輯此卡"
+                  >
+                    跳轉編輯此卡
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={() => setPaneOpen(false)}
+                aria-label="關閉預覽區"
+                title="關閉預覽區"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+          <div className="search-preview-body">
+            {!previewCardId && (
+              <div className="empty">單擊上方卡片即可在此預覽與複製文字，雙擊卡片可直接跳轉編輯。</div>
+            )}
+            {previewCardId && previewLoading && <div className="empty">載入預覽中…</div>}
+            {previewCardId && !previewLoading && previewErr && (
+              <div className="banner danger">載入預覽失敗：{previewErr}</div>
+            )}
+            {previewCardId && !previewLoading && previewCard && (
+              <Markdown source={previewCard.body} onOpenCard={(id) => setPreviewCardId(id)} />
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

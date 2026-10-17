@@ -140,7 +140,7 @@ export default function App() {
     setSelected(id);
     setCenterEditing(true);
     setRightOpen(true);
-    setTab((t) => (t === "content" ? "relations" : t));
+    setTab("content");
   }, []);
 
   const closeCenterEditor = useCallback(() => {
@@ -417,20 +417,22 @@ export default function App() {
           )}
         </main>
       {rightOpen && (
-        <RightPanel
-          selectedCardId={selected}
-          previewCardId={previewCardId}
-          tags={tags}
-          filter={filter}
-          version={version}
-          tab={tab}
-          hideContentTab={centerEditing && !!selected}
-          onResizeStart={startResize}
-          onTab={setTab}
-          onClearFilter={() => setFilter({})}
-          onSelectCard={selectCard}
-          onPreviewCard={setPreviewCardId}
-          onCreateCard={() => void createCard()}
+          <RightPanel
+            selectedCardId={selected}
+            previewCardId={previewCardId}
+            boardId={boardId}
+            centerEditing={centerEditing}
+            tags={tags}
+            filter={filter}
+            version={version}
+            tab={tab}
+            hideContentTab={false}
+            onResizeStart={startResize}
+            onTab={setTab}
+            onClearFilter={() => setFilter({})}
+            onSelectCard={selectCard}
+            onPreviewCard={setPreviewCardId}
+            onCreateCard={() => void createCard()}
             onAddToBoard={(id) => void addToBoard(id)}
             onSaved={onSaved}
             onCardDeleted={onCardDeleted}

@@ -1347,9 +1347,12 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
-        onNodeClick={(_e, node) => {
+        onNodeClick={(e, node) => {
           if (node.type === "card") {
             setLastClickedCardId(node.id);
+            if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+              onOpenCard?.(node.id);
+            }
           }
         }}
         onNodeDragStart={onNodeDragStart}
