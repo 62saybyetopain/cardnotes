@@ -34,6 +34,9 @@ export function initDeviceEnvironment(): boolean {
   if (standalone) {
     // 獨立模式自動將儲存驅動切換至 IndexedDB (Dexie)
     setPreferredDriverType("dexie");
+  } else {
+    // 非獨立模式明確切回後端，避免先前的 dexie 偏好殘留
+    setPreferredDriverType("http");
   }
   return standalone;
 }

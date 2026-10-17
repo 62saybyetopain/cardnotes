@@ -11,6 +11,7 @@ interface Props {
   selectedCardId: string | null;
   boardId: string | null;
   boards: BoardSummary[];
+  filtered?: boolean;
   tags: Tag[];
   onSelectCard(id: string): void;
   onCreateCard(): void;
@@ -19,11 +20,21 @@ interface Props {
   info(text: string): void;
 }
 
+async function overwriteLocal(pkg: SyncPackage): Promise<void> {
+  if (typeof storage.importPackageOverwrite !== "function") {
+    throw new Error(
+      "目前儲存驅動不是 IndexedDB（dexie），無法覆蓋匯入。請以 ?storage=dexie 開啟，或確認 iPad 已切換為本機儲存。",
+    );
+  }
+  await storage.importPackageOverwrite(pkg);
+}
+
 export function IPadCardView({
   cards,
   selectedCardId,
   boardId,
   boards,
+  filtered = false,
   tags: _tags,
   onSelectCard,
   onCreateCard,
@@ -38,7 +49,7 @@ export function IPadCardView({
   const [p2pSending, setP2pSending] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const activeBoard = boards.find((b) => b.id === boardId);
+  const activeBoard = filtered ? undefined : boards.find((b) => b.id === boardId);
 
   // 一鍵填入初始示範資料（讓首次打開 GitHub Pages 的 iPad 立即有標籤與抽屜可測）
   const loadSampleData = async () => {
@@ -116,11 +127,9 @@ export function IPadCardView({
           { board_id: "sample-b1", card_id: "sample-c2", x: 420, y: 100 },
         ],
       };
-      if (typeof storage.importPackageOverwrite === "function") {
-        await storage.importPackageOverwrite(demoPkg);
-        info("已成功載入示範資料！已建立收納抽屜、概念標籤與關聯卡片。");
-        onRefresh();
-      }
+      await overwriteLocal(demoPkg);
+      info("已成功載入示範資料！已建立收納抽屜、概念標籤與關聯卡片。");
+      onRefresh();
     } catch (e) {
       report(e, "載入示範資料失敗");
     }
@@ -160,11 +169,9 @@ export function IPadCardView({
       const text = await file.text();
       const pkg = JSON.parse(text) as SyncPackage;
       if (!pkg || !Array.isArray(pkg.cards)) throw new Error("無效的備份檔案格式");
-      if (typeof storage.importPackageOverwrite === "function") {
-        await storage.importPackageOverwrite(pkg);
-        info(`已完成還原！已同步載入 ${pkg.cards.length} 張卡片。`);
-        onRefresh();
-      }
+      await overwriteLocal(pkg);
+      info(`已完成還原！已同步載入 ${pkg.cards.length} 張卡片。`);
+      onRefresh();
     } catch (err) {
       report(err, "匯入覆蓋失敗");
     } finally {
@@ -215,30 +222,33 @@ export function IPadCardView({
     }
 
     setP2pSending(true);
-    import("../lib/p2p").then(({ pullP2PPackageFromPc }) => {
-      pullP2PPackageFromPc(
-        code,
-        async (pcPkg) => {
-          try {
-            if (typeof storage.importPackageOverwrite === "function") {
-              await storage.importPackageOverwrite(pcPkg);
+    import("../lib/p2p")
+      .then(({ pullP2PPackageFromPc }) => {
+        pullP2PPackageFromPc(
+          code,
+          async (pcPkg) => {
+            try {
+              await overwriteLocal(pcPkg);
               info(`⚡ 同步成功！已載入電腦端 ${pcPkg.cards.length} 張卡片與所有抽屜！`);
               setP2pSending(false);
               setP2pModalOpen(false);
               setPairingCodeInput("");
               onRefresh();
+            } catch (e) {
+              setP2pSending(false);
+              report(e, "寫入 iPad 本機資料庫失敗");
             }
-          } catch (e) {
+          },
+          (err) => {
             setP2pSending(false);
-            report(e, "寫入 iPad 本機資料庫失敗");
-          }
-        },
-        (err) => {
-          setP2pSending(false);
-          report(err, "P2P 連線失敗，請確認電腦端是否已開啟配對接收且連線碼正確");
-        },
-      );
-    });
+            report(err, "P2P 連線失敗，請確認電腦端是否已開啟配對接收且連線碼正確");
+          },
+        );
+      })
+      .catch((e) => {
+        setP2pSending(false);
+        report(e, "載入 P2P 模組失敗");
+      });
   };
 
   return (
@@ -251,7 +261,7 @@ export function IPadCardView({
               白板：{activeBoard.name}（{cards.length}）
             </span>
           ) : (
-            <span className="muted" style={{ fontSize: 13 }}>全部卡片（{cards.length}）</span>
+            <span className="muted" style={{ fontSize: 13 }}>{filtered ? "篩選結果" : "全部卡片"}（{cards.length}）</span>
           )}
         </div>
         <div className="ipad-toolbar-actions">

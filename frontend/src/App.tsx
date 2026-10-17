@@ -90,7 +90,9 @@ export default function App() {
 
   const refreshIpadCards = useCallback(async () => {
     try {
-      if (boardId) {
+      // 有篩選條件（抽屜／概念標籤／未歸檔／收件夾）時查全部卡片，否則才顯示目前白板的成員
+      const hasFilter = !!(filter.tagId || filter.unclassified || filter.curationStatus);
+      if (boardId && !hasFilter) {
         const b = await api.getBoard(boardId);
         const cardSummaries: CardSummary[] = b.cards.map((c) => ({
           id: c.card_id,
@@ -159,9 +161,14 @@ export default function App() {
   const createCard = async () => {
     try {
       const card = await api.createCard(filter.tagId ? [filter.tagId] : []);
-      setRightOpen(true);
-      setTab(centerEditing ? "relations" : "content");
-      setSelected(card.id);
+      if (isStandalone) {
+        // 網頁／iPad 版：新增後直接進中央編輯
+        openCardInCenter(card.id);
+      } else {
+        setRightOpen(true);
+        setTab(centerEditing ? "relations" : "content");
+        setSelected(card.id);
+      }
       if (boardId) {
         if (boardRef.current) {
           await boardRef.current.addCard(card.id);
@@ -262,6 +269,7 @@ export default function App() {
             setBoardId(id);
             setViewMode("board");
             setCenterEditing(false);
+            if (isStandalone) setFilter({});
           }}
           onBoardsChanged={refreshBoards}
           onFilter={(f) => (setFilter(f), setRightOpen(true), setTab("search"))}
@@ -380,8 +388,9 @@ export default function App() {
               selectedCardId={selected}
               boardId={boardId}
               boards={boards}
+              filtered={!!(filter.tagId || filter.unclassified || filter.curationStatus)}
               tags={tags}
-              onSelectCard={selectCard}
+              onSelectCard={openCardInCenter}
               onCreateCard={() => void createCard()}
               onRefresh={() => {
                 void refreshTags();
@@ -396,8 +405,8 @@ export default function App() {
           {centerEditing && selected && (
             <div className="center-editor" role="region" aria-label="中央卡片編輯視窗">
               <div className="center-editor-head">
-                <button onClick={closeCenterEditor}>← 返回白板</button>
-                <span className="muted">卡片編輯模式（按 Esc 返回白板）</span>
+                <button onClick={closeCenterEditor}>← 返回{isStandalone ? "卡片冊" : "白板"}</button>
+                <span className="muted">卡片編輯模式（按 Esc 返回{isStandalone ? "卡片冊" : "白板"}）</span>
               </div>
               <div className="center-editor-body">
                 <CardEditorPane
