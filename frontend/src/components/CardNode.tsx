@@ -7,14 +7,21 @@ export interface CardNodeData extends Record<string, unknown> {
   body: string;
   sized: boolean;
   onResizeEnd: (cardId: string, p: { x: number; y: number; width: number; height: number }) => void;
+  onOpenCard?: (cardId: string) => void;
 }
 export type CardFlowNode = Node<CardNodeData, "card">;
 
 export function CardNode({ id, data, selected }: NodeProps<CardFlowNode>) {
   return (
-    // 每個卡片節點各自一層 Error Boundary：單張卡片渲染失敗不能讓整塊白板空白
     <ErrorBoundary fallback={<div className="card-node card-error">此卡片顯示失敗（{id.slice(0, 8)}）</div>}>
-      <div className={`card-node${selected ? " selected" : ""}${data.sized ? " sized" : ""}`}>
+      <div
+        className={`card-node${selected ? " selected" : ""}${data.sized ? " sized" : ""}`}
+        onClick={(e) => {
+          if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+            data.onOpenCard?.(id);
+          }
+        }}
+      >
         <NodeResizer
           minWidth={180}
           minHeight={80}

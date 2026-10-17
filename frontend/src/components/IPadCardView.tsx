@@ -203,6 +203,44 @@ export function IPadCardView({
     }
   };
 
+  const startP2PPull = () => {
+    const code = pairingCodeInput.trim();
+    if (!code || code.length !== 6) {
+      alert("請輸入電腦畫面上顯示的 6 位數連線碼");
+      return;
+    }
+
+    if (!window.confirm("確定要從電腦下載完整資料嗎？\n這將會完全覆蓋此 iPad 上的所有本機卡片與標籤！")) {
+      return;
+    }
+
+    setP2pSending(true);
+    import("../lib/p2p").then(({ pullP2PPackageFromPc }) => {
+      pullP2PPackageFromPc(
+        code,
+        async (pcPkg) => {
+          try {
+            if (typeof storage.importPackageOverwrite === "function") {
+              await storage.importPackageOverwrite(pcPkg);
+              info(`⚡ 同步成功！已載入電腦端 ${pcPkg.cards.length} 張卡片與所有抽屜！`);
+              setP2pSending(false);
+              setP2pModalOpen(false);
+              setPairingCodeInput("");
+              onRefresh();
+            }
+          } catch (e) {
+            setP2pSending(false);
+            report(e, "寫入 iPad 本機資料庫失敗");
+          }
+        },
+        (err) => {
+          setP2pSending(false);
+          report(err, "P2P 連線失敗，請確認電腦端是否已開啟配對接收且連線碼正確");
+        },
+      );
+    });
+  };
+
   return (
     <div className="ipad-view">
       <div className="ipad-toolbar">
@@ -310,17 +348,31 @@ export function IPadCardView({
               autoFocus
               style={{ fontSize: 22, textAlign: "center", letterSpacing: 4, padding: "8px 0" }}
             />
-            <div className="modal-actions">
+            <div className="modal-actions" style={{ flexDirection: "column", gap: 8, marginTop: 12 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <button
+                  type="button"
+                  className="primary"
+                  style={{ background: "#2563eb", borderColor: "#2563eb", padding: "10px 6px" }}
+                  onClick={startP2PPull}
+                  disabled={p2pSending || pairingCodeInput.length !== 6}
+                  title="從電腦下載所有卡片與抽屜，完全覆蓋 iPad"
+                >
+                  {p2pSending ? "傳輸中…" : "📥 覆蓋同步到 iPad"}
+                </button>
+                <button
+                  type="button"
+                  className="primary"
+                  style={{ background: "#10b981", borderColor: "#10b981", padding: "10px 6px" }}
+                  onClick={() => void startP2PSend()}
+                  disabled={p2pSending || pairingCodeInput.length !== 6}
+                  title="將 iPad 新寫的卡片發給電腦合併"
+                >
+                  {p2pSending ? "傳輸中…" : "📤 發送變更給電腦"}
+                </button>
+              </div>
               <button type="button" onClick={() => setP2pModalOpen(false)} disabled={p2pSending}>
                 取消
-              </button>
-              <button
-                type="button"
-                className="primary"
-                onClick={() => void startP2PSend()}
-                disabled={p2pSending || pairingCodeInput.length !== 6}
-              >
-                {p2pSending ? "配對傳送中…" : "連線並傳送"}
               </button>
             </div>
           </div>

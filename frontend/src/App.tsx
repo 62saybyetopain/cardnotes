@@ -430,7 +430,7 @@ export default function App() {
             onResizeStart={startResize}
             onTab={setTab}
             onClearFilter={() => setFilter({})}
-            onSelectCard={selectCard}
+            onSelectCard={openCardInCenter}
             onPreviewCard={setPreviewCardId}
             onCreateCard={() => void createCard()}
             onAddToBoard={(id) => void addToBoard(id)}

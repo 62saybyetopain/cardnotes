@@ -64,6 +64,10 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
           setComparing(false);
         }
       },
+      async () => {
+        info("⚡ iPad 正在請求電腦端完整備份，正在發送…");
+        return await api.syncExport();
+      },
       (err) => {
         report(err, "P2P 監聽發生錯誤");
         setP2pListening(false);

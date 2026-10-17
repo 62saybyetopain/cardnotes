@@ -427,9 +427,9 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       width: c.w ?? 280,
       height: c.h ?? undefined,
       style: { width: c.w ?? 280, height: c.h ?? undefined },
-      data: { title: c.title, body: c.body, sized: c.h != null, onResizeEnd },
+      data: { title: c.title, body: c.body, sized: c.h != null, onResizeEnd, onOpenCard },
     }),
-    [onResizeEnd],
+    [onOpenCard, onResizeEnd],
   );
 
   const toGroupNode = useCallback(
@@ -1340,12 +1340,11 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           )}
         </div>
       )}
-
+  
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
-        edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         onNodeClick={(e, node) => {
           if (node.type === "card") {
