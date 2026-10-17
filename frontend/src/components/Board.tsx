@@ -1345,6 +1345,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         onNodeClick={(e, node) => {
           if (node.type === "card") {
