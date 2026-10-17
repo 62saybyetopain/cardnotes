@@ -1,0 +1,30 @@
+# Node 套件與打包產物（忽略所有層級）
+node_modules/
+dist/
+.vite/
+.vitest-cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 本地資料庫與媒體檔案（保護個人隱私）
+*.db
+*.sqlite
+*.sqlite3
+media/
+uploads/
+
+# Python 快取與虛擬環境
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# 系統與編輯器暫存檔
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.env
+*.local
