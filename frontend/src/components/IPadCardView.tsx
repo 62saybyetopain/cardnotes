@@ -1,8 +1,8 @@
 // @depends-on ../lib/storage/index.ts (storage)
-// @depends-on ../lib/p2p.ts (sendP2PPackage)
+// @depends-on ../lib/p2p.ts (getSavedCloudCredential, pullP2PPackageFromPc, sendP2PPackage)
 // @depends-on ../types.ts (BoardSummary, CardSummary, SyncPackage, Tag)
 import { useRef, useState } from "react";
-import { sendP2PPackage } from "../lib/p2p";
+import { getSavedCloudCredential, pullP2PPackageFromPc, sendP2PPackage } from "../lib/p2p";
 import { storage } from "../lib/storage";
 import type { BoardSummary, CardSummary, SyncPackage, Tag } from "../types";
 
@@ -45,7 +45,7 @@ export function IPadCardView({
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [p2pModalOpen, setP2pModalOpen] = useState(false);
-  const [pairingCodeInput, setPairingCodeInput] = useState("");
+  const [pairingCodeInput, setPairingCodeInput] = useState(() => getSavedCloudCredential());
   const [p2pSending, setP2pSending] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -181,9 +181,9 @@ export function IPadCardView({
   };
 
   const startP2PSend = async () => {
-    const code = pairingCodeInput.trim();
-    if (!code || code.length !== 6) {
-      alert("請輸入電腦畫面上顯示的 6 位數連線碼");
+    const code = pairingCodeInput.trim() || getSavedCloudCredential();
+    if (!code) {
+      alert("請先輸入 Google Drive 雲端金鑰（輸入一次即自動記憶）");
       return;
     }
 
@@ -196,12 +196,11 @@ export function IPadCardView({
         () => {
           setP2pSending(false);
           setP2pModalOpen(false);
-          setPairingCodeInput("");
-          info("⚡ 傳送成功！電腦端已收到同步封包，請在電腦端確認合併。");
+          info("☁️ 上傳成功！已將 iPad 變更儲存至 Google Drive，請在電腦端點擊「從雲端拉取 iPad 變更」合併。");
         },
         (err) => {
           setP2pSending(false);
-          report(err, "P2P 配對失敗，請確認電腦端是否已開啟配對視窗且連線碼正確");
+          report(err, "Google Drive 雲端上傳失敗");
         },
       );
     } catch (e) {
@@ -211,44 +210,36 @@ export function IPadCardView({
   };
 
   const startP2PPull = () => {
-    const code = pairingCodeInput.trim();
-    if (!code || code.length !== 6) {
-      alert("請輸入電腦畫面上顯示的 6 位數連線碼");
+    const code = pairingCodeInput.trim() || getSavedCloudCredential();
+    if (!code) {
+      alert("請先輸入 Google Drive 雲端金鑰（輸入一次即自動記憶）");
       return;
     }
 
-    if (!window.confirm("確定要從電腦下載完整資料嗎？\n這將會完全覆蓋此 iPad 上的所有本機卡片與標籤！")) {
+    if (!window.confirm("確定要從 Google Drive 下載電腦端完整資料嗎？\n這將會完全覆蓋此 iPad 上的所有本機卡片與標籤！")) {
       return;
     }
 
     setP2pSending(true);
-    import("../lib/p2p")
-      .then(({ pullP2PPackageFromPc }) => {
-        pullP2PPackageFromPc(
-          code,
-          async (pcPkg) => {
-            try {
-              await overwriteLocal(pcPkg);
-              info(`⚡ 同步成功！已載入電腦端 ${pcPkg.cards.length} 張卡片與所有抽屜！`);
-              setP2pSending(false);
-              setP2pModalOpen(false);
-              setPairingCodeInput("");
-              onRefresh();
-            } catch (e) {
-              setP2pSending(false);
-              report(e, "寫入 iPad 本機資料庫失敗");
-            }
-          },
-          (err) => {
-            setP2pSending(false);
-            report(err, "P2P 連線失敗，請確認電腦端是否已開啟配對接收且連線碼正確");
-          },
-        );
-      })
-      .catch((e) => {
+    pullP2PPackageFromPc(
+      code,
+      async (pcPkg) => {
+        try {
+          await overwriteLocal(pcPkg);
+          info(`☁️ 雲端同步成功！已載入電腦端 ${pcPkg.cards.length} 張卡片與所有抽屜！`);
+          setP2pSending(false);
+          setP2pModalOpen(false);
+          onRefresh();
+        } catch (e) {
+          setP2pSending(false);
+          report(e, "寫入 iPad 本機資料庫失敗");
+        }
+      },
+      (err) => {
         setP2pSending(false);
-        report(e, "載入 P2P 模組失敗");
-      });
+        report(err, "Google Drive 雲端下載失敗");
+      },
+    );
   };
 
   return (
@@ -269,10 +260,13 @@ export function IPadCardView({
             type="button"
             className="touch-btn primary"
             style={{ background: "#10b981", borderColor: "#10b981" }}
-            onClick={() => setP2pModalOpen(true)}
-            title="輸入電腦連線碼，免傳檔案直接對接傳送"
+            onClick={() => {
+              setPairingCodeInput(getSavedCloudCredential());
+              setP2pModalOpen(true);
+            }}
+            title="透過 Google Drive 雲端一鍵同步電腦與 iPad 資料"
           >
-            ⚡ P2P 傳送到電腦
+            ☁️ 雲端同步
           </button>
           <button type="button" className="touch-btn" onClick={handleExport} disabled={exporting}>
             {exporting ? "匯出中…" : "📤 匯出變更"}
@@ -342,21 +336,18 @@ export function IPadCardView({
       </div>
 
       {p2pModalOpen && (
-        <div className="modal" role="dialog" aria-label="P2P 直連配對傳送">
-          <div className="modal-card" style={{ maxWidth: 360 }}>
-            <h4>⚡ P2P 直連傳送到電腦</h4>
+        <div className="modal" role="dialog" aria-label="Google Drive 雲端同步">
+          <div className="modal-card" style={{ maxWidth: 420 }}>
+            <h4>☁️ Google Drive 雲端同步</h4>
             <p className="muted" style={{ margin: 0, fontSize: 13 }}>
-              請在電腦版點擊「同步／備份」➔「開啟 P2P 配對接收」，並在此輸入電腦畫面上顯示的 6 位數連線碼：
+              首次使用請貼上 Google Drive 金鑰（格式：<code>CLIENT_ID|CLIENT_SECRET|REFRESH_TOKEN</code>），系統會自動記憶於本機，之後直接點擊下方按鈕即可一鍵同步：
             </p>
             <input
-              type="text"
-              pattern="[0-9]*"
-              maxLength={6}
+              type="password"
               value={pairingCodeInput}
-              onChange={(e) => setPairingCodeInput(e.target.value.replace(/\D/g, ""))}
-              placeholder="例如：839201"
-              autoFocus
-              style={{ fontSize: 22, textAlign: "center", letterSpacing: 4, padding: "8px 0" }}
+              onChange={(e) => setPairingCodeInput(e.target.value)}
+              placeholder="貼上 Google Drive 雲端金鑰"
+              style={{ fontSize: 14, padding: "8px 10px", width: "100%", boxSizing: "border-box" }}
             />
             <div className="modal-actions" style={{ flexDirection: "column", gap: 8, marginTop: 12 }}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
@@ -365,20 +356,20 @@ export function IPadCardView({
                   className="primary"
                   style={{ background: "#2563eb", borderColor: "#2563eb", padding: "10px 6px" }}
                   onClick={startP2PPull}
-                  disabled={p2pSending || pairingCodeInput.length !== 6}
-                  title="從電腦下載所有卡片與抽屜，完全覆蓋 iPad"
+                  disabled={p2pSending || !pairingCodeInput.trim()}
+                  title="從 Google Drive 下載電腦端備份，完全覆蓋 iPad"
                 >
-                  {p2pSending ? "傳輸中…" : "📥 覆蓋同步到 iPad"}
+                  {p2pSending ? "雲端傳輸中…" : "📥 覆蓋同步到 iPad"}
                 </button>
                 <button
                   type="button"
                   className="primary"
                   style={{ background: "#10b981", borderColor: "#10b981", padding: "10px 6px" }}
                   onClick={() => void startP2PSend()}
-                  disabled={p2pSending || pairingCodeInput.length !== 6}
-                  title="將 iPad 新寫的卡片發給電腦合併"
+                  disabled={p2pSending || !pairingCodeInput.trim()}
+                  title="將 iPad 新寫的卡片上傳至 Google Drive 供電腦合併"
                 >
-                  {p2pSending ? "傳輸中…" : "📤 發送變更給電腦"}
+                  {p2pSending ? "雲端傳輸中…" : "📤 發送變更給電腦"}
                 </button>
               </div>
               <button type="button" onClick={() => setP2pModalOpen(false)} disabled={p2pSending}>

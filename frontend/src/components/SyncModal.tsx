@@ -1,9 +1,14 @@
 // @depends-on ../api.ts (api)
-// @depends-on ../lib/p2p.ts (generatePairingCode, startP2PReceiver)
+// @depends-on ../lib/p2p.ts (getSavedCloudCredential, pullIpadPackageFromCloud, saveCloudCredential, uploadPcBackupToCloud)
 // @depends-on ../types.ts (SyncPackage, SyncDiffReport, SyncCardDiff)
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { api } from "../api";
-import { generatePairingCode, startP2PReceiver } from "../lib/p2p";
+import {
+  getSavedCloudCredential,
+  pullIpadPackageFromCloud,
+  saveCloudCredential,
+  uploadPcBackupToCloud,
+} from "../lib/p2p";
 import type { SyncCardDiff, SyncDiffReport, SyncPackage } from "../types";
 
 interface Props {
@@ -18,64 +23,60 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
   const [diff, setDiff] = useState<SyncDiffReport | null>(null);
   const [comparing, setComparing] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudCredential, setCloudCredential] = useState(() => getSavedCloudCredential());
+  const [showKeyInput, setShowKeyInput] = useState(() => !getSavedCloudCredential());
   const [selectedNewCardIds, setSelectedNewCardIds] = useState<Set<string>>(new Set());
   const [selectedUpdateCardIds, setSelectedUpdateCardIds] = useState<Set<string>>(new Set());
   const [viewingDiffCard, setViewingDiffCard] = useState<SyncCardDiff | null>(null);
-  const [p2pListening, setP2pListening] = useState(false);
-  const [pairingCode, setPairingCode] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const stopReceiverRef = useRef<(() => void) | null>(null);
 
-  // 關閉視窗時自動斷開 P2P 監聽
-  useEffect(() => {
-    return () => {
-      stopReceiverRef.current?.();
-    };
-  }, []);
-
-  const handleStartP2P = () => {
-    if (p2pListening) {
-      stopReceiverRef.current?.();
-      setP2pListening(false);
-      setPairingCode(null);
+  const handleUploadPcBackupToCloud = async () => {
+    const cred = cloudCredential.trim();
+    if (!cred) {
+      setShowKeyInput(true);
+      report(new Error("請先填入 Google Drive 雲端金鑰"), "雲端備份");
       return;
     }
+    setCloudBusy(true);
+    try {
+      saveCloudCredential(cred);
+      const pcData = await api.syncExport();
+      await uploadPcBackupToCloud(pcData, cred);
+      info(`☁️ 已成功將電腦端完整備份（${pcData.cards.length} 張卡片）更新至 Google Drive！iPad 現在可隨時拉取同步。`);
+    } catch (err) {
+      report(err, "上傳電腦備份至 Google Drive 失敗");
+    } finally {
+      setCloudBusy(false);
+    }
+  };
 
-    const code = generatePairingCode();
-    setPairingCode(code);
-    setP2pListening(true);
-    info(`已開啟 P2P 配對接收，請在 iPad 輸入連線碼：${code}`);
-
-    const stop = startP2PReceiver(
-      code,
-      async (receivedPkg) => {
-        info("⚡ 成功接收到來自 iPad 的同步封包！正在比對資料庫差異…");
-        setComparing(true);
-        setPkg(receivedPkg);
-        try {
-          const res: SyncDiffReport = await api.syncDiff(receivedPkg);
-          setDiff(res);
-          setSelectedNewCardIds(new Set(res.cards_new.map((c: { id: string }) => c.id)));
-          setSelectedUpdateCardIds(new Set(res.cards_updated.map((c: SyncCardDiff) => c.id)));
-          info(`已載入差異：${res.cards_new.length} 張新增、${res.cards_updated.length} 張待更新`);
-        } catch (err) {
-          report(err, "比對同步封包失敗");
-        } finally {
-          setComparing(false);
-        }
-      },
-      async () => {
-        info("⚡ iPad 正在請求電腦端完整備份，正在發送…");
-        return await api.syncExport();
-      },
-      (err) => {
-        report(err, "P2P 監聽發生錯誤");
-        setP2pListening(false);
-        setPairingCode(null);
-      },
-    );
-
-    stopReceiverRef.current = stop;
+  const handlePullIpadFromCloud = async () => {
+    const cred = cloudCredential.trim();
+    if (!cred) {
+      setShowKeyInput(true);
+      report(new Error("請先填入 Google Drive 雲端金鑰"), "雲端同步");
+      return;
+    }
+    setCloudBusy(true);
+    setComparing(true);
+    setDiff(null);
+    setViewingDiffCard(null);
+    try {
+      saveCloudCredential(cred);
+      const receivedPkg = await pullIpadPackageFromCloud(cred);
+      setPkg(receivedPkg);
+      const res: SyncDiffReport = await api.syncDiff(receivedPkg);
+      setDiff(res);
+      setSelectedNewCardIds(new Set(res.cards_new.map((c: { id: string }) => c.id)));
+      setSelectedUpdateCardIds(new Set(res.cards_updated.map((c: SyncCardDiff) => c.id)));
+      info(`☁️ 已從 Google Drive 載入 iPad 變更：${res.cards_new.length} 張新增、${res.cards_updated.length} 張待更新`);
+    } catch (err) {
+      report(err, "從 Google Drive 拉取 iPad 變更失敗");
+    } finally {
+      setCloudBusy(false);
+      setComparing(false);
+    }
   };
 
   const exportBackup = async () => {
@@ -221,18 +222,46 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
           />
           <button
             type="button"
-            className={`primary${p2pListening ? " on" : ""}`}
-            style={{ marginLeft: "auto", background: p2pListening ? "#d97706" : "#10b981", borderColor: "transparent" }}
-            onClick={handleStartP2P}
+            className="primary"
+            style={{ marginLeft: "auto", background: "#2563eb", borderColor: "transparent" }}
+            onClick={() => void handleUploadPcBackupToCloud()}
+            disabled={cloudBusy}
+            title="將電腦完整資料庫上傳至 Google Drive，供 iPad 隨時下載覆蓋"
           >
-            {p2pListening ? `連線碼 [ ${pairingCode} ]（點擊關閉）` : "⚡ 開啟 P2P 配對接收"}
+            {cloudBusy ? "雲端處理中…" : "☁️ 一鍵更新雲端備份 (供 iPad 下載)"}
+          </button>
+          <button
+            type="button"
+            className="primary"
+            style={{ background: "#10b981", borderColor: "transparent" }}
+            onClick={() => void handlePullIpadFromCloud()}
+            disabled={cloudBusy}
+            title="從 Google Drive 讀取 iPad 發送的變更並進行差異比對"
+          >
+            {cloudBusy ? "雲端處理中…" : "☁️ 拉取 iPad 雲端變更"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowKeyInput((v) => !v)}
+            title="設定或檢視 Google Drive 金鑰"
+          >
+            🔑 金鑰設定
           </button>
         </div>
 
-        {p2pListening && !diff && (
-          <div className="p2p-banner">
-            <span>📡 等待 iPad 連線中… 請在 iPad 點「⚡ P2P 傳送到電腦」並輸入連線碼：</span>
-            <span className="p2p-code-display">{pairingCode}</span>
+        {showKeyInput && (
+          <div className="p2p-banner" style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13 }}>Google Drive 金鑰（<code>CLIENT_ID|CLIENT_SECRET|REFRESH_TOKEN</code>）：</span>
+            <input
+              type="password"
+              value={cloudCredential}
+              onChange={(e) => {
+                setCloudCredential(e.target.value);
+                saveCloudCredential(e.target.value);
+              }}
+              placeholder="貼上金鑰（或在 .env 設定 VITE_GDRIVE_CREDENTIAL）"
+              style={{ flex: 1, minWidth: 240, padding: "6px 8px" }}
+            />
           </div>
         )}
 
