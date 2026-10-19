@@ -298,11 +298,7 @@ export default function App() {
                     </button>
                   </div>
                 )}
-                {centerEditing && selected && (
-                  <button onClick={closeCenterEditor} aria-label="返回白板" title="返回（Esc）">
-                    ← 返回{viewMode === "graph" ? "概念圖譜" : "白板"}
-                  </button>
-                )}
+                {/* 返回按鈕只保留在中央編輯視窗的標題列 */}
                 {!centerEditing && viewMode === "board" && (
                   <button
                     className="icon-btn"
@@ -362,6 +358,7 @@ export default function App() {
                 boardId={boardId}
                 selectedCardId={selected}
                 active={!centerEditing && viewMode === "board"}
+                isEditing={centerEditing}
                 onSelectCard={selectCard}
                 onOpenCard={openCardInCenter}
                 onLinksChanged={bump}
@@ -405,7 +402,9 @@ export default function App() {
           {centerEditing && selected && (
             <div className="center-editor" role="region" aria-label="中央卡片編輯視窗">
               <div className="center-editor-head">
-                <button onClick={closeCenterEditor}>← 返回{isStandalone ? "卡片冊" : "白板"}</button>
+                <button onClick={closeCenterEditor} title="返回（Esc）">
+                  ← 返回{isStandalone ? "卡片冊" : viewMode === "graph" ? "概念圖譜" : "白板"}
+                </button>
                 <span className="muted">卡片編輯模式（按 Esc 返回{isStandalone ? "卡片冊" : "白板"}）</span>
               </div>
               <div className="center-editor-body">

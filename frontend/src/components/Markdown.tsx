@@ -1,13 +1,15 @@
 // @depends-on ../api.ts (api, ApiError)
 // @depends-on ../lib/markdown.ts (cardIdFromHref)
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import { createPortal } from "react-dom";
 import { api, ApiError } from "../api";
 import { cardIdFromHref } from "../lib/markdown";
 import { mediaIdFromSrc, mediaUrl, urlTransform } from "../lib/media";
 import type { MediaInfo } from "../types";
 
 const infoCache = new Map<string, Promise<MediaInfo>>();
+const mediaWidthCache = new Map<string, string>();
 function getInfo(id: string): Promise<MediaInfo> {
   let p = infoCache.get(id);
   if (!p) {
@@ -20,8 +22,34 @@ function getInfo(id: string): Promise<MediaInfo> {
 
 type State = { status: "loading" } | { status: "ok"; info: MediaInfo } | { status: "missing" };
 
-export function MediaEmbed({ id }: { id: string }) {
+export function MediaEmbed({ id, explicitWidth }: { id: string; explicitWidth?: string }) {
   const [state, setState] = useState<State>({ status: "loading" });
+  const [userWidth, setUserWidth] = useState<string | null>(
+    () => explicitWidth || mediaWidthCache.get(id) || null,
+  );
+  const [zoomed, setZoomed] = useState(false);
+
+  useEffect(() => {
+    if (!zoomed) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setZoomed(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zoomed]);
+
+  useEffect(() => {
+    if (explicitWidth) {
+      mediaWidthCache.set(id, explicitWidth);
+      setUserWidth(explicitWidth);
+    }
+  }, [explicitWidth, id]);
+
+  const changeWidth = (w: string) => {
+    mediaWidthCache.set(id, w);
+    setUserWidth(w);
+  };
+
   useEffect(() => {
     let alive = true;
     setState({ status: "loading" });
@@ -35,7 +63,6 @@ export function MediaEmbed({ id }: { id: string }) {
   }, [id]);
 
   if (state.status === "loading") return <span className="media-loading">載入中…</span>;
-  // 遺失一律顯示明確標示，不能是空白
   if (state.status === "missing")
     return (
       <span className="media-missing" role="img" aria-label="圖片遺失">
@@ -47,8 +74,134 @@ export function MediaEmbed({ id }: { id: string }) {
     setState({ status: "missing" });
   };
   if (state.info.kind === "video")
-    return <video className="nodrag nowheel" src={mediaUrl(id)} controls preload="metadata" onError={onError} />;
-  return <img src={mediaUrl(id)} alt="" loading="lazy" onError={onError} />;
+    return (
+      <video
+        className="nodrag nowheel"
+        style={{ width: userWidth ?? "100%", maxWidth: "100%", borderRadius: 4 }}
+        src={mediaUrl(id)}
+        controls
+        preload="metadata"
+        onError={onError}
+      />
+    );
+
+  return (
+    <span
+      className="media-embed-wrap"
+      style={
+        userWidth
+          ? { display: "block", width: userWidth, maxWidth: "100%" }
+          : { display: "inline-block", maxWidth: "100%" }
+      }
+    >
+      <img
+        ref={(el) => {
+          if (!el) return;
+          el.style.setProperty("width", "100%", "important");
+          el.style.setProperty("max-width", "100%", "important");
+          el.style.setProperty("max-height", "none", "important");
+          el.style.setProperty("height", "auto", "important");
+          el.style.setProperty("object-fit", "unset", "important");
+          el.style.setProperty("margin", "0", "important");
+        }}
+        src={mediaUrl(id)}
+        alt=""
+        loading="lazy"
+        onError={onError}
+        style={{
+          width: "100%",
+          maxWidth: "100%",
+          maxHeight: "none",
+          height: "auto",
+          objectFit: "unset",
+          margin: 0,
+          borderRadius: 4,
+          display: "block",
+        }}
+      />
+      <span
+        className="media-size-bar nodrag nowheel"
+        style={{ display: "inline-flex", gap: 4, marginTop: 3 }}
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          style={{
+            fontSize: 10,
+            padding: "1px 5px",
+            opacity: userWidth === "33%" ? 1 : 0.7,
+            fontWeight: userWidth === "33%" ? 600 : 400,
+            cursor: "pointer",
+          }}
+          onClick={() => changeWidth("33%")}
+        >
+          小
+        </button>
+        <button
+          type="button"
+          style={{
+            fontSize: 10,
+            padding: "1px 5px",
+            opacity: userWidth === "60%" ? 1 : 0.7,
+            fontWeight: userWidth === "60%" ? 600 : 400,
+            cursor: "pointer",
+          }}
+          onClick={() => changeWidth("60%")}
+        >
+          中
+        </button>
+        <button
+          type="button"
+          style={{
+            fontSize: 10,
+            padding: "1px 5px",
+            opacity: userWidth === "100%" ? 1 : 0.7,
+            fontWeight: userWidth === "100%" ? 600 : 400,
+            cursor: "pointer",
+          }}
+          onClick={() => changeWidth("100%")}
+        >
+          滿版
+        </button>
+        <button
+          type="button"
+          style={{ fontSize: 10, padding: "1px 5px", opacity: 0.7, cursor: "pointer" }}
+          onClick={() => setZoomed(true)}
+        >
+          🔍 放大
+        </button>
+      </span>
+      {zoomed &&
+        createPortal(
+          <div
+            className="nodrag nowheel"
+            onClick={(e) => {
+              e.stopPropagation();
+              setZoomed(false);
+            }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 10000,
+              background: "rgba(0, 0, 0, 0.88)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "zoom-out",
+            }}
+          >
+            <img
+              src={mediaUrl(id)}
+              alt=""
+              style={{ width: "96vw", height: "96vh", objectFit: "contain" }}
+            />
+          </div>,
+          document.body,
+        )}
+    </span>
+  );
 }
 
 // ---- 卡片引用（@ 引用）狀態快取、開啟卡片通道與改名／刪除即時通知 ----
@@ -184,6 +337,122 @@ function markdownUrlTransform(url: string, key?: string, node?: unknown): string
   return (urlTransform as (u: string, k?: string, n?: unknown) => string)(url, key, node);
 }
 
+function parseAltWidth(alt: unknown): string | undefined {
+  if (typeof alt !== "string") return undefined;
+  const pipeIdx = alt.lastIndexOf("|");
+  if (pipeIdx < 0) return undefined;
+  const raw = alt.slice(pipeIdx + 1).trim();
+  if (!raw) return undefined;
+  const num = Number(raw);
+  if (Number.isFinite(num) && num > 0) {
+    return String(Math.round(num)) + "px";
+  }
+  if (raw.endsWith("px") || raw.endsWith("%")) {
+    const unitLen = raw.endsWith("px") ? -2 : -1;
+    const prefix = raw.slice(0, unitLen).trim();
+    const unitNum = Number(prefix);
+    if (Number.isFinite(unitNum) && unitNum > 0) {
+      return raw;
+    }
+  }
+  return undefined;
+}
+
+function CodeBlockView({ info, codeText }: { info: string; codeText: string }) {
+  const lines = codeText.split("\n");
+  const lineCount = lines.length;
+  const [collapsed, setCollapsed] = useState(lineCount > 25);
+  const [copied, setCopied] = useState(false);
+
+  let lang = info;
+  let label = "";
+  const colonIdx = info.indexOf(":");
+  if (colonIdx >= 0) {
+    lang = info.slice(0, colonIdx).trim();
+    label = info.slice(colonIdx + 1).trim();
+  }
+
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(codeText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* 忽略剪貼簿權限拒絕 */
+    }
+  };
+
+  return (
+    <div
+      className="md-code-block nodrag"
+      style={{
+        border: "1px solid var(--line, #334155)",
+        borderRadius: 6,
+        margin: "8px 0",
+        overflow: "hidden",
+        background: "rgba(15, 23, 42, 0.55)",
+      }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "4px 8px",
+          fontSize: 12,
+          background: "rgba(30, 41, 59, 0.85)",
+          borderBottom: collapsed ? "none" : "1px solid var(--line, #334155)",
+          gap: 8,
+        }}
+      >
+        <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {label ? "📄 " + label : "💻 代碼區塊"}
+          <span className="muted" style={{ fontWeight: 400, marginLeft: 6 }}>
+            ({lang ? lang + " · " : ""}
+            {String(lineCount)} 行)
+          </span>
+        </span>
+        <span style={{ display: "inline-flex", gap: 4, flexShrink: 0 }}>
+          <button
+            type="button"
+            style={{ fontSize: 11, padding: "1px 6px", cursor: "pointer" }}
+            onClick={(e) => {
+              e.stopPropagation();
+              setCollapsed((c) => !c);
+            }}
+          >
+            {collapsed ? "▸ 展開 (" + String(lineCount) + "行)" : "▾ 摺疊"}
+          </button>
+          <button
+            type="button"
+            style={{ fontSize: 11, padding: "1px 6px", cursor: "pointer" }}
+            onClick={(e) => void handleCopy(e)}
+          >
+            {copied ? "✓ 已複製" : "📋 複製"}
+          </button>
+        </span>
+      </div>
+      {!collapsed && (
+        <pre
+          className="nowheel"
+          style={{
+            margin: 0,
+            padding: "8px 10px",
+            maxHeight: 340,
+            overflow: "auto",
+            fontSize: 12,
+            lineHeight: 1.45,
+          }}
+        >
+          <code>{codeText}</code>
+        </pre>
+      )}
+    </div>
+  );
+}
+
 export function Markdown({
   source,
   onOpenCard,
@@ -191,41 +460,56 @@ export function Markdown({
   source: string;
   onOpenCard?: (cardId: string) => void;
 }) {
+  const components = useMemo<React.ComponentProps<typeof ReactMarkdown>["components"]>(
+    () => ({
+      pre: ({ children }) => <>{children}</>,
+      code: ({ className, children }) => {
+        const rawText = String(children ?? "");
+        const cleanText = rawText.endsWith("\n") ? rawText.slice(0, -1) : rawText;
+        const cls = typeof className === "string" ? className : "";
+        const isBlock = cls.startsWith("language-") || cleanText.includes("\n");
+        if (!isBlock) {
+          return <code className={className}>{children}</code>;
+        }
+        const info = cls.startsWith("language-") ? cls.slice("language-".length) : "";
+        return <CodeBlockView codeText={cleanText} info={info} />;
+      },
+      img: ({ src, alt }) => {
+        const id = mediaIdFromSrc(typeof src === "string" ? src : undefined);
+        const explicitWidth = parseAltWidth(alt);
+        if (id) return <MediaEmbed explicitWidth={explicitWidth} id={id} />;
+        if (typeof src === "string" && src) {
+          // 外部網址的圖片不載入（避免對外連線），顯示成一般連結
+          return (
+            <a href={src} target="_blank" rel="noreferrer noopener">
+              [外部圖片：{alt || src}]
+            </a>
+          );
+        }
+        return <span className="media-missing">（無效的圖片連結）</span>;
+      },
+      a: ({ href, children }) => {
+        const cardId = cardIdFromHref(typeof href === "string" ? href : undefined);
+        if (cardId) {
+          return (
+            <CardRef id={cardId} onOpenCard={onOpenCard}>
+              {children}
+            </CardRef>
+          );
+        }
+        return (
+          <a href={href} target="_blank" rel="noreferrer noopener">
+            {children}
+          </a>
+        );
+      },
+    }),
+    [onOpenCard],
+  );
+
   return (
     <div className="md">
-      <ReactMarkdown
-        urlTransform={markdownUrlTransform}
-        components={{
-          img: ({ src, alt }) => {
-            const id = mediaIdFromSrc(typeof src === "string" ? src : undefined);
-            if (id) return <MediaEmbed id={id} />;
-            if (typeof src === "string" && src) {
-              // 外部網址的圖片不載入（避免對外連線），顯示成一般連結
-              return (
-                <a href={src} target="_blank" rel="noreferrer noopener">
-                  [外部圖片：{alt || src}]
-                </a>
-              );
-            }
-            return <span className="media-missing">（無效的圖片連結）</span>;
-          },
-          a: ({ href, children }) => {
-            const cardId = cardIdFromHref(typeof href === "string" ? href : undefined);
-            if (cardId) {
-              return (
-                <CardRef id={cardId} onOpenCard={onOpenCard}>
-                  {children}
-                </CardRef>
-              );
-            }
-            return (
-              <a href={href} target="_blank" rel="noreferrer noopener">
-                {children}
-              </a>
-            );
-          },
-        }}
-      >
+      <ReactMarkdown urlTransform={markdownUrlTransform} components={components}>
         {source}
       </ReactMarkdown>
     </div>

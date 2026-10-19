@@ -135,6 +135,7 @@ interface Props {
   boardId: string | null;
   selectedCardId: string | null;
   active?: boolean;
+  isEditing?: boolean;
   onSelectCard(id: string | null): void;
   onOpenCard?(id: string): void;
   onLinksChanged(): void;
@@ -1127,7 +1128,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
 
   return (
     <div className={`board${pickingCenterDrag ? " picking-center" : ""}`} ref={wrapRef}>
-      {boardId && (
+      {boardId && !props.isEditing && (
         <div className="board-snap-bar">
           <label className="snap-toggle" title="勾選時：拖曳卡片靠近其他卡片會磁吸對齊（顯示提示線）並吸到固定間距 20px；按住 Shift 拖曳則以 20px 為單位移動；放開時若重疊則自動移到最近空位">
             <input
@@ -1348,6 +1349,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         onNodeClick={(e, node) => {
+          if ((e.target as HTMLElement).closest(".media-size-bar")) return;
           if (node.type === "card") {
             setLastClickedCardId(node.id);
             if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
@@ -1358,7 +1360,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         onNodeDragStart={onNodeDragStart}
         onNodeDrag={onNodeDrag}
         onNodeDragStop={onNodeDragStop}
-        onNodeDoubleClick={(_e, node) => {
+        onNodeDoubleClick={(e, node) => {
+          if ((e.target as HTMLElement).closest(".media-size-bar")) return;
           if (node.type === "card") onOpenCard?.(node.id);
         }}
         onEdgeClick={(_e, edge) => {

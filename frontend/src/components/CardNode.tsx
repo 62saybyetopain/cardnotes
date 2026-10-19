@@ -29,7 +29,18 @@ export function CardNode({ id, data, selected }: NodeProps<CardFlowNode>) {
           onResizeEnd={(_e, p) => data.onResizeEnd(id, p)}
         />
         <Handle type="target" position={Position.Left} />
-        <div className="card-title">{data.title || "（無標題）"}</div>
+        <div
+          className="card-title"
+          style={{
+            fontSize: "1.15rem",
+            fontWeight: 700,
+            lineHeight: 1.35,
+            marginBottom: "0.5rem",
+            wordBreak: "break-word",
+          }}
+        >
+          {data.title || "（無標題）"}
+        </div>
         <div className="card-body">
           <Markdown source={data.body} />
         </div>
