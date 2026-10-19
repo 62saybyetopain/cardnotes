@@ -99,6 +99,7 @@ export interface StorageDriver {
   syncDiff(pkg: SyncPackage): Promise<SyncDiffReport>;
   syncApply(payload: SyncApplyRequest): Promise<SyncApplyResult>;
   importPackageOverwrite?(pkg: SyncPackage): Promise<{ imported: number }>;
+  findLocalOnlyCards?(pkg: SyncPackage): Promise<{ id: string; title: string }[]>;
 
   // 媒體與全域圖譜（本地端提供相容實作）
   uploadMedia?(file: File): Promise<MediaInfo>;

@@ -1,9 +1,24 @@
 // @depends-on ../types.ts (SyncPackage)
+// @depends-on ./media.ts (extractMediaIds)
 import type { SyncPackage } from "../types";
+import { extractMediaIds } from "./media";
+
+export interface SyncMediaEntry {
+  id: string;
+  kind: "image" | "video";
+  mime: string;
+  byte_size: number;
+}
+
+export type SyncPackageWithMedia = SyncPackage & {
+  media?: SyncMediaEntry[];
+};
 
 const STORAGE_KEY = "cardboard_gdrive_credential";
 const PC_BACKUP_FILENAME = "cardboard-pc-backup.json";
+
 const IPAD_SYNC_FILENAME = "cardboard-ipad-sync.json";
+const MEDIA_FILE_PREFIX = "cardboard-media-";
 
 let cachedAccessToken: string | null = null;
 let cachedTokenExpiry = 0;
@@ -124,7 +139,11 @@ async function findDriveFileId(accessToken: string, fileName: string): Promise<s
   return data.files?.[0]?.id ?? null;
 }
 
-async function uploadJsonToDrive(accessToken: string, fileName: string, pkg: SyncPackage): Promise<void> {
+async function uploadJsonToDrive(
+  accessToken: string,
+  fileName: string,
+  pkg: SyncPackage | SyncPackageWithMedia,
+): Promise<void> {
   let fileId = await findDriveFileId(accessToken, fileName);
 
   if (!fileId) {
@@ -193,12 +212,108 @@ async function downloadJsonFromDrive(accessToken: string, fileName: string): Pro
   return pkg;
 }
 
+interface DriveMediaFile {
+  fileId: string;
+  size: number;
+  mime: string;
+}
+
+// 以圖片編號精確查詢雲端圖片檔（檔名 = 前綴 + 編號）
+async function findDriveMedia(accessToken: string, id: string): Promise<DriveMediaFile | null> {
+  const q = encodeURIComponent(`name = '${MEDIA_FILE_PREFIX}${id}' and trashed = false`);
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,size,mimeType)&orderBy=modifiedTime%20desc&pageSize=1`;
+  const res = await fetch(url, { method: "GET", headers: { Authorization: `Bearer ${accessToken}` } });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`查詢 Google Drive 圖片失敗 (${res.status})：${errText}`);
+  }
+  const data = (await res.json()) as { files?: Array<{ id: string; size?: string; mimeType?: string }> };
+  const f = data.files?.[0];
+  return f ? { fileId: f.id, size: Number(f.size ?? 0), mime: f.mimeType ?? "" } : null;
+}
+
+async function putDriveMedia(accessToken: string, id: string, blob: Blob, existingFileId: string | null): Promise<void> {
+  let fileId = existingFileId;
+  if (!fileId) {
+    const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
+      body: JSON.stringify({ name: MEDIA_FILE_PREFIX + id, mimeType: blob.type }),
+    });
+    if (!createRes.ok) {
+      const errText = await createRes.text().catch(() => "");
+      throw new Error(`在 Google Drive 建立圖片檔失敗 (${createRes.status})：${errText}`);
+    }
+    const created = (await createRes.json()) as { id?: string };
+    if (!created.id) throw new Error("Google Drive 建立圖片檔後未回傳檔案 ID");
+    fileId = created.id;
+  }
+  const res = await fetch(
+    `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=media`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": blob.type },
+      body: blob,
+    },
+  );
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`上傳圖片至 Google Drive 失敗 (${res.status})：${errText}`);
+  }
+}
+
+function collectMediaIds(pkg: SyncPackage): string[] {
+  const ids = new Set<string>();
+  for (const c of pkg.cards) {
+    for (const id of extractMediaIds(c.body)) ids.add(id);
+  }
+  return Array.from(ids);
+}
+
+const kindOfMime = (mime: string): "image" | "video" => (mime.startsWith("video/") ? "video" : "image");
+
+export interface MediaBackupReport {
+  total: number;
+  uploaded: number;
+  missing: string[];
+}
+
 /**
- * 電腦端：一鍵將電腦完整資料庫備份上傳至 Google Drive (cardboard-pc-backup.json)
+ * 電腦端：一鍵將電腦完整資料庫備份上傳至 Google Drive (cardboard-pc-backup.json)。
+ * 卡片引用的圖片各存成一個雲端檔，已存在且有內容的不重傳；
+ * 封包 JSON 最後才上傳，任何一步失敗時雲端仍是上一版完整備份。
  */
-export async function uploadPcBackupToCloud(pkg: SyncPackage, credentialInput?: string): Promise<void> {
+export async function uploadPcBackupToCloud(
+  pkg: SyncPackage,
+  credentialInput: string | undefined,
+  loadBlob: (id: string) => Promise<Blob | null>,
+): Promise<MediaBackupReport> {
   const token = await resolveAccessToken(credentialInput);
-  await uploadJsonToDrive(token, PC_BACKUP_FILENAME, pkg);
+  const ids = collectMediaIds(pkg);
+  const media: SyncMediaEntry[] = [];
+  const missing: string[] = [];
+  let uploaded = 0;
+  for (const id of ids) {
+    const found = await findDriveMedia(token, id);
+    if (found && found.size > 0) {
+      media.push({ id, kind: kindOfMime(found.mime), mime: found.mime, byte_size: found.size });
+      continue;
+    }
+    const blob = await loadBlob(id);
+    if (!blob) {
+      missing.push(id);
+      continue;
+    }
+    if (!/^(image|video)\//.test(blob.type)) {
+      throw new Error(`電腦端圖片 ${id} 沒有有效的媒體類型（${blob.type || "空白"}），未上傳`);
+    }
+    await putDriveMedia(token, id, blob, found ? found.fileId : null);
+    media.push({ id, kind: kindOfMime(blob.type), mime: blob.type, byte_size: blob.size });
+    uploaded += 1;
+  }
+  // 封包最後才上傳：任何一步失敗時，雲端仍是上一版完整備份
+  await uploadJsonToDrive(token, PC_BACKUP_FILENAME, { ...pkg, media });
+  return { total: ids.length, uploaded, missing };
 }
 
 /**

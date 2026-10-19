@@ -20,13 +20,33 @@ interface Props {
   info(text: string): void;
 }
 
-async function overwriteLocal(pkg: SyncPackage): Promise<void> {
-  if (typeof storage.importPackageOverwrite !== "function") {
+// 回傳 false 代表使用者取消，iPad 資料完全沒有變動
+async function overwriteLocal(pkg: SyncPackage): Promise<boolean> {
+  if (typeof storage.importPackageOverwrite !== "function" || typeof storage.findLocalOnlyCards !== "function") {
     throw new Error(
       "目前儲存驅動不是 IndexedDB（dexie），無法覆蓋匯入。請以 ?storage=dexie 開啟，或確認 iPad 已切換為本機儲存。",
     );
   }
+  // 覆蓋會刪除所有「iPad 有、備份沒有」的卡片：先列出來讓使用者決定
+  const localOnly = await storage.findLocalOnlyCards(pkg);
+  if (localOnly.length > 0) {
+    const shown = localOnly
+      .slice(0, 5)
+      .map((c) => "・" + (c.title || "（無標題）"))
+      .join("\n");
+    const rest = localOnly.length > 5 ? "\n…另有 " + String(localOnly.length - 5) + " 張" : "";
+    const proceed = window.confirm(
+      "此 iPad 上有 " +
+        String(localOnly.length) +
+        " 張卡片不在要覆蓋的備份中：\n" +
+        shown +
+        rest +
+        "\n\n繼續覆蓋會永久刪除它們。\n按「確定」繼續覆蓋，按「取消」中止（iPad 資料不會變動）。",
+    );
+    if (!proceed) return false;
+  }
   await storage.importPackageOverwrite(pkg);
+  return true;
 }
 
 export function IPadCardView({
@@ -127,7 +147,11 @@ export function IPadCardView({
           { board_id: "sample-b1", card_id: "sample-c2", x: 420, y: 100 },
         ],
       };
-      await overwriteLocal(demoPkg);
+
+      if (!(await overwriteLocal(demoPkg))) {
+        info("已取消載入示範資料，iPad 上的資料沒有任何變動。");
+        return;
+      }
       info("已成功載入示範資料！已建立收納抽屜、概念標籤與關聯卡片。");
       onRefresh();
     } catch (e) {
@@ -169,7 +193,11 @@ export function IPadCardView({
       const text = await file.text();
       const pkg = JSON.parse(text) as SyncPackage;
       if (!pkg || !Array.isArray(pkg.cards)) throw new Error("無效的備份檔案格式");
-      await overwriteLocal(pkg);
+
+      if (!(await overwriteLocal(pkg))) {
+        info("已取消匯入，iPad 上的資料沒有任何變動。");
+        return;
+      }
       info(`已完成還原！已同步載入 ${pkg.cards.length} 張卡片。`);
       onRefresh();
     } catch (err) {
@@ -225,7 +253,12 @@ export function IPadCardView({
       code,
       async (pcPkg) => {
         try {
-          await overwriteLocal(pcPkg);
+
+          if (!(await overwriteLocal(pcPkg))) {
+            setP2pSending(false);
+            info("已取消同步，iPad 上的資料沒有任何變動。");
+            return;
+          }
           info(`☁️ 雲端同步成功！已載入電腦端 ${pcPkg.cards.length} 張卡片與所有抽屜！`);
           setP2pSending(false);
           setP2pModalOpen(false);

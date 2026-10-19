@@ -945,6 +945,13 @@ export class IndexedDbDriver implements StorageDriver {
     return { imported: (pkg.cards ?? []).length };
   }
 
+    // 覆蓋同步前檢查：iPad 有、備份沒有的卡片（覆蓋後會被刪除）
+  async findLocalOnlyCards(pkg: SyncPackage): Promise<{ id: string; title: string }[]> {
+    const keep = new Set(pkg.cards.map((c) => c.id));
+    const local = await db.cards.toArray();
+    return local.filter((c) => !keep.has(c.id)).map((c) => ({ id: c.id, title: c.title }));
+  }
+
   // 移動端比對與套用直接相容
   async syncDiff(pkg: SyncPackage): Promise<SyncDiffReport> {
     return {

@@ -406,7 +406,6 @@ export function Editor({ card, onSaved, onReload, onLinkAdded, onOpenCard, repor
           onClose={() => setCodePatchOpen(false)}
           onApplyPatch={(patch) => {
             applyEditPatch(patch);
-            setCodePatchOpen(false);
           }}
         />
       )}

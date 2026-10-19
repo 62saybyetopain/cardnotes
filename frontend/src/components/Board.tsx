@@ -228,6 +228,38 @@ function normalizeLink(l: Partial<BoardLink> & { source_id: string; target_id: s
   };
 }
 
+// 複製用：移除圖片／影片引用，代碼塊內的內容原樣保留
+function stripImagesKeepCode(body: string): string {
+  const FENCE = "`".repeat(3);
+  const out: string[] = [];
+  let fenceLen = 0;
+  let prevBlank = false;
+  for (const line of body.replace(/\r\n/g, "\n").split("\n")) {
+    const t = line.trim();
+    if (fenceLen > 0) {
+      out.push(line);
+      if (t.length >= fenceLen && t.replace(/`/g, "") === "") fenceLen = 0;
+      prevBlank = false;
+      continue;
+    }
+    if (t.startsWith(FENCE)) {
+      let n = 0;
+      while (t[n] === "`") n++;
+      fenceLen = n;
+      out.push(line);
+      prevBlank = false;
+      continue;
+    }
+    const stripped = line.replace(/!\[[^\]]*\]\([^)]*\)/g, "");
+    if (stripped !== line && stripped.trim() === "") continue; // 整行只有圖片：整行丟掉
+    const blank = stripped.trim() === "";
+    if (blank && prevBlank) continue; // 避免移除圖片後留下連續空行
+    prevBlank = blank;
+    out.push(stripped);
+  }
+  return out.join("\n").trim();
+}
+
 function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   const { boardId, selectedCardId, active = true, onSelectCard, onOpenCard, onLinksChanged, onCountChanged, report, info, innerRef } = props;
   const rf = useReactFlow();
@@ -927,6 +959,27 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     }
   }, [boardId, report, undoSnapshot]);
 
+  // ---- 複製已選卡片：標題＋內文（不含圖片，保留代碼）----
+  const copySelectedCards = useCallback(async () => {
+    const sel = nodesRef.current
+      .filter((n): n is CardFlowNode => n.type === "card" && !!n.selected)
+      .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x);
+    if (sel.length === 0) return;
+    const text = sel
+      .map((n) => {
+        const title = (n.data.title || "（無標題）").trim();
+        const body = stripImagesKeepCode(n.data.body || "");
+        return body ? "# " + title + "\n\n" + body : "# " + title;
+      })
+      .join("\n\n---\n\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      info("已複製 " + String(sel.length) + " 張卡片的標題與內容（不含圖片）");
+    } catch (e) {
+      report(e, "複製失敗");
+    }
+  }, [info, report]);
+
   // ---- 拖曳「🎯 中心圖標」到目標卡片放開以指定中心 ----
   const startCenterIconDrag = useCallback(
     (e: React.MouseEvent) => {
@@ -1144,6 +1197,15 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       {boardId && (selectedCards.length >= 2 || undoSnapshot) && (
         <div className="board-multi-toolbar" role="toolbar" aria-label="多選批次與自動排列工具列">
           <span className="multi-count">已選 {selectedCards.length} 張</span>
+
+          {selectedCards.length >= 2 && (
+            <button
+              onClick={() => void copySelectedCards()}
+              title="複製已選卡片的標題與內容（不含圖片，保留代碼）"
+            >
+              📋 複製內容
+            </button>
+          )}
 
           {selectedCards.length >= 2 && (
             <>

@@ -1,8 +1,10 @@
 // @depends-on ../api.ts (api)
+// @depends-on ../lib/media.ts (mediaUrl)
 // @depends-on ../lib/p2p.ts (getSavedCloudCredential, pullIpadPackageFromCloud, saveCloudCredential, uploadPcBackupToCloud)
 // @depends-on ../types.ts (SyncPackage, SyncDiffReport, SyncCardDiff)
 import { useRef, useState } from "react";
 import { api } from "../api";
+import { mediaUrl } from "../lib/media";
 import {
   getSavedCloudCredential,
   pullIpadPackageFromCloud,
@@ -41,9 +43,28 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
     setCloudBusy(true);
     try {
       saveCloudCredential(cred);
+
       const pcData = await api.syncExport();
-      await uploadPcBackupToCloud(pcData, cred);
-      info(`☁️ 已成功將電腦端完整備份（${pcData.cards.length} 張卡片）更新至 Google Drive！iPad 現在可隨時拉取同步。`);
+      const loadBlob = async (id: string): Promise<Blob | null> => {
+        const res = await fetch(mediaUrl(id));
+        if (res.status === 404) return null;
+        if (!res.ok) throw new Error(`讀取電腦端圖片 ${id} 失敗 (${res.status})`);
+        return await res.blob();
+      };
+      const rep = await uploadPcBackupToCloud(pcData, cred, loadBlob);
+      const imgNote = rep.total > 0 ? `、${rep.total} 張圖片（本次新上傳 ${rep.uploaded} 張）` : "";
+      info(`☁️ 已成功將電腦端完整備份（${pcData.cards.length} 張卡片${imgNote}）更新至 Google Drive！iPad 現在可隨時拉取同步。`);
+      if (rep.missing.length > 0) {
+        report(
+          new Error(
+            `有 ${rep.missing.length} 張圖片在電腦端找不到檔案，未上傳（編號開頭：${rep.missing
+              .slice(0, 3)
+              .map((m) => m.slice(0, 8))
+              .join("、")}）`,
+          ),
+          "圖片備份不完整",
+        );
+      }
     } catch (err) {
       report(err, "上傳電腦備份至 Google Drive 失敗");
     } finally {

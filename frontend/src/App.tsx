@@ -92,7 +92,11 @@ export default function App() {
     try {
       // 有篩選條件（抽屜／概念標籤／未歸檔／收件夾）時查全部卡片，否則才顯示目前白板的成員
       const hasFilter = !!(filter.tagId || filter.unclassified || filter.curationStatus);
-      if (boardId && !hasFilter) {
+      // boardId 來自閉包：覆蓋匯入／雲端拉取後舊白板已不存在，先對照目前清單；
+      // 失效時退回查全部卡片（refreshBoards 會校正 boardId 並重新觸發本函式）
+      const boardAlive =
+        !!boardId && !hasFilter && (await api.listBoards()).boards.some((b) => b.id === boardId);
+      if (boardId && boardAlive) {
         const b = await api.getBoard(boardId);
         const cardSummaries: CardSummary[] = b.cards.map((c) => ({
           id: c.card_id,
