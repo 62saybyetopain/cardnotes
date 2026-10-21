@@ -1,12 +1,21 @@
 // @depends-on ../api.ts (api)
 // @depends-on ../lib/storage/index.ts (getPreferredDriverType)
 // @depends-on ../lib/tree.ts (isSameAxisGroup)
-// @depends-on ../types.ts (CardDetail, CardRelation, RelationPattern, RelationsReport, Tag)
+// @depends-on ../types.ts (PATTERN_FAMILIES, PATTERN_FAMILY_GUIDES, PatternFamily, CardDetail, CardRelation, RelationPattern, RelationsReport, Tag)
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { getPreferredDriverType } from "../lib/storage";
 import { isSameAxisGroup } from "../lib/tree";
-import type { CardDetail, CardRelation, RelationPattern, RelationsReport, Tag } from "../types";
+import {
+  PATTERN_FAMILIES,
+  PATTERN_FAMILY_GUIDES,
+  type CardDetail,
+  type CardRelation,
+  type PatternFamily,
+  type RelationPattern,
+  type RelationsReport,
+  type Tag,
+} from "../types";
 
 interface Props {
   card: CardDetail;
@@ -22,6 +31,16 @@ function renderTemplatePreview(template: string, roleA: string, roleB: string, r
     .replace(/\{A\}/g, roleA.trim() || "【A】")
     .replace(/\{B\}/g, roleB.trim() || "【B】")
     .replace(/\{結果\}/g, result.trim() || "【結果】");
+}
+
+// 後端回傳不認得的家族值時一律當成未分類，不會讓句型從畫面上消失
+function normalizeFamily(f: string | null | undefined): PatternFamily | null {
+  return (PATTERN_FAMILIES as readonly string[]).includes(f ?? "") ? (f as PatternFamily) : null;
+}
+
+function familyName(f: string | null | undefined): string {
+  const fam = normalizeFamily(f);
+  return fam ? PATTERN_FAMILY_GUIDES[fam].name : "未分類";
 }
 
 export function RelationBox(props: Props) {
@@ -45,6 +64,8 @@ export function RelationBox(props: Props) {
   const [manageOpen, setManageOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
+  const [guideFamily, setGuideFamily] = useState<PatternFamily | "none" | null>(null);
 
   const syncFormFromRelation = useCallback((rel: CardRelation | null) => {
     setSavedRel(rel);
@@ -88,6 +109,27 @@ export function RelationBox(props: Props) {
     if (!selectedPattern) return false;
     return card.tags.some((t) => t.id === selectedPattern.bridge_tag_id);
   }, [card.tags, selectedPattern]);
+
+  const patternsByFamily = useMemo(() => {
+    const map = new Map<PatternFamily | "none", RelationPattern[]>();
+    for (const p of patterns) {
+      const key = normalizeFamily(p.family) ?? "none";
+      const list = map.get(key);
+      if (list) list.push(p);
+      else map.set(key, [p]);
+    }
+    return map;
+  }, [patterns]);
+
+  const closeGuide = () => {
+    setGuideOpen(false);
+    setGuideFamily(null);
+  };
+  const pickFromGuide = (id: string) => {
+    setPatternId(id);
+    closeGuide();
+  };
+  const pickFreeSentence = () => pickFromGuide("");
 
   if (isDexie) {
     return null;
@@ -216,13 +258,100 @@ export function RelationBox(props: Props) {
                 aria-label="選擇關係句型"
               >
                 <option value="">（套不進現有句型 → 填寫自由關係句進入候選池）</option>
-                {patterns.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label} → 橋樑詞：【{p.bridge_name}】（{p.template}）
-                  </option>
-                ))}
+                {PATTERN_FAMILIES.map((fam) => {
+                  const list = patternsByFamily.get(fam) ?? [];
+                  if (list.length === 0) return null;
+                  return (
+                    <optgroup key={fam} label={PATTERN_FAMILY_GUIDES[fam].name}>
+                      {list.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.label} → 【{p.bridge_name}】
+                        </option>
+                      ))}
+                    </optgroup>
+                  );
+                })}
+                {(patternsByFamily.get("none") ?? []).length > 0 && (
+                  <optgroup label="未分類">
+                    {(patternsByFamily.get("none") ?? []).map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.label} → 【{p.bridge_name}】
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </label>
+
+            <div>
+              <button type="button" onClick={() => (guideOpen ? closeGuide() : setGuideOpen(true))}>
+                {guideOpen ? "收合導引" : "🧭 不知道選哪個？"}
+              </button>
+            </div>
+
+            {guideOpen && (
+              <div className="resolve-box" role="region" aria-label="關係句型導引">
+                {guideFamily === null ? (
+                  <>
+                    <div className="resolve-title">
+                      選最接近的一類；兩類都像時，看上面「結果」欄在描述什麼：
+                    </div>
+                    <ul className="plain resolve-list">
+                      {PATTERN_FAMILIES.map((fam) => {
+                        const g = PATTERN_FAMILY_GUIDES[fam];
+                        const n = (patternsByFamily.get(fam) ?? []).length;
+                        return (
+                          <li key={fam} className="resolve-item">
+                            <button
+                              type="button"
+                              className="resolve-pick"
+                              disabled={n === 0}
+                              onClick={() => setGuideFamily(fam)}
+                            >
+                              <strong>{g.name}</strong>（{n}）
+                              <div className="resolve-def">{g.question}</div>
+                              <div className="muted" style={{ fontSize: 11 }}>{g.resultHint}</div>
+                            </button>
+                          </li>
+                        );
+                      })}
+                      {(patternsByFamily.get("none") ?? []).length > 0 && (
+                        <li className="resolve-item">
+                          <button type="button" className="resolve-pick" onClick={() => setGuideFamily("none")}>
+                            <strong>未分類</strong>（{(patternsByFamily.get("none") ?? []).length}）
+                            <div className="resolve-def">尚未指定家族的句型（含你自己新增的）</div>
+                          </button>
+                        </li>
+                      )}
+                    </ul>
+                    <div className="resolve-actions">
+                      <button type="button" onClick={pickFreeSentence}>都不像 → 寫自由關係句（進候選池）</button>
+                      <button type="button" onClick={closeGuide}>關閉</button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="resolve-title">
+                      {guideFamily === "none" ? "未分類" : PATTERN_FAMILY_GUIDES[guideFamily].name}：哪一句最像這張卡片？
+                    </div>
+                    <ul className="plain resolve-list">
+                      {(patternsByFamily.get(guideFamily) ?? []).map((p) => (
+                        <li key={p.id} className="resolve-item">
+                          <button type="button" className="resolve-pick" onClick={() => pickFromGuide(p.id)}>
+                            <strong>{p.note || p.template}</strong>
+                            <div className="resolve-def">{p.label} → 橋樑詞：【{p.bridge_name}】</div>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="resolve-actions">
+                      <button type="button" onClick={() => setGuideFamily(null)}>← 回上一步</button>
+                      <button type="button" onClick={pickFreeSentence}>都不像 → 寫自由關係句（進候選池）</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
 
             {selectedPattern ? (
               <div
@@ -350,22 +479,35 @@ function PatternManageModal(props: {
 
   const [label, setLabel] = useState("");
   const [template, setTemplate] = useState("{A} 失效，{B} 接手並出現 {結果}");
-  const [bridgeTagId, setBridgeTagId] = useState(conceptTags[0]?.id ?? "");
+  // 預設橋樑詞不能在這裡直接取 conceptTags[0]：標籤清單晚到時會永遠停在空值，所以每次由清單推導
+  const [bridgeTagId, setBridgeTagId] = useState("");
   const [note, setNote] = useState("");
+  const [family, setFamily] = useState<PatternFamily | "">("");
+
+  const effectiveBridgeTagId = conceptTags.some((t) => t.id === bridgeTagId)
+    ? bridgeTagId
+    : (conceptTags[0]?.id ?? "");
+  // 按鈕停用時要明確告訴使用者缺什麼，不能無聲無息
+  const missing: string[] = [];
+  if (!label.trim()) missing.push("句型名稱");
+  if (!template.trim()) missing.push("句型模板");
+  if (!effectiveBridgeTagId) missing.push("橋樑詞（請先建立概念標籤）");
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState("");
   const [editTemplate, setEditTemplate] = useState("");
   const [editNote, setEditNote] = useState("");
+  const [editFamily, setEditFamily] = useState<PatternFamily | "">("");
 
   const create = async () => {
-    if (!label.trim() || !template.trim() || !bridgeTagId) return;
+    if (missing.length > 0) return;
     try {
       await api.createRelationPattern({
         label: label.trim(),
         template: template.trim(),
-        bridge_tag_id: bridgeTagId,
+        bridge_tag_id: effectiveBridgeTagId,
         note: note.trim(),
+        ...(family ? { family } : {}),
       });
       setLabel("");
       setNote("");
@@ -382,6 +524,7 @@ function PatternManageModal(props: {
         label: editLabel.trim(),
         template: editTemplate.trim(),
         note: editNote.trim(),
+        ...(editFamily ? { family: editFamily } : {}),
       });
       setEditingId(null);
       info?.("已更新關係句型");
@@ -419,7 +562,7 @@ function PatternManageModal(props: {
             </label>
             <label className="field-row">
               <span className="muted">對應橋樑詞（概念標籤，建立後不可改指）：</span>
-              <select value={bridgeTagId} onChange={(e) => setBridgeTagId(e.target.value)}>
+              <select value={effectiveBridgeTagId} onChange={(e) => setBridgeTagId(e.target.value)}>
                 {conceptTags.length === 0 && <option value="">（請先建立概念標籤）</option>}
                 {conceptTags.map((t) => (
                   <option key={t.id} value={t.id}>
@@ -438,6 +581,17 @@ function PatternManageModal(props: {
             />
           </label>
           <label className="field-row">
+            <span className="muted">家族（導引與下拉分組用，可日後再改，但無法清回未分類）：</span>
+            <select value={family} onChange={(e) => setFamily(e.target.value as PatternFamily | "")}>
+              <option value="">未分類</option>
+              {PATTERN_FAMILIES.map((fam) => (
+                <option key={fam} value={fam}>
+                  {PATTERN_FAMILY_GUIDES[fam].name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field-row">
             <span className="muted">備註／判準說明（選填）：</span>
             <input
               value={note}
@@ -449,11 +603,16 @@ function PatternManageModal(props: {
             <button
               type="button"
               className="primary"
-              disabled={!label.trim() || !template.trim() || !bridgeTagId}
+              disabled={missing.length > 0}
               onClick={() => void create()}
             >
               ＋新增句型
             </button>
+            {missing.length > 0 && (
+              <span className="muted" style={{ fontSize: 11, marginLeft: 8 }}>
+                請先填寫：{missing.join("、")}
+              </span>
+            )}
           </div>
         </div>
 
@@ -465,7 +624,8 @@ function PatternManageModal(props: {
               <li key={p.id} style={{ flexDirection: "column", alignItems: "stretch", gap: 4 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
                   <div>
-                    <strong>{p.label}</strong> → <span className="chip concept">{p.bridge_name}</span>
+                    <strong>{p.label}</strong> → <span className="chip concept">{p.bridge_name}</span>{" "}
+                    <span className="facet-badge">{familyName(p.family)}</span>
                     <span className="muted" style={{ fontSize: 11, marginLeft: 6 }}>
                       （已用 {p.use_count} 張卡）
                     </span>
@@ -483,6 +643,7 @@ function PatternManageModal(props: {
                           setEditLabel(p.label);
                           setEditTemplate(p.template);
                           setEditNote(p.note);
+                          setEditFamily(normalizeFamily(p.family) ?? "");
                         }
                       }}
                     >
@@ -506,6 +667,20 @@ function PatternManageModal(props: {
                     <label className="field-row">
                       <span className="muted">句型模板：</span>
                       <input value={editTemplate} onChange={(e) => setEditTemplate(e.target.value)} />
+                    </label>
+                    <label className="field-row">
+                      <span className="muted">家族：</span>
+                      <select
+                        value={editFamily}
+                        onChange={(e) => setEditFamily(e.target.value as PatternFamily | "")}
+                      >
+                        <option value="">維持現狀（無法清回未分類）</option>
+                        {PATTERN_FAMILIES.map((fam) => (
+                          <option key={fam} value={fam}>
+                            {PATTERN_FAMILY_GUIDES[fam].name}
+                          </option>
+                        ))}
+                      </select>
                     </label>
                     <label className="field-row">
                       <span className="muted">備註：</span>
@@ -749,6 +924,9 @@ function RelationNotesModal(props: { onClose(): void }) {
             <li>3. <strong>init_db 版本號條件（既有問題）</strong>：db.py 的 version in (1, 3) 會把版本 3 送進 v1→v2 遷移，本次用 CREATE TABLE IF NOT EXISTS 避開，日後改表結構需先清理該條件。</li>
             <li>4. <strong>is_bridge 範圍</strong>：第一版只算「被句型引用」的標籤，像「奧卡姆剃刀」這類無關係句的原則詞暫不涵蓋。</li>
             <li>5. <strong>Dexie stub 慣例差異</strong>：本次新增的寫入方法在 Dexie 採 Fail Loud（丟出 ApiError），舊有的 cleanupMedia 等仍為靜默回空 stub，日後可統一清理。</li>
+            <li>6. <strong>家族欄位</strong>：relation_patterns.family 只能設定、不能清回「未分類」；資料庫沒有 CHECK 約束，合法值只由後端 PatternFamily 列舉把關。新增家族需同步修改 schemas.py、types.ts、種子腳本與導引說明。</li>
+            <li>7. <strong>橋樑詞下拉</strong>：句型庫的橋樑詞選單包含 type 軸標籤，但後端只接受 concept／free，選到會被拒絕（AXIS_MISMATCH）。</li>
+            <li>8. <strong>橋樑詞鎖定</strong>：句型建立後不能改指其他橋樑詞（刻意設計）。要換橋樑詞，同義詞用標籤合併，否則新建句型再逐張卡片換選。</li>
           </ul>
         </section>
 

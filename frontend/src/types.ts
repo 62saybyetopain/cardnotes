@@ -361,6 +361,51 @@ export interface SyncApplyResult {
   };
 }
 
+// 關係句型的導引分類。值必須與後端 schemas.py 的 PatternFamily、種子腳本一致
+export type PatternFamily = "failure" | "constraint" | "feedback" | "change" | "evidence";
+
+export const PATTERN_FAMILIES: readonly PatternFamily[] = [
+  "failure",
+  "constraint",
+  "feedback",
+  "change",
+  "evidence",
+];
+
+export interface PatternFamilyGuide {
+  name: string;
+  question: string;
+  resultHint: string;
+}
+
+export const PATTERN_FAMILY_GUIDES: Record<PatternFamily, PatternFamilyGuide> = {
+  failure: {
+    name: "失效與承載",
+    question: "有東西壞了、撐不住，或被拖累？",
+    resultHint: "結果欄在寫：壞掉、過載、擴散",
+  },
+  constraint: {
+    name: "卡住與限制",
+    question: "被什麼卡住、限制，或要在兩件事之間選一個？",
+    resultHint: "結果欄在寫：受限、付出代價",
+  },
+  feedback: {
+    name: "回饋與調節",
+    question: "這件事會回頭影響自己（拉回、放大、過頭、慢半拍）？",
+    resultHint: "結果欄在寫：反覆、穩定、失控",
+  },
+  change: {
+    name: "變化的形狀",
+    question: "變化和原因不成比例，或到某個點突然改變？",
+    resultHint: "結果欄在寫：突變、不成比例",
+  },
+  evidence: {
+    name: "判讀與證據",
+    question: "我看到的結果可能不是真的（不準、被誤導）？",
+    resultHint: "結果欄在寫：誤判、失準",
+  },
+};
+
 export interface RelationPattern {
   id: string;
   label: string;
@@ -368,6 +413,7 @@ export interface RelationPattern {
   bridge_tag_id: string;
   bridge_name: string;
   note: string;
+  family?: PatternFamily | null;
   use_count: number;
 }
 
@@ -376,12 +422,14 @@ export interface RelationPatternCreate {
   template: string;
   bridge_tag_id: string;
   note?: string;
+  family?: PatternFamily | null;
 }
 
 export interface RelationPatternPatch {
   label?: string;
   template?: string;
   note?: string;
+  family?: PatternFamily;
 }
 
 export interface CardRelation {
@@ -440,4 +488,3 @@ export interface RelationsReport {
   inconsistencies: RelationInconsistency[];
   candidates: RelationCandidate[];
 }
-
