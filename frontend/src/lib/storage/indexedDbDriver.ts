@@ -10,6 +10,8 @@ import type {
   BoardSummary,
   CardDetail,
   CardImpact,
+  CardRelation,
+  CardRelationPut,
   CardSummary,
   CardType,
   CleanupResult,
@@ -18,6 +20,10 @@ import type {
   DeletePreview,
   LinkStatus,
   MediaInfo,
+  RelationPattern,
+  RelationPatternCreate,
+  RelationPatternPatch,
+  RelationsReport,
   RelationType,
   SyncApplyRequest,
   SyncApplyResult,
@@ -1024,5 +1030,41 @@ export class IndexedDbDriver implements StorageDriver {
 
   async getConceptGraph(): Promise<ConceptGraphResponse> {
     return { nodes: [], edges: [], hidden_edges: [] };
+  }
+
+  // ---- 橋樑詞關係句型與評估（第一版僅電腦端 SQLite 支援，Dexie 讀取回空、寫入大聲報錯） ----
+  // @depends-on: ./driver.ts::StorageDriver
+  // assumption: 關係句型與紀錄不納入同步封包與 Dexie，此處攔截呼叫避免 api Proxy 落回 httpApi
+  // if broken: 若未來納入同步與 Dexie 表，需移除此 stub 並改讀寫 IndexedDB
+  async listRelationPatterns(): Promise<{ patterns: RelationPattern[] }> {
+    return { patterns: [] };
+  }
+
+  async createRelationPattern(_body: RelationPatternCreate): Promise<RelationPattern> {
+    throw new ApiError("UNSUPPORTED_ON_DEXIE", "此功能僅電腦端可用", 400);
+  }
+
+  async patchRelationPattern(_id: string, _patch: RelationPatternPatch): Promise<RelationPattern> {
+    throw new ApiError("UNSUPPORTED_ON_DEXIE", "此功能僅電腦端可用", 400);
+  }
+
+  async deleteRelationPattern(_id: string): Promise<{ deleted: boolean }> {
+    throw new ApiError("UNSUPPORTED_ON_DEXIE", "此功能僅電腦端可用", 400);
+  }
+
+  async getCardRelation(_card_id: string): Promise<{ relation: CardRelation | null }> {
+    return { relation: null };
+  }
+
+  async putCardRelation(_card_id: string, _body: CardRelationPut): Promise<{ relation: CardRelation }> {
+    throw new ApiError("UNSUPPORTED_ON_DEXIE", "此功能僅電腦端可用", 400);
+  }
+
+  async deleteCardRelation(_card_id: string): Promise<{ removed: boolean }> {
+    throw new ApiError("UNSUPPORTED_ON_DEXIE", "此功能僅電腦端可用", 400);
+  }
+
+  async getRelationsReport(): Promise<RelationsReport> {
+    return { total_cards: 0, bridges: [], inconsistencies: [], candidates: [] };
   }
 }

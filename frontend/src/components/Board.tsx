@@ -1,4 +1,5 @@
 // @depends-on ../lib/layout.ts (autoLayoutCards, placeCardsAvoidingCollisions, snapDimension, snapToGridValue, GRID_SIZE)
+// @depends-on ../App.tsx (selectedCardId 有兩條寫入路徑：onNodeClick→onOpenCard，與 onSelectionChange→onSelectCard；Board 以 nodes 的 selected 為準去重)
 import "@xyflow/react/dist/style.css";
 import {
   applyNodeChanges,
@@ -73,6 +74,27 @@ type AnyFlowNode = CardFlowNode | GroupFlowNode;
 type PositionChange = Extract<NodeChange<AnyFlowNode>, { type: "position" }>;
 
 const GROUP_COLORS = ["slate", "blue", "green", "amber", "purple"] as const;
+
+const CODE_EXT_MAP: Record<string, string> = {
+  py: "python",
+  ts: "typescript",
+  tsx: "tsx",
+  js: "javascript",
+  jsx: "jsx",
+  json: "json",
+  sql: "sql",
+  css: "css",
+  html: "html",
+  md: "markdown",
+  sh: "bash",
+  bash: "bash",
+  yaml: "yaml",
+  yml: "yaml",
+  toml: "toml",
+  rust: "rust",
+  rs: "rust",
+  go: "go",
+};
 
 function GroupNode({ data, selected }: NodeProps<GroupFlowNode>) {
   return (
@@ -293,6 +315,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
 
   const saved = useRef(new Map<string, Geometry>()); // 伺服器上確認過的位置，失敗時回復用
   const groupDragRef = useRef<{ groupId: string; startX: number; startY: number; memberIds: string[] } | null>(null);
+  const activeDragRef = useRef<{ id: string; type: string } | null>(null);
+  const lastSnappedPosRef = useRef(new Map<string, { x: number; y: number }>());
   const viewportReady = useRef(false);
   const dragStartRef = useRef(new Map<string, { x: number; y: number }>()); // 拖曳開始時各節點位置，Shift 以起點為基準取整
   const shiftRef = useRef(false);
@@ -540,16 +564,26 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     [boardId],
   );
 
-  // 右側面板選了別張卡片，白板上同步選取（若白板目前正在多選且已包含該卡，則不洗掉多選）
+  // 右側面板選了別張卡片，白板上同步選取（若白板目前正在多選且已包含該卡，則不洗掉多選；有選取卡片時一併清除分組框選取）
   useEffect(() => {
     setNodes((ns) => {
       const selectedCards = ns.filter((n) => n.type === "card" && n.selected);
       if (selectedCards.length > 1 && selectedCardId && selectedCards.some((n) => n.id === selectedCardId)) {
-        return ns;
+        return ns.some((n) => n.type === "boardGroup" && n.selected)
+          ? ns.map((n) => (n.type === "boardGroup" && n.selected ? { ...n, selected: false } : n))
+          : ns;
       }
-      return ns.some((n) => n.type === "card" && !!n.selected !== (n.id === selectedCardId))
-        ? ns.map((n) => (n.type === "card" ? { ...n, selected: n.id === selectedCardId } : n))
-        : ns;
+      const needUpdate = ns.some((n) =>
+        n.type === "card"
+          ? !!n.selected !== (n.id === selectedCardId)
+          : Boolean(selectedCardId && n.selected),
+      );
+      if (!needUpdate) return ns;
+      return ns.map((n) => {
+        if (n.type === "card") return { ...n, selected: n.id === selectedCardId };
+        if (selectedCardId && n.selected) return { ...n, selected: false };
+        return n;
+      });
     });
   }, [selectedCardId]);
 
@@ -560,34 +594,139 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       );
       let next = changes;
       let guides: MagnetGuide[] = [];
+
+      // 若使用者主動抓取的是卡片，鎖定同批誤被帶入的 boardGroup 不移動（防止在分組框內拖卡片時把分組框一起拖走）
+      const activeType = activeDragRef.current?.type;
+      const cardDrags =
+        activeType === "boardGroup"
+          ? []
+          : drags.filter((d) => !d.id.startsWith("group:"));
+
       if (drags.length > 0 && shiftRef.current) {
         // Shift：以拖曳起點為基準，位移取固定間距的整數倍
         next = changes.map((c) => {
           if (c.type !== "position" || !c.dragging || !c.position) return c;
           const start = dragStartRef.current.get(c.id);
-          return start
-            ? { ...c, position: { x: quantizeFromStart(start.x, c.position.x), y: quantizeFromStart(start.y, c.position.y) } }
-            : c;
+          if (!start) return c;
+          if (activeType === "card" && c.id.startsWith("group:")) {
+            return { ...c, position: { x: start.x, y: start.y } };
+          }
+          const qPos = { x: quantizeFromStart(start.x, c.position.x), y: quantizeFromStart(start.y, c.position.y) };
+          lastSnappedPosRef.current.set(c.id, qPos);
+          return { ...c, position: qPos };
         });
-      } else if (drags.length === 1 && snapRef.current) {
-        // 單張卡片拖曳：磁吸對齊其他卡片的邊緣／中線，並吸到固定間距
-        const d = drags[0];
-        const moving = nodesRef.current.find((n): n is CardFlowNode => n.type === "card" && n.id === d.id);
-        if (moving && d.position) {
-          const others = nodesRef.current
-            .filter((n): n is CardFlowNode => n.type === "card" && n.id !== d.id)
-            .map(nodeBox);
+      } else if (cardDrags.length >= 1 && snapRef.current) {
+        // 單張或多張卡片拖曳（含分組框內卡片）：磁吸對齊其他未移動卡片的邊緣／中線，並吸到固定間距
+        const movingCardIds = new Set(cardDrags.map((d) => d.id));
+        const movingBoxes: LayoutBox[] = [];
+        for (const d of cardDrags) {
+          const moving = nodesRef.current.find((n): n is CardFlowNode => n.type === "card" && n.id === d.id);
+          if (moving && d.position) {
+            movingBoxes.push({ ...nodeBox(moving), x: d.position.x, y: d.position.y });
+          }
+        }
+        const others = nodesRef.current
+          .filter((n): n is CardFlowNode => n.type === "card" && !movingCardIds.has(n.id))
+          .map(nodeBox);
+
+        let snapDx = 0;
+        let snapDy = 0;
+        if (movingBoxes.length === 1) {
           const r = computeMagnetSnap(
-            { ...nodeBox(moving), x: d.position.x, y: d.position.y },
+            movingBoxes[0],
             others,
             MAGNET_THRESHOLD_PX / rf.getZoom(),
           );
-          next = changes.map((c) => (c === d ? { ...c, position: { x: r.x, y: r.y } } : c));
+          snapDx = r.x - movingBoxes[0].x;
+          snapDy = r.y - movingBoxes[0].y;
           guides = r.guides;
+        } else if (movingBoxes.length >= 2) {
+          const threshold = MAGNET_THRESHOLD_PX / rf.getZoom();
+          const minX = Math.min(...movingBoxes.map((b) => b.x));
+          const minY = Math.min(...movingBoxes.map((b) => b.y));
+          const maxX = Math.max(...movingBoxes.map((b) => b.x + b.w));
+          const maxY = Math.max(...movingBoxes.map((b) => b.y + b.h));
+          const unionBox: LayoutBox = {
+            id: "__multi__",
+            x: minX,
+            y: minY,
+            w: maxX - minX,
+            h: maxY - minY,
+          };
+          const rUnion = computeMagnetSnap(unionBox, others, threshold);
+          snapDx = rUnion.x - unionBox.x;
+          snapDy = rUnion.y - unionBox.y;
+          let vGuides = rUnion.guides.filter((g) => g.x1 === g.x2);
+          let hGuides = rUnion.guides.filter((g) => g.y1 === g.y2);
+
+          // 同時檢查滑鼠主動抓取的主卡片，若主卡片能更近距離對齊其他卡片，優先採用主卡片的軸向吸附
+          const primaryId = activeDragRef.current?.id;
+          const primaryBox = movingBoxes.find((b) => b.id === primaryId) ?? movingBoxes[0];
+          const rPri = computeMagnetSnap(primaryBox, others, threshold);
+          const dxPri = rPri.x - primaryBox.x;
+          const dyPri = rPri.y - primaryBox.y;
+          const priVGuides = rPri.guides.filter((g) => g.x1 === g.x2);
+          const priHGuides = rPri.guides.filter((g) => g.y1 === g.y2);
+
+          if (
+            (dxPri !== 0 || priVGuides.length > 0) &&
+            ((snapDx === 0 && vGuides.length === 0) || Math.abs(dxPri) < Math.abs(snapDx))
+          ) {
+            snapDx = dxPri;
+            vGuides = priVGuides;
+          }
+          if (
+            (dyPri !== 0 || priHGuides.length > 0) &&
+            ((snapDy === 0 && hGuides.length === 0) || Math.abs(dyPri) < Math.abs(snapDy))
+          ) {
+            snapDy = dyPri;
+            hGuides = priHGuides;
+          }
+          guides = [...vGuides, ...hGuides];
         }
+
+        next = changes.map((c) => {
+          if (c.type !== "position" || !c.dragging || !c.position) return c;
+          if (c.id.startsWith("group:")) {
+            const start = dragStartRef.current.get(c.id);
+            return start ? { ...c, position: { x: start.x, y: start.y } } : c;
+          }
+          if (!movingCardIds.has(c.id)) return c;
+          const pos = { x: c.position.x + snapDx, y: c.position.y + snapDy };
+          lastSnappedPosRef.current.set(c.id, pos);
+          return { ...c, position: pos };
+        });
+      } else if (activeType === "card" && drags.length > 0) {
+        // 未開啟自動對齊但主動拖曳卡片時，仍防止誤被選中的分組框跟著移動
+        next = changes.map((c) => {
+          if (c.type === "position" && c.dragging && c.id.startsWith("group:")) {
+            const start = dragStartRef.current.get(c.id);
+            return start ? { ...c, position: { x: start.x, y: start.y } } : c;
+          }
+          return c;
+        });
       }
+
+      // 放開滑鼠瞬間（dragging === false），若 React Flow 帶入未吸附座標，保留最後一次磁吸座標
+      next = next.map((c) => {
+        if (c.type === "position" && c.dragging === false && c.position) {
+          const snapped = lastSnappedPosRef.current.get(c.id);
+          if (snapped) return { ...c, position: snapped };
+        }
+        return c;
+      });
+
       setMagnetGuides((cur) => (cur.length === 0 && guides.length === 0 ? cur : guides));
-      setNodes((ns) => applyNodeChanges(next, ns));
+      setNodes((ns) => {
+        const updated = applyNodeChanges(next, ns);
+        // 若在分組框內框選導致卡片與分組框同時被選取，自動取消分組框的選取，確保後續拖曳只作用於卡片
+        const hasSelectedCard = updated.some((n) => n.type === "card" && n.selected);
+        const hasSelectedGroup = updated.some((n) => n.type === "boardGroup" && n.selected);
+        if (hasSelectedCard && hasSelectedGroup) {
+          return updated.map((n) => (n.type === "boardGroup" && n.selected ? { ...n, selected: false } : n));
+        }
+        return updated;
+      });
     },
     [rf],
   );
@@ -595,6 +734,13 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   const onSelectionChange = useCallback(
     ({ nodes: sel }: { nodes: { id: string; type?: string }[] }) => {
       const cardSel = sel.filter((n) => !n.id.startsWith("group:"));
+      // React Flow 的 store 比 nodes state 晚一個 commit 才同步，回報的選取可能是上一刻的過期快照。
+      // 以 nodes 為準：不一致就丟棄，等 store 追上後的下一次回報再處理；
+      // 否則會與 [selectedCardId] effect 互相覆寫，形成無限迴圈（React error #185）
+      const current = nodesRef.current.filter((n) => n.type === "card" && n.selected).map((n) => n.id);
+      if (cardSel.length !== current.length || cardSel.some((n) => !current.includes(n.id))) {
+        return;
+      }
       if (cardSel.length === 1 && cardSel[0].id !== selectedRef.current) {
         onSelectCard(cardSel[0].id);
       }
@@ -610,6 +756,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
 
   // ---- 拖曳分組框時，框內卡片同步跟隨移動 ----
   const onNodeDragStart: OnNodeDrag<AnyFlowNode> = useCallback((_e, node, dragged) => {
+    activeDragRef.current = { id: node.id, type: node.type ?? "card" };
+    lastSnappedPosRef.current.clear();
     dragStartRef.current = new Map(dragged.map((n) => [n.id, { x: n.position.x, y: n.position.y }]));
     if (node.type !== "boardGroup") {
       groupDragRef.current = null;
@@ -650,12 +798,18 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
 
   // ---- 拖曳結束才寫入；開啟自動對齊時吸附格線並避開重疊卡片；失敗回復 ----
   const onNodeDragStop: OnNodeDrag<AnyFlowNode> = useCallback(
-    async (_e, _node, dragged) => {
+    async (_e, node, dragged) => {
+      const activeType = activeDragRef.current?.type ?? node.type;
+      activeDragRef.current = null;
+      setMagnetGuides([]);
       if (!boardId) return;
       const gd = groupDragRef.current;
       groupDragRef.current = null;
 
-      const groupNodes = dragged.filter((n): n is GroupFlowNode => n.type === "boardGroup");
+      const groupNodes =
+        activeType === "boardGroup"
+          ? dragged.filter((n): n is GroupFlowNode => n.type === "boardGroup")
+          : [];
       for (const gn of groupNodes) {
         const nextX = snapRef.current ? snapToGridValue(gn.position.x, GRID_SIZE) : gn.position.x;
         const nextY = snapRef.current ? snapToGridValue(gn.position.y, GRID_SIZE) : gn.position.y;
@@ -684,10 +838,20 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         dragged.filter((n) => n.type === "card").map((n) => n.id),
       );
       if (gd) gd.memberIds.forEach((id) => movedCardIds.add(id));
-      if (movedCardIds.size === 0) return;
+      if (movedCardIds.size === 0) {
+        lastSnappedPosRef.current.clear();
+        return;
+      }
 
       const allCards = nodesRef.current.filter((n): n is CardFlowNode => n.type === "card");
-      const movingBoxes = allCards.filter((n) => movedCardIds.has(n.id)).map(nodeBox);
+      const movingBoxes = allCards
+        .filter((n) => movedCardIds.has(n.id))
+        .map((n) => {
+          const b = nodeBox(n);
+          const snapped = lastSnappedPosRef.current.get(n.id);
+          return snapped ? { ...b, x: snapped.x, y: snapped.y } : b;
+        });
+      lastSnappedPosRef.current.clear();
       const fixedBoxes = allCards.filter((n) => !movedCardIds.has(n.id)).map(nodeBox);
 
       const resolvedMap = snapRef.current
@@ -980,6 +1144,94 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     }
   }, [info, report]);
 
+  // ---- 拖曳代碼檔案建立新卡片或覆蓋既有卡片 ----
+  const onBoardDrop = useCallback(
+    async (e: React.DragEvent) => {
+      if (!boardId || !e.dataTransfer.files.length) return;
+      e.preventDefault();
+
+      const files = Array.from(e.dataTransfer.files);
+      const flowPos = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const ext = file.name.split(".").pop()?.toLowerCase() || "";
+        const lang = CODE_EXT_MAP[ext];
+        if (!lang) {
+          report(new Error(`略過不支援的檔案「${file.name}」，僅支援代碼檔案`), "檔案格式不支援");
+          continue;
+        }
+
+        let content = "";
+        try {
+          content = await file.text();
+        } catch (err) {
+          report(err, `讀取檔案「${file.name}」失敗`);
+          continue;
+        }
+
+        const body = "```" + lang + ":" + file.name + "\n" + content + "\n```\n";
+        const dropX = flowPos.x + i * 24;
+        const dropY = flowPos.y + i * 24;
+
+        const allCards = nodesRef.current.filter((n): n is CardFlowNode => n.type === "card");
+        const hitCard = allCards.find((n) => {
+          const b = nodeBox(n);
+          return dropX >= b.x && dropX <= b.x + b.w && dropY >= b.y && dropY <= b.y + b.h;
+        });
+
+        if (hitCard) {
+          // 游標落在卡片範圍內：覆蓋該卡片內容
+          try {
+            const cur = await api.getCard(hitCard.id);
+            const updated = await api.patchCard(hitCard.id, { title: file.name, body }, cur.updated_at);
+            setNodes((ns) =>
+              ns.map((n) =>
+                n.id === hitCard.id && n.type === "card"
+                  ? { ...n, data: { ...n.data, title: updated.title, body: updated.body } }
+                  : n,
+              ),
+            );
+            info(`已覆蓋卡片「${hitCard.data.title || "（無標題）"}」內容為 ${file.name}`);
+          } catch (err) {
+            report(err, `覆蓋卡片「${hitCard.data.title || file.name}」失敗`);
+          }
+        } else {
+          // 游標落在空白處：建立新卡片並加入白板
+          try {
+            let initX = dropX;
+            let initY = dropY;
+            if (snapRef.current) {
+              const placed = placeCardsAvoidingCollisions(
+                [{ id: "temp", x: initX, y: initY, w: DEFAULT_CARD_W, h: DEFAULT_CARD_H }],
+                nodesRef.current.filter((n): n is CardFlowNode => n.type === "card").map(nodeBox),
+                GRID_SIZE,
+              );
+              const pos = placed.get("temp");
+              if (pos) {
+                initX = pos.x;
+                initY = pos.y;
+              }
+            }
+
+            const created = await api.createCard();
+            const updated = await api.patchCard(created.id, { title: file.name, body }, created.updated_at);
+            const added = await api.addToBoard(boardId, created.id, initX, initY);
+            saved.current.set(created.id, { x: added.x, y: added.y, w: added.w, h: added.h });
+            const node = toNode({ ...added, title: updated.title, body: updated.body, updated_at: updated.updated_at });
+            setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), { ...node, selected: true }]);
+            onSelectCard(created.id);
+            onCountChanged();
+            info(`已由代碼檔案 ${file.name} 建立卡片`);
+          } catch (err) {
+            report(err, `從檔案「${file.name}」建立卡片失敗`);
+          }
+        }
+      }
+    },
+    [boardId, info, onCountChanged, onSelectCard, report, rf, toNode],
+  );
+
   // ---- 拖曳「🎯 中心圖標」到目標卡片放開以指定中心 ----
   const startCenterIconDrag = useCallback(
     (e: React.MouseEvent) => {
@@ -1180,7 +1432,17 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       : undefined;
 
   return (
-    <div className={`board${pickingCenterDrag ? " picking-center" : ""}`} ref={wrapRef}>
+    <div
+      className={`board${pickingCenterDrag ? " picking-center" : ""}`}
+      ref={wrapRef}
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes("Files")) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+        }
+      }}
+      onDrop={(e) => void onBoardDrop(e)}
+    >
       {boardId && !props.isEditing && (
         <div className="board-snap-bar">
           <label className="snap-toggle" title="勾選時：拖曳卡片靠近其他卡片會磁吸對齊（顯示提示線）並吸到固定間距 20px；按住 Shift 拖曳則以 20px 為單位移動；放開時若重疊則自動移到最近空位">

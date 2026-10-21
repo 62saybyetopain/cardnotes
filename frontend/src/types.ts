@@ -228,6 +228,7 @@ export interface ConceptGraphNode {
   parent_id: string | null;
   aliases?: string[];
   card_count: number;
+  is_bridge?: boolean;
 }
 
 export interface ConceptGraphEdge {
@@ -291,6 +292,13 @@ export interface CleanupResult {
   stray_files: string[];
 }
 
+export interface SyncMediaEntry {
+  id: string;
+  kind: "image" | "video";
+  mime: string;
+  byte_size: number;
+}
+
 export interface SyncPackage {
   version: number;
   exported_at: string;
@@ -301,6 +309,8 @@ export interface SyncPackage {
   links: BoardLink[];
   boards: { id: string; name: string }[];
   board_cards: { board_id: string; card_id: string; x?: number; y?: number; w?: number; h?: number }[];
+  // 電腦端雲端備份才有：卡片引用的圖片清單，iPad 據此下載缺少的圖片
+  media?: SyncMediaEntry[];
 }
 
 export interface SyncCardDiff {
@@ -338,6 +348,7 @@ export interface SyncApplyRequest {
   package: SyncPackage;
 }
 
+
 export interface SyncApplyResult {
   applied: {
     cards_added: number;
@@ -349,3 +360,84 @@ export interface SyncApplyResult {
     board_cards_added: number;
   };
 }
+
+export interface RelationPattern {
+  id: string;
+  label: string;
+  template: string;
+  bridge_tag_id: string;
+  bridge_name: string;
+  note: string;
+  use_count: number;
+}
+
+export interface RelationPatternCreate {
+  label: string;
+  template: string;
+  bridge_tag_id: string;
+  note?: string;
+}
+
+export interface RelationPatternPatch {
+  label?: string;
+  template?: string;
+  note?: string;
+}
+
+export interface CardRelation {
+  card_id: string;
+  pattern_id: string | null;
+  role_a: string;
+  role_b: string;
+  result: string;
+  free_sentence: string;
+  updated_at: string;
+}
+
+export interface CardRelationPut {
+  pattern_id: string | null;
+  role_a: string;
+  role_b: string;
+  result: string;
+  free_sentence: string;
+}
+
+export interface BridgeCabinetStat {
+  id: string;
+  name: string;
+  card_count: number;
+}
+
+export interface BridgeStat {
+  id: string;
+  name: string;
+  card_count: number;
+  card_ratio: number;
+  unfiled_count: number;
+  cabinet_count: number;
+  cabinets: BridgeCabinetStat[];
+}
+
+export interface RelationInconsistency {
+  card_id: string;
+  title: string;
+  pattern_id: string;
+  pattern_label: string;
+  bridge_tag_id: string;
+  bridge_name: string;
+}
+
+export interface RelationCandidate {
+  card_id: string;
+  title: string;
+  free_sentence: string;
+  updated_at: string;
+}
+
+export interface RelationsReport {
+  total_cards: number;
+  bridges: BridgeStat[];
+  inconsistencies: RelationInconsistency[];
+  candidates: RelationCandidate[];
+}
+

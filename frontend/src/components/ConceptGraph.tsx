@@ -584,13 +584,22 @@ export function ConceptGraph(props: Props) {
                   };
                 }}
               >
+
                 {isSelected && (
                   <circle
-                    r={node.r + 6}
+                    r={node.r + (node.is_bridge ? 8 : 6)}
                     fill="none"
                     stroke="var(--accent)"
                     strokeWidth={2.5}
                     strokeDasharray="4 2"
+                  />
+                )}
+                {node.is_bridge && (
+                  <circle
+                    r={node.r + 4}
+                    fill="none"
+                    stroke="#f59e0b"
+                    strokeWidth={2}
                   />
                 )}
                 <circle
@@ -615,7 +624,7 @@ export function ConceptGraph(props: Props) {
                     strokeLinejoin: "round",
                   }}
                 >
-                  {node.name}
+                  {node.is_bridge ? `🌉 ${node.name}` : node.name}
                 </text>
                 {node.facet && (
                   <text
@@ -638,6 +647,7 @@ export function ConceptGraph(props: Props) {
                 <title>
                   {[
                     `${node.name}（${node.card_count} 張卡片、${degreeMap.get(node.id) ?? 0} 條連線）`,
+                    node.is_bridge ? "角色：跨領域橋樑詞（已被關係句型引用）" : "",
                     node.facet
                       ? `維度：${node.facet}`
                       : node.axis === "location" || node.axis === "domain"
@@ -663,7 +673,7 @@ export function ConceptGraph(props: Props) {
       <div className="graph-legend">
         <span>點擊概念節點：於右側展開相關卡片</span>
         <span>·</span>
-        <span>顏色：自動偵測的群落（灰色＝孤立）；大小：連線數</span>
+        <span>顏色：自動偵測的群落（灰色＝孤立）；大小：連線數；🌉 金色外環：橋樑詞</span>
         <span>·</span>
         <span>虛線：卡片共現關係（探索候選，不自動升格為正式語意連結）</span>
       </div>

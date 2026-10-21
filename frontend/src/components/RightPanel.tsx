@@ -1,3 +1,5 @@
+// @depends-on ./Editor.tsx (Editor 自動儲存後，onSaved 回傳的 CardDetail 至少含 title/body/updated_at；父層 card 快照必須同步這三項，否則 ContentTab.updateMeta 以舊版本號送出會 409，onReload 重建 Editor 時也會顯示舊內文)
+// @depends-on ../api.ts (patchCard 回傳值含 title/body/updated_at)
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { isSameAxisGroup, tagPath } from "../lib/tree";
@@ -22,6 +24,7 @@ import {
 import { Editor } from "./Editor";
 import { FacetPicker } from "./FacetPicker";
 import { Markdown } from "./Markdown";
+import { RelationBox } from "./RelationBox";
 
 export interface Filter {
   tagId?: string;
@@ -109,7 +112,12 @@ export function CardEditorPane(props: {
       tags={tags}
       nonce={nonce}
       onReload={() => (setNonce((n) => n + 1), refetch())}
-      onSaved={onSaved}
+      onSaved={(c) => {
+        // Editor 自動儲存後，載入時的快照已落後伺服器：同步版本號與內容，
+        // updateMeta 才不會以舊版本送出而 409，onReload 重建 Editor 時也會顯示已儲存的內容
+        setCard((cur) => (cur && cur.id === c.id ? { ...cur, title: c.title, body: c.body, updated_at: c.updated_at } : cur));
+        onSaved(c);
+      }}
       onCardDeleted={onCardDeleted}
       onLinkAdded={onLinkAdded}
       onSelectCard={onSelectCard}
@@ -207,7 +215,11 @@ export function RightPanel(p: Props) {
             tags={p.tags}
             nonce={nonce}
             onReload={() => (setNonce((n) => n + 1), refetch())}
-            onSaved={p.onSaved}
+            onSaved={(c) => {
+              // 同 CardEditorPane：快照要跟上 Editor 自動儲存後的版本與內容
+              setCard((cur) => (cur && cur.id === c.id ? { ...cur, title: c.title, body: c.body, updated_at: c.updated_at } : cur));
+              p.onSaved(c);
+            }}
             onCardDeleted={p.onCardDeleted}
             onLinkAdded={p.onLinkAdded}
             onSelectCard={(id) => {
@@ -512,6 +524,16 @@ function ContentTab(props: {
           </div>
         </div>
       )}
+
+      <RelationBox
+        key={card.id}
+        card={card}
+        tags={tags}
+        onAssignBridgeTag={assignTagById}
+        onSelectCard={props.onSelectCard}
+        report={report}
+        info={info}
+      />
 
       <Editor
         key={`${card.id}:${props.nonce}`}

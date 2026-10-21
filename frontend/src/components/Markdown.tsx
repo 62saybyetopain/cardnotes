@@ -497,8 +497,17 @@ export function Markdown({
             </CardRef>
           );
         }
+        const safeHref = typeof href === "string" ? href.trim() : "";
+        if (!safeHref || safeHref === "#") {
+          return <span className="muted">{children}</span>;
+        }
         return (
-          <a href={href} target="_blank" rel="noreferrer noopener">
+          <a
+            href={safeHref}
+            target="_blank"
+            rel="noreferrer noopener"
+            onClick={(e) => e.stopPropagation()}
+          >
             {children}
           </a>
         );

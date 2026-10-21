@@ -7,6 +7,8 @@ import type {
   BoardSummary,
   CardDetail,
   CardImpact,
+  CardRelation,
+  CardRelationPut,
   CardSummary,
   CardType,
   CleanupResult,
@@ -15,6 +17,10 @@ import type {
   DeletePreview,
   LinkStatus,
   MediaInfo,
+  RelationPattern,
+  RelationPatternCreate,
+  RelationPatternPatch,
+  RelationsReport,
   RelationType,
   SyncApplyRequest,
   SyncApplyResult,
@@ -106,4 +112,14 @@ export interface StorageDriver {
   mediaInfo?(id: string): Promise<MediaInfo>;
   cleanupMedia?(dry_run?: boolean): Promise<CleanupResult>;
   getConceptGraph?(p: { min_cooccurrence?: number; min_jaccard?: number; max_neighbors?: number; include_locations?: boolean }): Promise<ConceptGraphResponse>;
+
+  // 橋樑詞關係句型與評估（僅電腦端 SQLite 支援，Dexie 為 fail-loud stub）
+  listRelationPatterns(): Promise<{ patterns: RelationPattern[] }>;
+  createRelationPattern(body: RelationPatternCreate): Promise<RelationPattern>;
+  patchRelationPattern(id: string, patch: RelationPatternPatch): Promise<RelationPattern>;
+  deleteRelationPattern(id: string): Promise<{ deleted: boolean }>;
+  getCardRelation(card_id: string): Promise<{ relation: CardRelation | null }>;
+  putCardRelation(card_id: string, body: CardRelationPut): Promise<{ relation: CardRelation }>;
+  deleteCardRelation(card_id: string): Promise<{ removed: boolean }>;
+  getRelationsReport(): Promise<RelationsReport>;
 }

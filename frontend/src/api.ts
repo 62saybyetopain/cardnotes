@@ -6,6 +6,8 @@ import type {
   BoardSummary,
   CardDetail,
   CardImpact,
+  CardRelation,
+  CardRelationPut,
   CardSummary,
   CardType,
   CleanupResult,
@@ -14,6 +16,10 @@ import type {
   DeletePreview,
   LinkStatus,
   MediaInfo,
+  RelationPattern,
+  RelationPatternCreate,
+  RelationPatternPatch,
+  RelationsReport,
   RelationType,
   SyncApplyRequest,
   SyncApplyResult,
@@ -175,6 +181,21 @@ export const httpApi = {
   syncExport: () => request<SyncPackage>("GET", "/sync/export"),
   syncDiff: (pkg: SyncPackage) => request<SyncDiffReport>("POST", "/sync/diff", pkg),
   syncApply: (payload: SyncApplyRequest) => request<SyncApplyResult>("POST", "/sync/apply", payload),
+  // relations
+  listRelationPatterns: () => request<{ patterns: RelationPattern[] }>("GET", "/relation-patterns"),
+  createRelationPattern: (body: RelationPatternCreate) =>
+    request<RelationPattern>("POST", "/relation-patterns", body),
+  patchRelationPattern: (id: string, patch: RelationPatternPatch) =>
+    request<RelationPattern>("PATCH", `/relation-patterns/${id}`, patch),
+  deleteRelationPattern: (id: string) =>
+    request<{ deleted: boolean }>("DELETE", `/relation-patterns/${id}`),
+  getCardRelation: (card_id: string) =>
+    request<{ relation: CardRelation | null }>("GET", `/cards/${card_id}/relation`),
+  putCardRelation: (card_id: string, body: CardRelationPut) =>
+    request<{ relation: CardRelation }>("PUT", `/cards/${card_id}/relation`, body),
+  deleteCardRelation: (card_id: string) =>
+    request<{ removed: boolean }>("DELETE", `/cards/${card_id}/relation`),
+  getRelationsReport: () => request<RelationsReport>("GET", "/relations/report"),
 };
 
 import { getStorageDriver } from "./lib/storage";

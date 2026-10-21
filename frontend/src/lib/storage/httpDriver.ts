@@ -49,4 +49,13 @@ export class HttpDriver implements StorageDriver {
   mediaInfo = httpApi.mediaInfo;
   cleanupMedia = httpApi.cleanupMedia;
   getConceptGraph = httpApi.getConceptGraph;
+
+  listRelationPatterns = httpApi.listRelationPatterns;
+  createRelationPattern = httpApi.createRelationPattern;
+  patchRelationPattern = httpApi.patchRelationPattern;
+  deleteRelationPattern = httpApi.deleteRelationPattern;
+  getCardRelation = httpApi.getCardRelation;
+  putCardRelation = httpApi.putCardRelation;
+  deleteCardRelation = httpApi.deleteCardRelation;
+  getRelationsReport = httpApi.getRelationsReport;
 }

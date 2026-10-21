@@ -583,8 +583,34 @@ interface PatchPair {
   replaceText: string;
 }
 
-// 唯一的圍欄剝除器：僅當首行為圍欄開頭且末行為純圍欄時才剝除外層，代碼本身出現的反引號字串不受影響
-function stripOuterFence(raw: string): string {
+// 識別網頁複製 AI 代碼塊時常見的頂部單行語言標籤（例如 "TypeScript", "tsx", "python", "Copy code" 等）
+const AI_LANG_HEADER_RE =
+  /^(typescript|javascript|ts|tsx|js|jsx|python|py|sql|sqlite|json|html|css|scss|bash|sh|shell|yaml|yml|toml|markdown|md|diff|plaintext|text|c|cpp|csharp|java|go|rust|ruby|php|swift|kotlin)(\s+(copy(\s+code)?|複製(\s*代碼|\s*程式碼)?))?$/i;
+
+// 識別單獨一行的檔案標題（如 `lib/storage/httpDriver.ts（一處）` 或 `#### api.ts`）
+function isStandaloneFileHeaderLine(line: string): boolean {
+  const cleanTitle = line.trim().replace(/^#{1,6}\s*/, "").replace(/`/g, "").trim();
+  return /^[a-zA-Z0-9_./-]+\.(ts|tsx|js|jsx|py|sql|json|css|md|html)\s*([（(][^）)]*[）)])?$/.test(cleanTitle);
+}
+
+// 識別 AI 代碼塊下方常見的說明段落或下一小節標題（僅限無縮排的頂層行，避免誤傷縮排代碼）
+function isAiTrailingProseLine(line: string): boolean {
+  if (/^\s/.test(line)) return false;
+  const t = line.trim();
+  if (!t) return false;
+  if (
+    /^(原因|問題原因|說明|注意|備註|為什麼|驗證方式|下一步|修改說明)\s*[：:]/.test(t) ||
+    /^#{1,6}\s+(檢查點|步驟|檔案|修改|\d+\.)/.test(t) ||
+    /^(檢查點\s*\d+|步驟\s*\d+|【[A-Z0-9一二三四五六七八九十]+】)/.test(t) ||
+    /^[-*]{3,}\s*$/.test(t)
+  ) {
+    return true;
+  }
+  return isStandaloneFileHeaderLine(t);
+}
+
+// 統一淨化器：支援「有 ``` 圍欄」與「無圍欄（網頁直接複製含 TypeScript 標題與下方原因說明）」
+function stripOuterFence(raw: string, cutTrailingProse = false): string {
   const FENCE = "`".repeat(3);
   const trimBlank = (arr: string[]): string[] => {
     let a = arr;
@@ -593,70 +619,137 @@ function stripOuterFence(raw: string): string {
     return a;
   };
   let lines = trimBlank(normalizeCodeText(raw).split("\n"));
-  if (lines.length >= 2) {
+  if (lines.length === 0) return "";
+
+  // Case A: 首行以 ``` 圍欄開頭（若有對應結尾圍欄則取中間，若漏複製結尾圍欄仍剝除首行圍欄）
+  if (lines[0].trim().startsWith(FENCE)) {
+    let n = 0;
     const first = lines[0].trim();
-    const last = lines[lines.length - 1].trim();
-    if (first.startsWith(FENCE) && last.length >= 3 && last.replace(/`/g, "") === "") {
-      lines = trimBlank(lines.slice(1, -1));
+    while (first[n] === "`") n++;
+    let closeIdx = -1;
+    for (let i = 1; i < lines.length; i++) {
+      const t = lines[i].trim();
+      if (t.length >= n && t.replace(/`/g, "") === "") {
+        closeIdx = i;
+        break;
+      }
     }
+    lines = closeIdx >= 0 ? lines.slice(1, closeIdx) : lines.slice(1);
+    return trimBlank(lines).join("\n");
+  }
+
+  // Case B: 無首行圍欄（網頁直接反白複製），剝除頂部語言標籤（如 TypeScript）、複製按鈕文字或單行檔名標題
+  while (lines.length > 0) {
+    const first = lines[0].trim();
+    if (
+      AI_LANG_HEADER_RE.test(first) ||
+      /^(copy(\s+code)?|複製(\s*代碼|\s*程式碼)?)$/i.test(first) ||
+      isStandaloneFileHeaderLine(first)
+    ) {
+      lines = trimBlank(lines.slice(1));
+    } else {
+      break;
+    }
+  }
+
+  // 若末行殘留單獨的 ``` 結尾圍欄，予以剝除
+  if (lines.length > 0) {
+    const last = lines[lines.length - 1].trim();
+    if (last.length >= 3 && last.replace(/`/g, "") === "") {
+      lines = trimBlank(lines.slice(0, -1));
+    }
+  }
+
+  // 僅在需要剝除尾部說明時（replace 區塊），從第 1 行起尋找頂層非代碼說明行並截斷
+  if (cutTrailingProse && lines.length > 1) {
+    let cutIdx = lines.length;
+    for (let i = 1; i < lines.length; i++) {
+      if (isAiTrailingProseLine(lines[i])) {
+        cutIdx = i;
+        break;
+      }
+    }
+    lines = trimBlank(lines.slice(0, cutIdx));
   }
   return lines.join("\n");
 }
 
+const FIND_MARKER_RE =
+  /【(尋找這段代碼|尋找這段程式碼|尋找代碼|尋找程式碼|定位這段代碼|定位代碼|定位程式碼|原始代碼|原始程式碼)】|\[(尋找這段代碼\vert{}尋找這段程式碼\vert{}尋找代碼\vert{}定位代碼)\]/;
+const REPLACE_MARKER_RE =
+  /【(替換為以下代碼|替換為以下程式碼|取代為以下代碼|取代為以下程式碼|替換代碼|替換程式碼|取代代碼|取代程式碼)】|\[(替換為以下代碼\vert{}替換為以下程式碼\vert{}取代為以下代碼\vert{}替換代碼\vert{}取代代碼)\]/;
+
+// 將可能與前後文字黏在同一行的標記拆成獨立行，並排除程式碼內的字串常數（如 "【尋找這段代碼】"）
+function splitInlineMarkers(rawLines: string[]): string[] {
+  const out: string[] = [];
+  let foundFirstLine = false;
+  for (let i = 0; i < rawLines.length; i++) {
+    let line = rawLines[i];
+    // 容錯：使用者滑鼠反白起點漏選第一個「【」，導致首行以「尋找這段代碼】」開頭
+    if (!foundFirstLine && line.trim() !== "") {
+      foundFirstLine = true;
+      line = line.replace(
+        /^(\s*)(尋找這段代碼|尋找這段程式碼|尋找代碼|定位代碼)】/,
+        "$1【$2】",
+      );
+    }
+    const fMatch = FIND_MARKER_RE.exec(line);
+    const rMatch = REPLACE_MARKER_RE.exec(line);
+    const match =
+      fMatch && rMatch
+        ? fMatch.index <= rMatch.index
+          ? { m: fMatch, token: "【尋找這段代碼】" }
+          : { m: rMatch, token: "【替換為以下代碼】" }
+        : fMatch
+          ? { m: fMatch, token: "【尋找這段代碼】" }
+          : rMatch
+            ? { m: rMatch, token: "【替換為以下代碼】" }
+            : null;
+
+    if (!match) {
+      out.push(line);
+      continue;
+    }
+
+    const idx = match.m.index;
+    const len = match.m[0].length;
+    const prefix = line.slice(0, idx);
+    const suffix = line.slice(idx + len);
+
+    // 若標記前後緊鄰引號、斜線或等號，代表是程式碼本身的字串／註解／正則（如 Editor.tsx 自身），不拆行
+    if (
+      /["'`/=\\]\s*$/.test(prefix) ||
+      /^\s*["'`)/\\]/.test(suffix) ||
+      /^\s*(\/\/|\/\*)/.test(prefix)
+    ) {
+      out.push(line);
+      continue;
+    }
+
+    const cleanPrefix = prefix.replace(/^[#*>\-\s•・0-9.:：()（）]+/, "").trim();
+    if (cleanPrefix.length > 0 && !isStandaloneFileHeaderLine(cleanPrefix)) {
+      out.push(prefix);
+    }
+    out.push(match.token);
+
+    const cleanSuffix = suffix.replace(/^[\s:：*#]+/, "").trim();
+    if (cleanSuffix.length > 0) {
+      out.push(cleanSuffix);
+    }
+  }
+  return out;
+}
+
 function parseAiPatchPairs(rawInput: string): PatchPair[] {
   const text = normalizeCodeText(rawInput);
-  const findMarker = "【尋找這段代碼】";
-  const replaceMarker = "【替換為以下代碼】";
-  const FENCE = "`".repeat(3);
-  const lines = text.split("\n");
+  const lines = splitInlineMarkers(text.split("\n"));
 
-  // 逐行掃描：圍欄內的任何文字（含代碼裡的字串常數）一律不當標記；
-  // 標記只在圍欄外、且去除標題／粗體／編號裝飾後以標記開頭的行才成立
   const marks: { kind: "find" | "replace"; line: number }[] = [];
-  let fenceLen = 0;
   for (let i = 0; i < lines.length; i++) {
     const t = lines[i].trim();
-    if (fenceLen > 0) {
-      if (t.length >= fenceLen && t.replace(/`/g, "") === "") fenceLen = 0;
-      continue;
-    }
-    if (t.startsWith(FENCE)) {
-      let n = 0;
-      while (t[n] === "`") n++;
-      fenceLen = n;
-      continue;
-    }
-    const d = t.replace(/^[#*>\-\s0-9.:：]+/, "");
-    if (d.startsWith(findMarker)) marks.push({ kind: "find", line: i });
-    else if (d.startsWith(replaceMarker)) marks.push({ kind: "replace", line: i });
+    if (t === "【尋找這段代碼】") marks.push({ kind: "find", line: i });
+    else if (t === "【替換為以下代碼】") marks.push({ kind: "replace", line: i });
   }
-
-  // 取區間內第一個有實質內容的圍欄本文；無圍欄時退回原文並去除首尾的空行與標題／分隔線殘留
-  const takeBody = (from: number, to: number): string => {
-    let sawFence = false;
-    let k = from;
-    while (k < to) {
-      const t = lines[k].trim();
-      if (!t.startsWith(FENCE)) {
-        k++;
-        continue;
-      }
-      sawFence = true;
-      let n = 0;
-      while (t[n] === "`") n++;
-      let e = k + 1;
-      while (e < to && !(lines[e].trim().length >= n && lines[e].trim().replace(/`/g, "") === "")) e++;
-      const body = lines.slice(k + 1, e).join("\n").replace(/^\n+|\n+$/g, "");
-      if (body.trim().length > 0) return body;
-      k = e + 1;
-    }
-    if (sawFence) return "";
-    let seg = lines.slice(from, to);
-    const deco = /^\s*(#{1,6}|[-*]{3,})?\s*$/;
-    while (seg.length > 0 && deco.test(seg[0])) seg = seg.slice(1);
-    while (seg.length > 0 && deco.test(seg[seg.length - 1])) seg = seg.slice(0, -1);
-    return seg.join("\n");
-  };
 
   const pairs: PatchPair[] = [];
   let m = 0;
@@ -668,8 +761,8 @@ function parseAiPatchPairs(rawInput: string): PatchPair[] {
     }
     const nextIdx = marks.findIndex((x, k) => k > m + 1 && x.kind === "find");
     const segEnd = nextIdx >= 0 ? marks[nextIdx].line : lines.length;
-    const findBody = takeBody(marks[m].line + 1, rm.line);
-    const replaceBody = takeBody(rm.line + 1, segEnd);
+    const findBody = stripOuterFence(lines.slice(marks[m].line + 1, rm.line).join("\n"), false);
+    const replaceBody = stripOuterFence(lines.slice(rm.line + 1, segEnd).join("\n"), true);
     if (findBody.trim().length > 0) {
       pairs.push({ findText: findBody, replaceText: replaceBody });
     }
@@ -817,7 +910,10 @@ function CodeReplaceModal(props: {
 
   const handleSmartPasteChange = (val: string) => {
     setSmartInput(val);
-    setFeedback(null);
+    if (!val.trim()) {
+      setFeedback(null);
+      return;
+    }
     const parsed = parseAiPatchPairs(val);
     if (parsed.length > 0) {
       setPairs(parsed);
@@ -826,11 +922,25 @@ function CodeReplaceModal(props: {
         kind: "ok",
         msg: `✅ 已成功解析 ${parsed.length} 組【尋找／替換】指令並淨化格式！可切換上方組別標籤查看每一組細節。`,
       });
+    } else {
+      const hasFind = FIND_MARKER_RE.test(val) || /^\s*(尋找這段代碼|尋找這段程式碼)】/.test(val);
+      const hasReplace = REPLACE_MARKER_RE.test(val);
+      setFeedback({
+        kind: "err",
+        msg:
+          !hasFind && !hasReplace
+            ? "⚠️ 未能自動拆開：貼上的內容中沒有【尋找這段代碼】與【替換為以下代碼】標記。請確認複製範圍包含這兩個標題，或要求 AI 使用此格式輸出。"
+            : hasFind && !hasReplace
+              ? "⚠️ 未能自動拆開：只偵測到【尋找這段代碼】，缺少對應的【替換為以下代碼】標記。"
+              : !hasFind && hasReplace
+                ? "⚠️ 未能自動拆開：只偵測到【替換為以下代碼】，缺少開頭的【尋找這段代碼】標記（請確認反白複製時有選到開頭的【尋找這段代碼】）。"
+                : "⚠️ 未能自動拆開：已偵測到標記，但【尋找這段代碼】區塊內的代碼為空。",
+      });
     }
   };
 
   const handleFindChange = (val: string) => {
-    if (val.includes("【尋找這段代碼】") && val.includes("【替換為以下代碼】")) {
+    if (parseAiPatchPairs(val).length > 0) {
       handleSmartPasteChange(val);
       return;
     }
@@ -940,11 +1050,19 @@ function CodeReplaceModal(props: {
         replaceTo: from,
         insertText: insertBlock,
       });
+      // 新增為卡片代碼塊後，自動切換鎖定至該新區塊，方便後續連續取代
+      setTargetKey(String(blocks.length));
+      setManualSource("");
     }
+
+    // 取代成功後自動清空智慧貼上區與定位／取代組別，無需手動再按一次清空
+    setSmartInput("");
+    setPairs([{ findText: "", replaceText: "" }]);
+    setActivePairIndex(0);
 
     setFeedback({
       kind: "ok",
-      msg: `🎉 已成功套用 ${res.appliedCount} 處代碼取代並更新至卡片！最新全文已複製至剪貼簿。彈窗已保留，可繼續貼上下一組代碼進行連續取代，完成後點擊「關閉」。`,
+      msg: `🎉 已成功套用 ${res.appliedCount} 處代碼取代並更新至卡片！最新全文已複製至剪貼簿，輸入框已自動清空，可直接貼上下一組代碼。`,
     });
   };
 
