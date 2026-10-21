@@ -1,6 +1,8 @@
 // @depends-on ./SyncModal.tsx (SyncModal)
+// @depends-on ../lib/storage/index.ts (getPreferredDriverType)
 import { useState } from "react";
 import { api } from "../api";
+import { getPreferredDriverType } from "../lib/storage";
 import { buildTree, descendantIds, isSameAxisGroup, tagPath, type TreeNode } from "../lib/tree";
 import type { Axis, BoardSummary, CleanupResult, Tag } from "../types";
 import { FacetPicker } from "./FacetPicker";
@@ -291,9 +293,11 @@ export function LeftPanel(p: Props) {
             <button onClick={() => setSyncOpen(true)} aria-label="資料同步與備份">
               同步／備份
             </button>
-            <button onClick={() => void openCleanup()} aria-label="清理孤兒媒體">
-              孤兒媒體
-            </button>
+            {getPreferredDriverType() !== "dexie" && (
+              <button onClick={() => void openCleanup()} aria-label="清理孤兒媒體">
+                孤兒媒體
+              </button>
+            )}
           </div>
         </div>
       </section>
