@@ -476,6 +476,40 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   };
   const onGroupRemove = useCallback((gid: string) => void removeGroupImpl.current?.(gid), []);
 
+  const handleInlineCardSaved = useCallback(
+    (updated: { id: string; title: string; body: string; updated_at: string }) => {
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === updated.id && n.type === "card"
+            ? { ...n, data: { ...n.data, title: updated.title, body: updated.body, updatedAt: updated.updated_at } }
+            : n,
+        ),
+      );
+    },
+    [],
+  );
+
+  const handleInlineLinkAdded = useCallback(
+    (sourceId: string, targetId: string, extra?: Partial<BoardLink>) => {
+      const onBoard = new Set(nodesRef.current.filter((n) => n.type === "card").map((n) => n.id));
+      if (!onBoard.has(sourceId) || !onBoard.has(targetId)) return;
+      const norm = normalizeLink({ source_id: sourceId, target_id: targetId, ...extra });
+      setLinks((ls) => {
+        const filtered = ls.filter(
+          (l) =>
+            !(
+              l.source_id === norm.source_id &&
+              l.target_id === norm.target_id &&
+              l.relation_type === norm.relation_type
+            ),
+        );
+        return [...filtered, norm];
+      });
+      onLinksChanged();
+    },
+    [onLinksChanged],
+  );
+
   const toNode = useCallback(
     (c: BoardCard): CardFlowNode => ({
       id: c.card_id,
@@ -484,9 +518,19 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       width: c.w ?? 280,
       height: c.h ?? undefined,
       style: { width: c.w ?? 280, height: c.h ?? undefined },
-      data: { title: c.title, body: c.body, sized: c.h != null, onResizeEnd, onOpenCard },
+      data: {
+        title: c.title,
+        body: c.body,
+        updatedAt: c.updated_at,
+        sized: c.h != null,
+        onResizeEnd,
+        onOpenCard,
+        onCardSaved: handleInlineCardSaved,
+        onLinkAdded: handleInlineLinkAdded,
+        report,
+      },
     }),
-    [onOpenCard, onResizeEnd],
+    [handleInlineCardSaved, handleInlineLinkAdded, onOpenCard, onResizeEnd, report],
   );
 
   const toGroupNode = useCallback(
@@ -1673,11 +1717,12 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         onNodeClick={(e, node) => {
-          if ((e.target as HTMLElement).closest(".media-size-bar")) return;
+          const target = e.target as HTMLElement;
+          if (target.closest(".media-size-bar") || target.closest(".nodrag")) return;
           if (node.type === "card") {
             setLastClickedCardId(node.id);
             if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
-              onOpenCard?.(node.id);
+              onSelectCard(node.id);
             }
           }
         }}
@@ -1685,7 +1730,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         onNodeDrag={onNodeDrag}
         onNodeDragStop={onNodeDragStop}
         onNodeDoubleClick={(e, node) => {
-          if ((e.target as HTMLElement).closest(".media-size-bar")) return;
+          const target = e.target as HTMLElement;
+          if (target.closest(".media-size-bar") || target.closest(".nodrag")) return;
           if (node.type === "card") onOpenCard?.(node.id);
         }}
         onEdgeClick={(_e, edge) => {

@@ -22,7 +22,17 @@ function getInfo(id: string): Promise<MediaInfo> {
 
 type State = { status: "loading" } | { status: "ok"; info: MediaInfo } | { status: "missing" };
 
-export function MediaEmbed({ id, explicitWidth }: { id: string; explicitWidth?: string }) {
+export function MediaEmbed({
+  id,
+  explicitWidth,
+  onChangeWidth,
+  onRemove,
+}: {
+  id: string;
+  explicitWidth?: string;
+  onChangeWidth?: (width: string) => void;
+  onRemove?: () => void;
+}) {
   const [state, setState] = useState<State>({ status: "loading" });
   const [userWidth, setUserWidth] = useState<string | null>(
     () => explicitWidth || mediaWidthCache.get(id) || null,
@@ -48,6 +58,7 @@ export function MediaEmbed({ id, explicitWidth }: { id: string; explicitWidth?: 
   const changeWidth = (w: string) => {
     mediaWidthCache.set(id, w);
     setUserWidth(w);
+    onChangeWidth?.(w);
   };
 
   useEffect(() => {
@@ -171,6 +182,16 @@ export function MediaEmbed({ id, explicitWidth }: { id: string; explicitWidth?: 
         >
           🔍 放大
         </button>
+        {onRemove && (
+          <button
+            type="button"
+            style={{ fontSize: 10, padding: "1px 5px", opacity: 0.85, color: "#f87171", cursor: "pointer" }}
+            onClick={onRemove}
+            title="從卡片內文移除此圖片"
+          >
+            🗑️ 移除
+          </button>
+        )}
       </span>
       {zoomed &&
         createPortal(

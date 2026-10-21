@@ -17,18 +17,97 @@ import {
 import { insertAtCursor, isAcceptedMime, mediaRef } from "../lib/media";
 import { messageOf } from "../notify";
 import type { BoardLink, CardDetail } from "../types";
-import { Markdown } from "./Markdown";
+import { Markdown, MediaEmbed } from "./Markdown";
 import { MentionPopup } from "./MentionPopup";
 
 type Status = "saved" | "dirty" | "saving" | "error" | "conflict";
 
 interface Props {
   card: CardDetail;
+  compact?: boolean;
   onSaved(card: CardDetail): void;
   onReload(): void;
   onLinkAdded?(sourceId: string, targetId: string, extra?: Partial<BoardLink>): void;
   onOpenCard?(cardId: string): void;
   report(e: unknown, prefix?: string): void;
+}
+
+type BodySegment =
+  | { kind: "text"; text: string; start: number; end: number }
+  | {
+      kind: "media";
+      mediaId: string;
+      alt: string;
+      explicitWidth?: string;
+      rawStart: number;
+      rawEnd: number;
+      removeStart: number;
+      removeEnd: number;
+    };
+
+const INLINE_MEDIA_RE = /!\[([^\]]*)\]\(media:([0-9a-fA-F-]{36})\)/g;
+
+function extractWidthFromAlt(alt: string): { baseAlt: string; width?: string } {
+  const pipeIdx = alt.lastIndexOf("|");
+  if (pipeIdx < 0) return { baseAlt: alt };
+  const raw = alt.slice(pipeIdx + 1).trim();
+  const baseAlt = alt.slice(0, pipeIdx);
+  if (/^\d+(px|%)?$/.test(raw)) {
+    return { baseAlt, width: raw.endsWith("px") || raw.endsWith("%") ? raw : `${raw}px` };
+  }
+  return { baseAlt: alt };
+}
+
+function splitBodySegments(body: string): BodySegment[] {
+  const matches: { index: number; end: number; alt: string; mediaId: string }[] = [];
+  let m: RegExpExecArray | null;
+  INLINE_MEDIA_RE.lastIndex = 0;
+  while ((m = INLINE_MEDIA_RE.exec(body)) !== null) {
+    matches.push({
+      index: m.index,
+      end: m.index + m[0].length,
+      alt: m[1] ?? "",
+      mediaId: m[2],
+    });
+  }
+  if (matches.length === 0) {
+    return [{ kind: "text", text: body, start: 0, end: body.length }];
+  }
+
+  const segments: BodySegment[] = [];
+  let prevEnd = 0;
+  for (const hit of matches) {
+    const sepBefore = hit.index > prevEnd && body[hit.index - 1] === "\n" ? 1 : 0;
+    const textEnd = hit.index - sepBefore;
+    segments.push({
+      kind: "text",
+      text: body.slice(prevEnd, textEnd),
+      start: prevEnd,
+      end: textEnd,
+    });
+
+    const sepAfter = hit.end < body.length && body[hit.end] === "\n" ? 1 : 0;
+    const { width } = extractWidthFromAlt(hit.alt);
+    segments.push({
+      kind: "media",
+      mediaId: hit.mediaId,
+      alt: hit.alt,
+      explicitWidth: width,
+      rawStart: hit.index,
+      rawEnd: hit.end,
+      removeStart: hit.index - sepBefore,
+      removeEnd: sepBefore === 0 ? hit.end + sepAfter : hit.end,
+    });
+    prevEnd = hit.end + sepAfter;
+  }
+
+  segments.push({
+    kind: "text",
+    text: body.slice(prevEnd),
+    start: prevEnd,
+    end: body.length,
+  });
+  return segments;
 }
 
 const STATUS_TEXT: Record<Status, string> = {
@@ -48,7 +127,7 @@ const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
   { type: "ol", label: "編號" },
 ];
 
-export function Editor({ card, onSaved, onReload, onLinkAdded, onOpenCard, report }: Props) {
+export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, onOpenCard, report }: Props) {
   const [title, setTitle] = useState(card.title);
   const [body, setBody] = useState(card.body);
   const [cursorPos, setCursorPos] = useState(0);
@@ -111,6 +190,15 @@ export function Editor({ card, onSaved, onReload, onLinkAdded, onOpenCard, repor
     return () => clearTimeout(t);
   }, [title, body, status, uploading]);
 
+  // 元件卸載（例如在白板結束內嵌編輯或切換卡片）時，若仍有未儲存變更則立即沖刷存檔
+  useEffect(() => {
+    return () => {
+      if (statusRef.current === "dirty" && !savingRef.current) {
+        void saveRef.current?.();
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const unsafe = status !== "saved" || uploading > 0;
     if (!unsafe) return;
@@ -133,55 +221,57 @@ export function Editor({ card, onSaved, onReload, onLinkAdded, onOpenCard, repor
     markDirty();
   };
 
-  const applyEditPatch = useCallback((patch: EditPatch) => {
+  const activeSegStartRef = useRef(0);
+  const segRefs = useRef<Map<number, HTMLTextAreaElement>>(new Map());
+
+  const getGlobalSelection = (): { start: number; end: number } => {
     const el = textRef.current;
-    if (el) {
-      el.focus();
-      el.setSelectionRange(patch.replaceFrom, patch.replaceTo);
-      let execOk = false;
-      try {
-        if (typeof document.execCommand === "function") {
-          execOk = document.execCommand("insertText", false, patch.insertText);
-        }
-      } catch {
-        execOk = false;
-      }
-      if (!execOk || el.value !== patch.text) {
-        onBody(patch.text);
-      } else if (latest.current.body !== patch.text) {
-        onBody(patch.text);
-      }
-      el.setSelectionRange(patch.selectionStart, patch.selectionEnd);
-      setCursorPos(patch.selectionStart);
-      requestAnimationFrame(() => {
-        el.setSelectionRange(patch.selectionStart, patch.selectionEnd);
-      });
-    } else {
-      onBody(patch.text);
-      setCursorPos(patch.selectionStart);
+    const offset = activeSegStartRef.current;
+    if (el && document.activeElement === el) {
+      return {
+        start: offset + (el.selectionStart ?? 0),
+        end: offset + (el.selectionEnd ?? el.selectionStart ?? 0),
+      };
     }
+    return { start: cursorPos, end: cursorPos };
+  };
+
+  const applyEditPatch = useCallback((patch: EditPatch) => {
+    onBody(patch.text);
+    setCursorPos(patch.selectionStart);
+    requestAnimationFrame(() => {
+      const nextSegs = splitBodySegments(patch.text);
+      for (const s of nextSegs) {
+        if (s.kind === "text" && patch.selectionStart >= s.start && patch.selectionStart <= s.end) {
+          const el = segRefs.current.get(s.start);
+          if (el) {
+            textRef.current = el;
+            activeSegStartRef.current = s.start;
+            el.focus();
+            const localStart = Math.max(0, patch.selectionStart - s.start);
+            const localEnd = Math.max(localStart, Math.min(s.end - s.start, patch.selectionEnd - s.start));
+            el.setSelectionRange(localStart, localEnd);
+          }
+          break;
+        }
+      }
+    });
   }, []);
 
   const handleToolbarLineType = (targetType: LineType) => {
-    const el = textRef.current;
-    const selStart = el?.selectionStart ?? cursorPos;
-    const selEnd = el?.selectionEnd ?? selStart;
+    const { start: selStart, end: selEnd } = getGlobalSelection();
     const patch = applyLineType(latest.current.body, selStart, selEnd, targetType);
     applyEditPatch(patch);
   };
 
   const handleToolbarIndent = (direction: 1 | -1) => {
-    const el = textRef.current;
-    const selStart = el?.selectionStart ?? cursorPos;
-    const selEnd = el?.selectionEnd ?? selStart;
+    const { start: selStart, end: selEnd } = getGlobalSelection();
     const patch = indentListLines(latest.current.body, selStart, selEnd, direction);
     if (patch) applyEditPatch(patch);
   };
 
   const openMentionFromToolbar = () => {
-    const el = textRef.current;
-    const start = el?.selectionStart ?? latest.current.body.length;
-    const end = el?.selectionEnd ?? start;
+    const { start, end } = getGlobalSelection();
     setMentionState({ replaceFrom: start, replaceTo: end, initialQuery: "" });
   };
 
@@ -262,10 +352,8 @@ export function Editor({ card, onSaved, onReload, onLinkAdded, onOpenCard, repor
     const lang = ext || "tsx";
     const header = cleanLabel ? "```" + lang + ":" + cleanLabel : "```" + lang;
 
-    const el = textRef.current;
     const cur = latest.current.body;
-    const from = el?.selectionStart ?? cursorPos;
-    const to = el?.selectionEnd ?? from;
+    const { start: from, end: to } = getGlobalSelection();
     const selectedText = cur.slice(from, to);
     const prefixNewline = from > 0 && cur[from - 1] !== "\n" ? "\n\n" : "";
     const insertText = prefixNewline + header + "\n" + selectedText + "\n```\n";
@@ -411,95 +499,196 @@ export function Editor({ card, onSaved, onReload, onLinkAdded, onOpenCard, repor
       )}
 
       {!previewing ? (
-        <textarea
-          ref={textRef}
-          className="body-input"
-          value={body}
-          placeholder="內文（Markdown）。可直接貼上或拖入圖片、影片，或輸入 @ 引用其他卡片。"
-          aria-label="卡片內文"
-          onSelect={(e) => setCursorPos(e.currentTarget.selectionStart ?? 0)}
-          onKeyUp={(e) => setCursorPos(e.currentTarget.selectionStart ?? 0)}
-          onClick={(e) => setCursorPos(e.currentTarget.selectionStart ?? 0)}
-          onKeyDown={(e) => {
-            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-            if (e.key === "Tab") {
-              const el = e.currentTarget;
-              const patch = indentListLines(
-                latest.current.body,
-                el.selectionStart ?? 0,
-                el.selectionEnd ?? 0,
-                e.shiftKey ? -1 : 1,
-              );
-              if (!patch) return;
-              e.preventDefault();
-              applyEditPatch(patch);
-              return;
-            }
-            if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-              const el = e.currentTarget;
-              const patch = handleListEnter(
-                latest.current.body,
-                el.selectionStart ?? 0,
-                el.selectionEnd ?? 0,
-              );
-              if (!patch) return;
-              e.preventDefault();
-              applyEditPatch(patch);
-            }
-          }}
-          onChange={(e) => {
-            const val = e.target.value;
-            const pos = e.currentTarget.selectionStart ?? val.length;
-            const prevLen = latest.current.body.length;
-            onBody(val);
-            setCursorPos(pos);
-            if (val.length >= prevLen && pos > 0 && val[pos - 1] === "@") {
-              const trig = detectAtTrigger(val, pos);
-              if (trig && trig.query === "") {
-                setMentionState({
-                  replaceFrom: trig.atIndex,
-                  replaceTo: pos,
-                  initialQuery: "",
-                });
+        (() => {
+          const segments = splitBodySegments(body);
+          const hasMedia = segments.length > 1;
+          return (
+            <div
+              className={hasMedia ? "body-input segmented-editor" : "segmented-editor-single"}
+              style={
+                hasMedia
+                  ? {
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                      overflowY: "auto",
+                      padding: 8,
+                      minHeight: compact ? 120 : 220,
+                    }
+                  : { display: "flex", flexDirection: "column", flex: 1, minHeight: compact ? 120 : undefined }
               }
-            }
-          }}
-          onPaste={(e) => {
-            if (e.clipboardData.files.length) {
-              e.preventDefault();
-              const files = takeFiles(e.clipboardData.files);
-              if (files.length) void uploadFiles(files, e.currentTarget.selectionStart ?? latest.current.body.length);
-              return;
-            }
-            const plain = e.clipboardData.getData("text/plain");
-            const html = e.clipboardData.getData("text/html");
-            const transformed = transformPasteContent(plain, html);
-            if (transformed === null) return;
-            e.preventDefault();
-            const from = e.currentTarget.selectionStart ?? latest.current.body.length;
-            const to = e.currentTarget.selectionEnd ?? from;
-            const cur = latest.current.body;
-            const nextText = cur.slice(0, from) + transformed + cur.slice(to);
-            const nextCursor = from + transformed.length;
-            applyEditPatch({
-              text: nextText,
-              selectionStart: nextCursor,
-              selectionEnd: nextCursor,
-              replaceFrom: from,
-              replaceTo: to,
-              insertText: transformed,
-            });
-          }}
-          onDragOver={(e) => {
-            if (e.dataTransfer.types.includes("Files")) e.preventDefault();
-          }}
-          onDrop={(e) => {
-            if (!e.dataTransfer.files.length) return;
-            e.preventDefault();
-            const files = takeFiles(e.dataTransfer.files);
-            if (files.length) void uploadFiles(files, e.currentTarget.selectionStart ?? latest.current.body.length);
-          }}
-        />
+            >
+              {segments.map((seg, idx) => {
+                if (seg.kind === "media") {
+                  return (
+                    <div
+                      key={`media-${seg.mediaId}-${seg.rawStart}`}
+                      style={{
+                        padding: "4px 6px",
+                        borderRadius: 6,
+                        background: "rgba(15, 23, 42, 0.35)",
+                        border: "1px solid var(--line, #334155)",
+                      }}
+                    >
+                      <MediaEmbed
+                        id={seg.mediaId}
+                        explicitWidth={seg.explicitWidth}
+                        onChangeWidth={(w) => {
+                          const { baseAlt } = extractWidthFromAlt(seg.alt);
+                          const nextToken = `![${baseAlt}|${w}](media:${seg.mediaId})`;
+                          const cur = latest.current.body;
+                          onBody(cur.slice(0, seg.rawStart) + nextToken + cur.slice(seg.rawEnd));
+                        }}
+                        onRemove={() => {
+                          const cur = latest.current.body;
+                          onBody(cur.slice(0, seg.removeStart) + cur.slice(seg.removeEnd));
+                        }}
+                      />
+                    </div>
+                  );
+                }
+
+                const lineCount = Math.max(1, seg.text.split("\n").length);
+                return (
+                  <textarea
+                    key={`text-${idx}`}
+                    ref={(el) => {
+                      if (el) {
+                        segRefs.current.set(seg.start, el);
+                        if (idx === 0 && !textRef.current) {
+                          textRef.current = el;
+                        }
+                      } else {
+                        segRefs.current.delete(seg.start);
+                      }
+                    }}
+                    className={hasMedia ? "body-segment-input" : "body-input"}
+                    rows={hasMedia ? Math.max(2, lineCount) : undefined}
+                    style={
+                      hasMedia
+                        ? {
+                            width: "100%",
+                            resize: "vertical",
+                            border: "1px dashed rgba(148, 163, 184, 0.25)",
+                            borderRadius: 4,
+                            background: "transparent",
+                            color: "inherit",
+                            padding: "4px 6px",
+                            fontFamily: "inherit",
+                            fontSize: "inherit",
+                            lineHeight: 1.5,
+                          }
+                        : compact
+                          ? { minHeight: 110 }
+                          : undefined
+                    }
+                    value={seg.text}
+                    placeholder={
+                      idx === 0
+                        ? "內文（Markdown）。可直接貼上或拖入圖片、影片，或輸入 @ 引用其他卡片。"
+                        : "繼續輸入段落內容（支援 Markdown 語法）…"
+                    }
+                    aria-label={idx === 0 ? "卡片內文" : `卡片內文段落 ${idx + 1}`}
+                    onFocus={(e) => {
+                      textRef.current = e.currentTarget;
+                      activeSegStartRef.current = seg.start;
+                    }}
+                    onSelect={(e) => {
+                      textRef.current = e.currentTarget;
+                      activeSegStartRef.current = seg.start;
+                      setCursorPos(seg.start + (e.currentTarget.selectionStart ?? 0));
+                    }}
+                    onKeyUp={(e) => {
+                      textRef.current = e.currentTarget;
+                      activeSegStartRef.current = seg.start;
+                      setCursorPos(seg.start + (e.currentTarget.selectionStart ?? 0));
+                    }}
+                    onClick={(e) => {
+                      textRef.current = e.currentTarget;
+                      activeSegStartRef.current = seg.start;
+                      setCursorPos(seg.start + (e.currentTarget.selectionStart ?? 0));
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                      const el = e.currentTarget;
+                      const gStart = seg.start + (el.selectionStart ?? 0);
+                      const gEnd = seg.start + (el.selectionEnd ?? 0);
+                      if (e.key === "Tab") {
+                        const patch = indentListLines(latest.current.body, gStart, gEnd, e.shiftKey ? -1 : 1);
+                        if (!patch) return;
+                        e.preventDefault();
+                        applyEditPatch(patch);
+                        return;
+                      }
+                      if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                        const patch = handleListEnter(latest.current.body, gStart, gEnd);
+                        if (!patch) return;
+                        e.preventDefault();
+                        applyEditPatch(patch);
+                      }
+                    }}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const localPos = e.currentTarget.selectionStart ?? val.length;
+                      const cur = latest.current.body;
+                      const prevLen = cur.length;
+                      const nextBody = cur.slice(0, seg.start) + val + cur.slice(seg.end);
+                      const globalPos = seg.start + localPos;
+                      onBody(nextBody);
+                      setCursorPos(globalPos);
+                      if (nextBody.length >= prevLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
+                        const trig = detectAtTrigger(nextBody, globalPos);
+                        if (trig && trig.query === "") {
+                          setMentionState({
+                            replaceFrom: trig.atIndex,
+                            replaceTo: globalPos,
+                            initialQuery: "",
+                          });
+                        }
+                      }
+                    }}
+                    onPaste={(e) => {
+                      const gFrom = seg.start + (e.currentTarget.selectionStart ?? seg.text.length);
+                      const gTo = seg.start + (e.currentTarget.selectionEnd ?? e.currentTarget.selectionStart ?? seg.text.length);
+                      if (e.clipboardData.files.length) {
+                        e.preventDefault();
+                        const files = takeFiles(e.clipboardData.files);
+                        if (files.length) void uploadFiles(files, gFrom);
+                        return;
+                      }
+                      const plain = e.clipboardData.getData("text/plain");
+                      const html = e.clipboardData.getData("text/html");
+                      const transformed = transformPasteContent(plain, html);
+                      if (transformed === null) return;
+                      e.preventDefault();
+                      const cur = latest.current.body;
+                      const nextText = cur.slice(0, gFrom) + transformed + cur.slice(gTo);
+                      const nextCursor = gFrom + transformed.length;
+                      applyEditPatch({
+                        text: nextText,
+                        selectionStart: nextCursor,
+                        selectionEnd: nextCursor,
+                        replaceFrom: gFrom,
+                        replaceTo: gTo,
+                        insertText: transformed,
+                      });
+                    }}
+                    onDragOver={(e) => {
+                      if (e.dataTransfer.types.includes("Files")) e.preventDefault();
+                    }}
+                    onDrop={(e) => {
+                      if (!e.dataTransfer.files.length) return;
+                      e.preventDefault();
+                      const gAt = seg.start + (e.currentTarget.selectionStart ?? seg.text.length);
+                      const files = takeFiles(e.dataTransfer.files);
+                      if (files.length) void uploadFiles(files, gAt);
+                    }}
+                  />
+                );
+              })}
+            </div>
+          );
+        })()
       ) : (
         <div className="preview" data-testid="editor-preview">
           <Markdown source={body} onOpenCard={onOpenCard} />
@@ -587,30 +776,31 @@ interface PatchPair {
 const AI_LANG_HEADER_RE =
   /^(typescript|javascript|ts|tsx|js|jsx|python|py|sql|sqlite|json|html|css|scss|bash|sh|shell|yaml|yml|toml|markdown|md|diff|plaintext|text|c|cpp|csharp|java|go|rust|ruby|php|swift|kotlin)(\s+(copy(\s+code)?|複製(\s*代碼|\s*程式碼)?))?$/i;
 
-// 識別單獨一行的檔案標題（如 `lib/storage/httpDriver.ts（一處）` 或 `#### api.ts`）
-function isStandaloneFileHeaderLine(line: string): boolean {
-  const cleanTitle = line.trim().replace(/^#{1,6}\s*/, "").replace(/`/g, "").trim();
-  return /^[a-zA-Z0-9_./-]+\.(ts|tsx|js|jsx|py|sql|json|css|md|html)\s*([（(][^）)]*[）)])?$/.test(cleanTitle);
-}
-
-// 識別 AI 代碼塊下方常見的說明段落或下一小節標題（僅限無縮排的頂層行，避免誤傷縮排代碼）
+// 識別 AI 代碼塊下方常見的說明段落或下一小節標題（無圍欄複製時應從此行起截斷）
 function isAiTrailingProseLine(line: string): boolean {
-  if (/^\s/.test(line)) return false;
   const t = line.trim();
   if (!t) return false;
+  // 1. 明確的中文說明前綴、章節標籤或檢查點標題
   if (
     /^(原因|問題原因|說明|注意|備註|為什麼|驗證方式|下一步|修改說明)\s*[：:]/.test(t) ||
     /^#{1,6}\s+(檢查點|步驟|檔案|修改|\d+\.)/.test(t) ||
-    /^(檢查點\s*\d+|步驟\s*\d+|【[A-Z0-9一二三四五六七八九十]+】)/.test(t) ||
+    /^(檢查點\s*\d+|【[A-Z0-9一二三四五六七八九十]+】)/.test(t) ||
     /^[-*]{3,}\s*$/.test(t)
   ) {
     return true;
   }
-  return isStandaloneFileHeaderLine(t);
+  // 2. 下一處的檔案標題行，例如：`lib/storage/httpDriver.ts（一處）` 或 `#### api.ts（兩處）`
+  const cleanTitle = t.replace(/^#{1,6}\s*/, "").replace(/`/g, "").trim();
+  if (
+    /^[a-zA-Z0-9_./-]+\.(ts|tsx|js|jsx|py|sql|json|css|md|html)\s*([（(][^）)]*[）)])?$/.test(cleanTitle)
+  ) {
+    return true;
+  }
+  return false;
 }
 
-// 統一淨化器：支援「有 ``` 圍欄」與「無圍欄（網頁直接複製含 TypeScript 標題與下方原因說明）」
-function stripOuterFence(raw: string, cutTrailingProse = false): string {
+// 統一淨化器：同時支援「有 ``` 圍欄」與「無圍欄（從網頁直接複製含 TypeScript 標題與下方原因說明）」
+function stripOuterFence(raw: string): string {
   const FENCE = "`".repeat(3);
   const trimBlank = (arr: string[]): string[] => {
     let a = arr;
@@ -621,30 +811,21 @@ function stripOuterFence(raw: string, cutTrailingProse = false): string {
   let lines = trimBlank(normalizeCodeText(raw).split("\n"));
   if (lines.length === 0) return "";
 
-  // Case A: 首行以 ``` 圍欄開頭（若有對應結尾圍欄則取中間，若漏複製結尾圍欄仍剝除首行圍欄）
-  if (lines[0].trim().startsWith(FENCE)) {
-    let n = 0;
+  // Case A: 首尾有 ``` 圍欄
+  if (lines.length >= 2) {
     const first = lines[0].trim();
-    while (first[n] === "`") n++;
-    let closeIdx = -1;
-    for (let i = 1; i < lines.length; i++) {
-      const t = lines[i].trim();
-      if (t.length >= n && t.replace(/`/g, "") === "") {
-        closeIdx = i;
-        break;
-      }
+    const last = lines[lines.length - 1].trim();
+    if (first.startsWith(FENCE) && last.length >= 3 && last.replace(/`/g, "") === "") {
+      return trimBlank(lines.slice(1, -1)).join("\n");
     }
-    lines = closeIdx >= 0 ? lines.slice(1, closeIdx) : lines.slice(1);
-    return trimBlank(lines).join("\n");
   }
 
-  // Case B: 無首行圍欄（網頁直接反白複製），剝除頂部語言標籤（如 TypeScript）、複製按鈕文字或單行檔名標題
+  // Case B: 無圍欄（網頁直接反白複製），剝除首行語言標籤（如 TypeScript / Copy code）
   while (lines.length > 0) {
     const first = lines[0].trim();
     if (
       AI_LANG_HEADER_RE.test(first) ||
-      /^(copy(\s+code)?|複製(\s*代碼|\s*程式碼)?)$/i.test(first) ||
-      isStandaloneFileHeaderLine(first)
+      /^(copy(\s+code)?|複製(\s*代碼|\s*程式碼)?)$/i.test(first)
     ) {
       lines = trimBlank(lines.slice(1));
     } else {
@@ -652,104 +833,68 @@ function stripOuterFence(raw: string, cutTrailingProse = false): string {
     }
   }
 
-  // 若末行殘留單獨的 ``` 結尾圍欄，予以剝除
-  if (lines.length > 0) {
-    const last = lines[lines.length - 1].trim();
-    if (last.length >= 3 && last.replace(/`/g, "") === "") {
-      lines = trimBlank(lines.slice(0, -1));
+  // 剝除尾部的說明文字或下一個檔案標題（如「原因：...」、「lib/storage/httpDriver.ts（一處）」）
+  let cutIdx = lines.length;
+  for (let i = 0; i < lines.length; i++) {
+    if (isAiTrailingProseLine(lines[i])) {
+      cutIdx = i;
+      break;
     }
   }
-
-  // 僅在需要剝除尾部說明時（replace 區塊），從第 1 行起尋找頂層非代碼說明行並截斷
-  if (cutTrailingProse && lines.length > 1) {
-    let cutIdx = lines.length;
-    for (let i = 1; i < lines.length; i++) {
-      if (isAiTrailingProseLine(lines[i])) {
-        cutIdx = i;
-        break;
-      }
-    }
-    lines = trimBlank(lines.slice(0, cutIdx));
-  }
+  lines = trimBlank(lines.slice(0, cutIdx));
   return lines.join("\n");
-}
-
-const FIND_MARKER_RE =
-  /【(尋找這段代碼|尋找這段程式碼|尋找代碼|尋找程式碼|定位這段代碼|定位代碼|定位程式碼|原始代碼|原始程式碼)】|\[(尋找這段代碼\vert{}尋找這段程式碼\vert{}尋找代碼\vert{}定位代碼)\]/;
-const REPLACE_MARKER_RE =
-  /【(替換為以下代碼|替換為以下程式碼|取代為以下代碼|取代為以下程式碼|替換代碼|替換程式碼|取代代碼|取代程式碼)】|\[(替換為以下代碼\vert{}替換為以下程式碼\vert{}取代為以下代碼\vert{}替換代碼\vert{}取代代碼)\]/;
-
-// 將可能與前後文字黏在同一行的標記拆成獨立行，並排除程式碼內的字串常數（如 "【尋找這段代碼】"）
-function splitInlineMarkers(rawLines: string[]): string[] {
-  const out: string[] = [];
-  let foundFirstLine = false;
-  for (let i = 0; i < rawLines.length; i++) {
-    let line = rawLines[i];
-    // 容錯：使用者滑鼠反白起點漏選第一個「【」，導致首行以「尋找這段代碼】」開頭
-    if (!foundFirstLine && line.trim() !== "") {
-      foundFirstLine = true;
-      line = line.replace(
-        /^(\s*)(尋找這段代碼|尋找這段程式碼|尋找代碼|定位代碼)】/,
-        "$1【$2】",
-      );
-    }
-    const fMatch = FIND_MARKER_RE.exec(line);
-    const rMatch = REPLACE_MARKER_RE.exec(line);
-    const match =
-      fMatch && rMatch
-        ? fMatch.index <= rMatch.index
-          ? { m: fMatch, token: "【尋找這段代碼】" }
-          : { m: rMatch, token: "【替換為以下代碼】" }
-        : fMatch
-          ? { m: fMatch, token: "【尋找這段代碼】" }
-          : rMatch
-            ? { m: rMatch, token: "【替換為以下代碼】" }
-            : null;
-
-    if (!match) {
-      out.push(line);
-      continue;
-    }
-
-    const idx = match.m.index;
-    const len = match.m[0].length;
-    const prefix = line.slice(0, idx);
-    const suffix = line.slice(idx + len);
-
-    // 若標記前後緊鄰引號、斜線或等號，代表是程式碼本身的字串／註解／正則（如 Editor.tsx 自身），不拆行
-    if (
-      /["'`/=\\]\s*$/.test(prefix) ||
-      /^\s*["'`)/\\]/.test(suffix) ||
-      /^\s*(\/\/|\/\*)/.test(prefix)
-    ) {
-      out.push(line);
-      continue;
-    }
-
-    const cleanPrefix = prefix.replace(/^[#*>\-\s•・0-9.:：()（）]+/, "").trim();
-    if (cleanPrefix.length > 0 && !isStandaloneFileHeaderLine(cleanPrefix)) {
-      out.push(prefix);
-    }
-    out.push(match.token);
-
-    const cleanSuffix = suffix.replace(/^[\s:：*#]+/, "").trim();
-    if (cleanSuffix.length > 0) {
-      out.push(cleanSuffix);
-    }
-  }
-  return out;
 }
 
 function parseAiPatchPairs(rawInput: string): PatchPair[] {
   const text = normalizeCodeText(rawInput);
-  const lines = splitInlineMarkers(text.split("\n"));
+  const findMarker = "【尋找這段代碼】";
+  const replaceMarker = "【替換為以下代碼】";
+  const FENCE = "`".repeat(3);
+  const lines = text.split("\n");
 
+  // 逐行掃描：圍欄內的任何文字（含代碼裡的字串常數）一律不當標記；
+  // 標記只在圍欄外、且去除標題／粗體／編號裝飾後以標記開頭的行才成立
   const marks: { kind: "find" | "replace"; line: number }[] = [];
+  let fenceLen = 0;
   for (let i = 0; i < lines.length; i++) {
     const t = lines[i].trim();
-    if (t === "【尋找這段代碼】") marks.push({ kind: "find", line: i });
-    else if (t === "【替換為以下代碼】") marks.push({ kind: "replace", line: i });
+    if (fenceLen > 0) {
+      if (t.length >= fenceLen && t.replace(/`/g, "") === "") fenceLen = 0;
+      continue;
+    }
+    if (t.startsWith(FENCE)) {
+      let n = 0;
+      while (t[n] === "`") n++;
+      fenceLen = n;
+      continue;
+    }
+    const d = t.replace(/^[#*>\-\s0-9.:：]+/, "");
+    if (d.startsWith(findMarker)) marks.push({ kind: "find", line: i });
+    else if (d.startsWith(replaceMarker)) marks.push({ kind: "replace", line: i });
   }
+
+  // 取區間內第一個有實質內容的圍欄本文；無圍欄時交由 stripOuterFence 剝除 TypeScript 標籤與下方說明文字
+  const takeBody = (from: number, to: number): string => {
+    let sawFence = false;
+    let k = from;
+    while (k < to) {
+      const t = lines[k].trim();
+      if (!t.startsWith(FENCE)) {
+        k++;
+        continue;
+      }
+      sawFence = true;
+      let n = 0;
+      while (t[n] === "`") n++;
+      let e = k + 1;
+      while (e < to && !(lines[e].trim().length >= n && lines[e].trim().replace(/`/g, "") === "")) e++;
+      const body = lines.slice(k + 1, e).join("\n").replace(/^\n+|\n+$/g, "");
+      if (body.trim().length > 0) return body;
+      k = e + 1;
+    }
+    if (sawFence) return "";
+    return stripOuterFence(lines.slice(from, to).join("\n"));
+  };
 
   const pairs: PatchPair[] = [];
   let m = 0;
@@ -761,8 +906,8 @@ function parseAiPatchPairs(rawInput: string): PatchPair[] {
     }
     const nextIdx = marks.findIndex((x, k) => k > m + 1 && x.kind === "find");
     const segEnd = nextIdx >= 0 ? marks[nextIdx].line : lines.length;
-    const findBody = stripOuterFence(lines.slice(marks[m].line + 1, rm.line).join("\n"), false);
-    const replaceBody = stripOuterFence(lines.slice(rm.line + 1, segEnd).join("\n"), true);
+    const findBody = takeBody(marks[m].line + 1, rm.line);
+    const replaceBody = takeBody(rm.line + 1, segEnd);
     if (findBody.trim().length > 0) {
       pairs.push({ findText: findBody, replaceText: replaceBody });
     }
@@ -910,10 +1055,7 @@ function CodeReplaceModal(props: {
 
   const handleSmartPasteChange = (val: string) => {
     setSmartInput(val);
-    if (!val.trim()) {
-      setFeedback(null);
-      return;
-    }
+    setFeedback(null);
     const parsed = parseAiPatchPairs(val);
     if (parsed.length > 0) {
       setPairs(parsed);
@@ -922,25 +1064,11 @@ function CodeReplaceModal(props: {
         kind: "ok",
         msg: `✅ 已成功解析 ${parsed.length} 組【尋找／替換】指令並淨化格式！可切換上方組別標籤查看每一組細節。`,
       });
-    } else {
-      const hasFind = FIND_MARKER_RE.test(val) || /^\s*(尋找這段代碼|尋找這段程式碼)】/.test(val);
-      const hasReplace = REPLACE_MARKER_RE.test(val);
-      setFeedback({
-        kind: "err",
-        msg:
-          !hasFind && !hasReplace
-            ? "⚠️ 未能自動拆開：貼上的內容中沒有【尋找這段代碼】與【替換為以下代碼】標記。請確認複製範圍包含這兩個標題，或要求 AI 使用此格式輸出。"
-            : hasFind && !hasReplace
-              ? "⚠️ 未能自動拆開：只偵測到【尋找這段代碼】，缺少對應的【替換為以下代碼】標記。"
-              : !hasFind && hasReplace
-                ? "⚠️ 未能自動拆開：只偵測到【替換為以下代碼】，缺少開頭的【尋找這段代碼】標記（請確認反白複製時有選到開頭的【尋找這段代碼】）。"
-                : "⚠️ 未能自動拆開：已偵測到標記，但【尋找這段代碼】區塊內的代碼為空。",
-      });
     }
   };
 
   const handleFindChange = (val: string) => {
-    if (parseAiPatchPairs(val).length > 0) {
+    if (val.includes("【尋找這段代碼】") && val.includes("【替換為以下代碼】")) {
       handleSmartPasteChange(val);
       return;
     }
