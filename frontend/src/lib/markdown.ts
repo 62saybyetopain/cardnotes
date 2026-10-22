@@ -984,14 +984,24 @@ export function applyHighlight(
 
   if (color === null) return null;
 
-  const inner = selected || "重點文字";
-  const prefix = `==${color}:`;
-  const insertText = `${prefix}${inner}==`;
+  // 未選取任何文字時不執行插入，避免插入佔位文字
+  if (!selected) return null;
+
+  // 前方若非空白字元且非行首，自動補上前導空格避免前後語法沾黏
+  const needLeadingSpace =
+    selStart > 0 &&
+    text[selStart - 1] !== " " &&
+    text[selStart - 1] !== "\t" &&
+    text[selStart - 1] !== "\n";
+  const lead = needLeadingSpace ? " " : "";
+
+  const prefix = `${lead}==${color}:`;
+  const insertText = `${prefix}${selected}==`;
   const nextText = text.slice(0, selStart) + insertText + text.slice(selEnd);
   return {
     text: nextText,
     selectionStart: selStart + prefix.length,
-    selectionEnd: selStart + prefix.length + inner.length,
+    selectionEnd: selStart + prefix.length + selected.length,
     replaceFrom: selStart,
     replaceTo: selEnd,
     insertText,

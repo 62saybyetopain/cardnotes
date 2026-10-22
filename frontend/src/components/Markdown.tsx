@@ -605,7 +605,11 @@ function tokenizeRichNodes(children: ReactNode): RichToken[] {
         const cKey = COLOR_ALIAS[m[3].toLowerCase()] ?? "amber";
         tokens.push({ kind: "hl_open_explicit", color: cKey, raw });
       } else if (raw === "==") {
-        const isPartOfTriple = prevChar === "=" || nextChar === "=";
+        // 修正：當下一個字元接續 ==color: 時，本處的 == 是前一個螢光筆的結尾，不應被誤判為 triple 等號
+        const isNextColorOpen = /^(amber|yellow|green|blue|purple|pink|黃|綠|藍|紫|粉|紅)[:：]/i.test(
+          child.slice(m.index + raw.length + 2),
+        );
+        const isPartOfTriple = (prevChar === "=" || nextChar === "=") && !isNextColorOpen;
         const canOpen = !isPartOfTriple && (nextChar === "" || !/\s/.test(nextChar));
         const canClose = !isPartOfTriple && (prevChar === "" || !/\s/.test(prevChar));
         tokens.push({ kind: "hl_delim", raw, canOpen, canClose });
@@ -687,9 +691,10 @@ function parseRichTokenStream(tokens: RichToken[], keyPrefix = "r"): ReactNode[]
         out.push(
           <mark
             key={`${keyPrefix}-mark-${i}`}
+            className="md-highlight"
             style={{
               backgroundColor: style.bg,
-              color: style.text,
+              color: "inherit",
               borderBottom: `2px solid ${style.border}`,
               padding: "0 4px",
               borderRadius: 3,
@@ -722,9 +727,10 @@ function parseRichTokenStream(tokens: RichToken[], keyPrefix = "r"): ReactNode[]
           out.push(
             <mark
               key={`${keyPrefix}-mark-${i}`}
+              className="md-highlight"
               style={{
                 backgroundColor: style.bg,
-                color: style.text,
+                color: "inherit",
                 borderBottom: `2px solid ${style.border}`,
                 padding: "0 4px",
                 borderRadius: 3,

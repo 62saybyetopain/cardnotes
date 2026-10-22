@@ -1,11 +1,12 @@
-:root {
+:root, [data-theme="dark"] {
+  --bg: #17181a; --panel: #1f2023; --line: #34363a; --text: #e6e6e6; --muted: #9a9ea6;
+  --accent: #6c9bff; --accent-soft: #24304a; --danger: #ff7b6b; --warn: #e0b24f;
+  --card: #26272b; color-scheme: dark;
+}
+[data-theme="light"] {
   --bg: #f6f6f4; --panel: #ffffff; --line: #dcdcd6; --text: #1f2328; --muted: #6b7078;
   --accent: #2f6fed; --accent-soft: #e6eefe; --danger: #c0392b; --warn: #b7791f;
-  --card: #fffdf7; color-scheme: light dark;
-}
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #17181a; --panel: #1f2023; --line: #34363a; --text: #e6e6e6; --muted: #9a9ea6;
-    --accent: #6c9bff; --accent-soft: #24304a; --danger: #ff7b6b; --warn: #e0b24f; --card: #26272b; }
+  --card: #fffdf7; color-scheme: light;
 }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
@@ -88,7 +89,12 @@ summary .add { float: right; border: 0; background: transparent; }
 .mention-item.active, .mention-item:hover { background: var(--accent-soft); }
 .body-input { width: 100%; min-height: 320px; resize: vertical; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
 .preview-label { font-size: 12px; color: var(--muted); }
-.preview { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 12px; min-height: 320px; max-height: 72vh; overflow: auto; user-select: text; }
+.preview { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 12px; min-height: 320px; max-height: 72vh; overflow: auto; user-select: text; background: var(--panel); }
+.live-render-active { border: 1px solid transparent; transition: border-color 0.15s ease; border-radius: 6px; }
+.live-render-active:hover { border-color: var(--line); }
+.md-highlight { font-weight: 500; }
+[data-theme="light"] .md-highlight { color: #111827 !important; }
+[data-theme="dark"] .md-highlight { color: #f3f4f6 !important; }
 .banner { padding: 6px 8px; border-radius: 6px; font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0; }
 .banner.danger { border: 1px solid var(--danger); color: var(--danger); } .banner.warn { border: 1px solid var(--warn); color: var(--warn); }
 

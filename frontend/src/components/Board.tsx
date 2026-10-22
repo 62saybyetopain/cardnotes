@@ -476,40 +476,6 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   };
   const onGroupRemove = useCallback((gid: string) => void removeGroupImpl.current?.(gid), []);
 
-  const handleInlineCardSaved = useCallback(
-    (updated: { id: string; title: string; body: string; updated_at: string }) => {
-      setNodes((ns) =>
-        ns.map((n) =>
-          n.id === updated.id && n.type === "card"
-            ? { ...n, data: { ...n.data, title: updated.title, body: updated.body, updatedAt: updated.updated_at } }
-            : n,
-        ),
-      );
-    },
-    [],
-  );
-
-  const handleInlineLinkAdded = useCallback(
-    (sourceId: string, targetId: string, extra?: Partial<BoardLink>) => {
-      const onBoard = new Set(nodesRef.current.filter((n) => n.type === "card").map((n) => n.id));
-      if (!onBoard.has(sourceId) || !onBoard.has(targetId)) return;
-      const norm = normalizeLink({ source_id: sourceId, target_id: targetId, ...extra });
-      setLinks((ls) => {
-        const filtered = ls.filter(
-          (l) =>
-            !(
-              l.source_id === norm.source_id &&
-              l.target_id === norm.target_id &&
-              l.relation_type === norm.relation_type
-            ),
-        );
-        return [...filtered, norm];
-      });
-      onLinksChanged();
-    },
-    [onLinksChanged],
-  );
-
   const toNode = useCallback(
     (c: BoardCard): CardFlowNode => ({
       id: c.card_id,
@@ -525,12 +491,10 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         sized: c.h != null,
         onResizeEnd,
         onOpenCard,
-        onCardSaved: handleInlineCardSaved,
-        onLinkAdded: handleInlineLinkAdded,
         report,
       },
     }),
-    [handleInlineCardSaved, handleInlineLinkAdded, onOpenCard, onResizeEnd, report],
+    [onOpenCard, onResizeEnd, report],
   );
 
   const toGroupNode = useCallback(

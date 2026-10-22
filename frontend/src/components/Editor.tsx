@@ -230,22 +230,48 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
 
   const activeSegStartRef = useRef(0);
   const segRefs = useRef<Map<number, HTMLTextAreaElement>>(new Map());
+  const containerRef = useRef<HTMLDivElement>(null);
+  const lastSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+  const [activeEditing, setActiveEditing] = useState(false);
 
   const getGlobalSelection = (): { start: number; end: number } => {
     const el = textRef.current;
     const offset = activeSegStartRef.current;
-    if (el && document.activeElement === el) {
-      return {
-        start: offset + (el.selectionStart ?? 0),
-        end: offset + (el.selectionEnd ?? el.selectionStart ?? 0),
-      };
+    if (el) {
+      const s = el.selectionStart ?? 0;
+      const e = el.selectionEnd ?? s;
+      if (s !== e || document.activeElement === el) {
+        lastSelectionRef.current = { start: offset + s, end: offset + e };
+        return lastSelectionRef.current;
+      }
     }
-    return { start: cursorPos, end: cursorPos };
+    // 支援直接在渲染畫面上反白文字套用格式
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && containerRef.current?.contains(sel.anchorNode)) {
+      const str = sel.toString();
+      if (str.trim().length > 0) {
+        const idx = latest.current.body.indexOf(str);
+        if (idx >= 0) {
+          lastSelectionRef.current = { start: idx, end: idx + str.length };
+          return lastSelectionRef.current;
+        }
+      }
+    }
+    return lastSelectionRef.current.start !== lastSelectionRef.current.end
+      ? lastSelectionRef.current
+      : { start: cursorPos, end: cursorPos };
   };
 
   const applyEditPatch = useCallback((patch: EditPatch) => {
+    // 記錄當前各滾動容器的 scrollTop，防止畫面被自動拉到卡片最下方
+    const savedContainerScroll = containerRef.current?.scrollTop;
+    const activeEl = textRef.current;
+    const savedElScroll = activeEl?.scrollTop;
+
     onBody(patch.text);
     setCursorPos(patch.selectionStart);
+    lastSelectionRef.current = { start: patch.selectionStart, end: patch.selectionEnd };
+
     requestAnimationFrame(() => {
       const nextSegs = splitBodySegments(patch.text);
       for (const s of nextSegs) {
@@ -254,13 +280,18 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
           if (el) {
             textRef.current = el;
             activeSegStartRef.current = s.start;
-            el.focus();
+            // preventScroll 避免游標跳轉造成容器滾動到底部
+            el.focus({ preventScroll: true });
             const localStart = Math.max(0, patch.selectionStart - s.start);
             const localEnd = Math.max(localStart, Math.min(s.end - s.start, patch.selectionEnd - s.start));
             el.setSelectionRange(localStart, localEnd);
+            if (savedElScroll !== undefined) el.scrollTop = savedElScroll;
           }
           break;
         }
+      }
+      if (containerRef.current && savedContainerScroll !== undefined) {
+        containerRef.current.scrollTop = savedContainerScroll;
       }
     });
   }, []);
@@ -448,7 +479,17 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
         </div>
       )}
 
-      <div className="editor-toolbar" role="toolbar" aria-label="格式與引用工具列">
+      <div
+        className="editor-toolbar"
+        role="toolbar"
+        aria-label="格式與引用工具列"
+        onMouseDown={(e) => {
+          // 防止點擊工具列導致輸入框失去焦點與選取範圍
+          if ((e.target as HTMLElement).tagName !== "SELECT" && (e.target as HTMLElement).tagName !== "INPUT") {
+            e.preventDefault();
+          }
+        }}
+      >
         {!previewing && (
           <>
             {LINE_TYPE_BUTTONS.map((btn) => (
@@ -668,209 +709,247 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
       )}
 
       {!previewing ? (
-        (() => {
-          const segments = splitBodySegments(body);
-          const hasMedia = segments.length > 1;
-          return (
+        <div
+          ref={containerRef}
+          className="live-editor-wrap"
+          style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: compact ? 120 : 320 }}
+        >
+          {!activeEditing ? (
             <div
-              className={hasMedia ? "body-input segmented-editor" : "segmented-editor-single"}
-              style={
-                hasMedia
-                  ? {
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 6,
-                      overflowY: "auto",
-                      padding: 8,
-                      minHeight: compact ? 120 : 220,
-                    }
-                  : { display: "flex", flexDirection: "column", flex: 1, minHeight: compact ? 120 : undefined }
-              }
+              className="preview live-render-active"
+              style={{ flex: 1, cursor: "text", minHeight: compact ? 120 : 320 }}
+              title="點擊此處即可就地編輯文字內容；選取文字可直接點擊工具列套用螢光筆或格式"
+              onClick={() => {
+                setActiveEditing(true);
+                requestAnimationFrame(() => textRef.current?.focus({ preventScroll: true }));
+              }}
             >
-              {segments.map((seg, idx) => {
-                if (seg.kind === "media") {
-                  return (
-                    <div
-                      key={`media-${seg.mediaId}-${seg.rawStart}`}
-                      style={{
-                        padding: "4px 6px",
-                        borderRadius: 6,
-                        background: "rgba(15, 23, 42, 0.35)",
-                        border: "1px solid var(--line, #334155)",
-                      }}
-                    >
-                      <MediaEmbed
-                        id={seg.mediaId}
-                        explicitWidth={seg.explicitWidth}
-                        onChangeWidth={(w) => {
-                          const { baseAlt } = extractWidthFromAlt(seg.alt);
-                          const nextToken = `![${baseAlt}|${w}](media:${seg.mediaId})`;
-                          const cur = latest.current.body;
-                          onBody(cur.slice(0, seg.rawStart) + nextToken + cur.slice(seg.rawEnd));
+              {body.trim() ? (
+                <Markdown source={body} onOpenCard={onOpenCard} />
+              ) : (
+                <span className="muted">點擊此處開始輸入卡片內容（支援 Markdown、貼上圖片與 @ 引用）…</span>
+              )}
+            </div>
+          ) : (
+            (() => {
+              const segments = splitBodySegments(body);
+              const hasMedia = segments.length > 1;
+              return (
+                <div
+                  className={hasMedia ? "body-input segmented-editor" : "segmented-editor-single"}
+                  style={
+                    hasMedia
+                      ? {
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 6,
+                          overflowY: "auto",
+                          padding: 8,
+                          minHeight: compact ? 120 : 220,
+                        }
+                      : { display: "flex", flexDirection: "column", flex: 1, minHeight: compact ? 120 : undefined }
+                  }
+                >
+                  {segments.map((seg, idx) => {
+                    if (seg.kind === "media") {
+                      return (
+                        <div
+                          key={`media-${seg.mediaId}-${seg.rawStart}`}
+                          style={{
+                            padding: "4px 6px",
+                            borderRadius: 6,
+                            background: "var(--bg)",
+                            border: "1px solid var(--line, #334155)",
+                          }}
+                        >
+                          <MediaEmbed
+                            id={seg.mediaId}
+                            explicitWidth={seg.explicitWidth}
+                            onChangeWidth={(w) => {
+                              const { baseAlt } = extractWidthFromAlt(seg.alt);
+                              const nextToken = `![${baseAlt}|${w}](media:${seg.mediaId})`;
+                              const cur = latest.current.body;
+                              onBody(cur.slice(0, seg.rawStart) + nextToken + cur.slice(seg.rawEnd));
+                            }}
+                            onRemove={() => {
+                              const cur = latest.current.body;
+                              onBody(cur.slice(0, seg.removeStart) + cur.slice(seg.removeEnd));
+                            }}
+                          />
+                        </div>
+                      );
+                    }
+
+                    const lineCount = Math.max(1, seg.text.split("\n").length);
+                    return (
+                      <textarea
+                        key={`text-${idx}`}
+                        ref={(el) => {
+                          if (el) {
+                            segRefs.current.set(seg.start, el);
+                            if (idx === 0) textRef.current = el;
+                          } else {
+                            segRefs.current.delete(seg.start);
+                          }
                         }}
-                        onRemove={() => {
+                        className={hasMedia ? "body-segment-input" : "body-input"}
+                        rows={hasMedia ? Math.max(2, lineCount) : undefined}
+                        style={
+                          hasMedia
+                            ? {
+                                width: "100%",
+                                resize: "vertical",
+                                border: "1px dashed rgba(148, 163, 184, 0.25)",
+                                borderRadius: 4,
+                                background: "transparent",
+                                color: "inherit",
+                                padding: "4px 6px",
+                                fontFamily: "inherit",
+                                fontSize: "inherit",
+                                lineHeight: 1.5,
+                              }
+                            : compact
+                              ? { minHeight: 110 }
+                              : undefined
+                        }
+                        value={seg.text}
+                        placeholder={
+                          idx === 0
+                            ? "內文（Markdown）。可直接貼上或拖入圖片、影片，或輸入 @ 引用其他卡片。"
+                            : "繼續輸入段落內容（支援 Markdown 語法）…"
+                        }
+                        aria-label={idx === 0 ? "卡片內文" : `卡片內文段落 ${idx + 1}`}
+                        onFocus={(e) => {
+                          textRef.current = e.currentTarget;
+                          activeSegStartRef.current = seg.start;
+                        }}
+                        onBlur={(e) => {
+                          // 若焦點不是移往工具列按鈕，則自動回歸視覺渲染效果
+                          const related = e.relatedTarget as HTMLElement | null;
+                          if (!related || !related.closest(".editor-toolbar")) {
+                            setActiveEditing(false);
+                          }
+                        }}
+                        onSelect={(e) => {
+                          textRef.current = e.currentTarget;
+                          activeSegStartRef.current = seg.start;
+                          const s = seg.start + (e.currentTarget.selectionStart ?? 0);
+                          const endPos = seg.start + (e.currentTarget.selectionEnd ?? 0);
+                          setCursorPos(s);
+                          lastSelectionRef.current = { start: s, end: endPos };
+                        }}
+                        onKeyUp={(e) => {
+                          textRef.current = e.currentTarget;
+                          activeSegStartRef.current = seg.start;
+                          const s = seg.start + (e.currentTarget.selectionStart ?? 0);
+                          const endPos = seg.start + (e.currentTarget.selectionEnd ?? 0);
+                          setCursorPos(s);
+                          lastSelectionRef.current = { start: s, end: endPos };
+                        }}
+                        onClick={(e) => {
+                          textRef.current = e.currentTarget;
+                          activeSegStartRef.current = seg.start;
+                          const s = seg.start + (e.currentTarget.selectionStart ?? 0);
+                          const endPos = seg.start + (e.currentTarget.selectionEnd ?? 0);
+                          setCursorPos(s);
+                          lastSelectionRef.current = { start: s, end: endPos };
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                          const el = e.currentTarget;
+                          const gStart = seg.start + (el.selectionStart ?? 0);
+                          const gEnd = seg.start + (el.selectionEnd ?? 0);
+                          if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+                            const k = e.key.toLowerCase();
+                            if (k === "b") {
+                              e.preventDefault();
+                              applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "**", "粗體文字"));
+                              return;
+                            }
+                            if (k === "u") {
+                              e.preventDefault();
+                              applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "++", "底線文字"));
+                              return;
+                            }
+                          }
+                          if (e.key === "Tab") {
+                            const patch = indentListLines(latest.current.body, gStart, gEnd, e.shiftKey ? -1 : 1);
+                            if (!patch) return;
+                            e.preventDefault();
+                            applyEditPatch(patch);
+                            return;
+                          }
+                          if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                            const patch = handleListEnter(latest.current.body, gStart, gEnd);
+                            if (!patch) return;
+                            e.preventDefault();
+                            applyEditPatch(patch);
+                          }
+                        }}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          const localPos = e.currentTarget.selectionStart ?? val.length;
                           const cur = latest.current.body;
-                          onBody(cur.slice(0, seg.removeStart) + cur.slice(seg.removeEnd));
+                          const prevLen = cur.length;
+                          const nextBody = cur.slice(0, seg.start) + val + cur.slice(seg.end);
+                          const globalPos = seg.start + localPos;
+                          onBody(nextBody);
+                          setCursorPos(globalPos);
+                          if (nextBody.length >= prevLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
+                            const trig = detectAtTrigger(nextBody, globalPos);
+                            if (trig && trig.query === "") {
+                              setMentionState({
+                                replaceFrom: trig.atIndex,
+                                replaceTo: globalPos,
+                                initialQuery: "",
+                              });
+                            }
+                          }
+                        }}
+                        onPaste={(e) => {
+                          const gFrom = seg.start + (e.currentTarget.selectionStart ?? seg.text.length);
+                          const gTo = seg.start + (e.currentTarget.selectionEnd ?? e.currentTarget.selectionStart ?? seg.text.length);
+                          if (e.clipboardData.files.length) {
+                            e.preventDefault();
+                            const files = takeFiles(e.clipboardData.files);
+                            if (files.length) void uploadFiles(files, gFrom);
+                            return;
+                          }
+                          const plain = e.clipboardData.getData("text/plain");
+                          const html = e.clipboardData.getData("text/html");
+                          const transformed = transformPasteContent(plain, html);
+                          if (transformed === null) return;
+                          e.preventDefault();
+                          const cur = latest.current.body;
+                          const nextText = cur.slice(0, gFrom) + transformed + cur.slice(gTo);
+                          const nextCursor = gFrom + transformed.length;
+                          applyEditPatch({
+                            text: nextText,
+                            selectionStart: nextCursor,
+                            selectionEnd: nextCursor,
+                            replaceFrom: gFrom,
+                            replaceTo: gTo,
+                            insertText: transformed,
+                          });
+                        }}
+                        onDragOver={(e) => {
+                          if (e.dataTransfer.types.includes("Files")) e.preventDefault();
+                        }}
+                        onDrop={(e) => {
+                          if (!e.dataTransfer.files.length) return;
+                          e.preventDefault();
+                          const gAt = seg.start + (e.currentTarget.selectionStart ?? seg.text.length);
+                          const files = takeFiles(e.dataTransfer.files);
+                          if (files.length) void uploadFiles(files, gAt);
                         }}
                       />
-                    </div>
-                  );
-                }
-
-                const lineCount = Math.max(1, seg.text.split("\n").length);
-                return (
-                  <textarea
-                    key={`text-${idx}`}
-                    ref={(el) => {
-                      if (el) {
-                        segRefs.current.set(seg.start, el);
-                        if (idx === 0 && !textRef.current) {
-                          textRef.current = el;
-                        }
-                      } else {
-                        segRefs.current.delete(seg.start);
-                      }
-                    }}
-                    className={hasMedia ? "body-segment-input" : "body-input"}
-                    rows={hasMedia ? Math.max(2, lineCount) : undefined}
-                    style={
-                      hasMedia
-                        ? {
-                            width: "100%",
-                            resize: "vertical",
-                            border: "1px dashed rgba(148, 163, 184, 0.25)",
-                            borderRadius: 4,
-                            background: "transparent",
-                            color: "inherit",
-                            padding: "4px 6px",
-                            fontFamily: "inherit",
-                            fontSize: "inherit",
-                            lineHeight: 1.5,
-                          }
-                        : compact
-                          ? { minHeight: 110 }
-                          : undefined
-                    }
-                    value={seg.text}
-                    placeholder={
-                      idx === 0
-                        ? "內文（Markdown）。可直接貼上或拖入圖片、影片，或輸入 @ 引用其他卡片。"
-                        : "繼續輸入段落內容（支援 Markdown 語法）…"
-                    }
-                    aria-label={idx === 0 ? "卡片內文" : `卡片內文段落 ${idx + 1}`}
-                    onFocus={(e) => {
-                      textRef.current = e.currentTarget;
-                      activeSegStartRef.current = seg.start;
-                    }}
-                    onSelect={(e) => {
-                      textRef.current = e.currentTarget;
-                      activeSegStartRef.current = seg.start;
-                      setCursorPos(seg.start + (e.currentTarget.selectionStart ?? 0));
-                    }}
-                    onKeyUp={(e) => {
-                      textRef.current = e.currentTarget;
-                      activeSegStartRef.current = seg.start;
-                      setCursorPos(seg.start + (e.currentTarget.selectionStart ?? 0));
-                    }}
-                    onClick={(e) => {
-                      textRef.current = e.currentTarget;
-                      activeSegStartRef.current = seg.start;
-                      setCursorPos(seg.start + (e.currentTarget.selectionStart ?? 0));
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-                      const el = e.currentTarget;
-                      const gStart = seg.start + (el.selectionStart ?? 0);
-                      const gEnd = seg.start + (el.selectionEnd ?? 0);
-                      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
-                        const k = e.key.toLowerCase();
-                        if (k === "b") {
-                          e.preventDefault();
-                          applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "**", "粗體文字"));
-                          return;
-                        }
-                        if (k === "u") {
-                          e.preventDefault();
-                          applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "++", "底線文字"));
-                          return;
-                        }
-                      }
-                      if (e.key === "Tab") {
-                        const patch = indentListLines(latest.current.body, gStart, gEnd, e.shiftKey ? -1 : 1);
-                        if (!patch) return;
-                        e.preventDefault();
-                        applyEditPatch(patch);
-                        return;
-                      }
-                      if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-                        const patch = handleListEnter(latest.current.body, gStart, gEnd);
-                        if (!patch) return;
-                        e.preventDefault();
-                        applyEditPatch(patch);
-                      }
-                    }}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      const localPos = e.currentTarget.selectionStart ?? val.length;
-                      const cur = latest.current.body;
-                      const prevLen = cur.length;
-                      const nextBody = cur.slice(0, seg.start) + val + cur.slice(seg.end);
-                      const globalPos = seg.start + localPos;
-                      onBody(nextBody);
-                      setCursorPos(globalPos);
-                      if (nextBody.length >= prevLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
-                        const trig = detectAtTrigger(nextBody, globalPos);
-                        if (trig && trig.query === "") {
-                          setMentionState({
-                            replaceFrom: trig.atIndex,
-                            replaceTo: globalPos,
-                            initialQuery: "",
-                          });
-                        }
-                      }
-                    }}
-                    onPaste={(e) => {
-                      const gFrom = seg.start + (e.currentTarget.selectionStart ?? seg.text.length);
-                      const gTo = seg.start + (e.currentTarget.selectionEnd ?? e.currentTarget.selectionStart ?? seg.text.length);
-                      if (e.clipboardData.files.length) {
-                        e.preventDefault();
-                        const files = takeFiles(e.clipboardData.files);
-                        if (files.length) void uploadFiles(files, gFrom);
-                        return;
-                      }
-                      const plain = e.clipboardData.getData("text/plain");
-                      const html = e.clipboardData.getData("text/html");
-                      const transformed = transformPasteContent(plain, html);
-                      if (transformed === null) return;
-                      e.preventDefault();
-                      const cur = latest.current.body;
-                      const nextText = cur.slice(0, gFrom) + transformed + cur.slice(gTo);
-                      const nextCursor = gFrom + transformed.length;
-                      applyEditPatch({
-                        text: nextText,
-                        selectionStart: nextCursor,
-                        selectionEnd: nextCursor,
-                        replaceFrom: gFrom,
-                        replaceTo: gTo,
-                        insertText: transformed,
-                      });
-                    }}
-                    onDragOver={(e) => {
-                      if (e.dataTransfer.types.includes("Files")) e.preventDefault();
-                    }}
-                    onDrop={(e) => {
-                      if (!e.dataTransfer.files.length) return;
-                      e.preventDefault();
-                      const gAt = seg.start + (e.currentTarget.selectionStart ?? seg.text.length);
-                      const files = takeFiles(e.dataTransfer.files);
-                      if (files.length) void uploadFiles(files, gAt);
-                    }}
-                  />
-                );
-              })}
-            </div>
-          );
-        })()
+                    );
+                  })}
+                </div>
+              );
+            })()
+          )}
+        </div>
       ) : (
         <div className="preview" data-testid="editor-preview">
           <Markdown source={body} onOpenCard={onOpenCard} />

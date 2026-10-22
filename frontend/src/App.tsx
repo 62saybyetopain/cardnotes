@@ -43,6 +43,29 @@ export default function App() {
   const [booted, setBooted] = useState(false);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    try {
+      const saved = localStorage.getItem("cardboard:theme");
+      if (saved === "light" || saved === "dark") return saved;
+    } catch {
+      /* localStorage 不可用時忽略 */
+    }
+    return "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    try {
+      localStorage.setItem("cardboard:theme", theme);
+    } catch {
+      /* 忽略寫入失敗 */
+    }
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((t) => (t === "dark" ? "light" : "dark"));
+  }, []);
+
   const startResize = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     const onMove = (ev: MouseEvent) => {
@@ -326,6 +349,14 @@ export default function App() {
                     </svg>
                   </button>
                 )}
+                <button
+                  className="icon-btn"
+                  onClick={toggleTheme}
+                  aria-label={theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
+                  title={theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
+                >
+                  {theme === "dark" ? "☀️" : "🌙"}
+                </button>
                 <button
                   className="icon-btn primary"
                   onClick={() => void createCard()}
