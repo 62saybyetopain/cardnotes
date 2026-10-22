@@ -1,10 +1,26 @@
 // @depends-on ../api.ts (api, ApiError)
-// @depends-on ../lib/markdown.ts (cardIdFromHref)
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+// @depends-on ../lib/markdown.ts (HIGHLIGHT_COLOR_OPTIONS, cardIdFromHref, resolveLineInContext, type HighlightColor)
+import {
+  Children,
+  cloneElement,
+  createContext,
+  isValidElement,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import { createPortal } from "react-dom";
 import { api, ApiError } from "../api";
-import { cardIdFromHref } from "../lib/markdown";
+import {
+  HIGHLIGHT_COLOR_OPTIONS,
+  cardIdFromHref,
+  resolveLineInContext,
+  type HighlightColor,
+} from "../lib/markdown";
 import { mediaIdFromSrc, mediaUrl, urlTransform } from "../lib/media";
 import type { MediaInfo } from "../types";
 
@@ -474,6 +490,342 @@ function CodeBlockView({ info, codeText }: { info: string; codeText: string }) {
   );
 }
 
+// ---- 自訂清單樣式（◦/▪/▸/✓/(1)/a./A./i.）與行內底線（++...++）、螢光筆（==color:...==）渲染 ----
+
+const CUSTOM_LIST_TOKEN_RE = /^\uE000(UL|OL):([^\uE001]+)\uE001 /;
+
+function preprocessCustomLists(markdown: string): string {
+  const FENCE = "`".repeat(3);
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const out: string[] = [];
+  let fenceLen = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const t = line.trim();
+    if (fenceLen > 0) {
+      out.push(line);
+      if (t.length >= fenceLen && t.replace(/`/g, "") === "") fenceLen = 0;
+      continue;
+    }
+    if (t.startsWith(FENCE)) {
+      let n = 0;
+      while (t[n] === "`") n++;
+      fenceLen = n;
+      out.push(line);
+      continue;
+    }
+
+    const p = resolveLineInContext(lines, i);
+    if (p.type === "ul" && p.bulletStyle && p.bulletStyle !== "dash" && p.markerText) {
+      out.push(`${" ".repeat(p.indent)}- \uE000UL:${p.markerText}\uE001 ${p.content}`);
+    } else if (p.type === "ol" && p.orderedStyle && p.orderedStyle !== "decimal" && p.markerText) {
+      out.push(`${" ".repeat(p.indent)}- \uE000OL:${p.markerText}\uE001 ${p.content}`);
+    } else {
+      out.push(line);
+    }
+  }
+  return out.join("\n");
+}
+
+function hasCustomListMarker(children: ReactNode): boolean {
+  const arr = Children.toArray(children);
+  for (const child of arr) {
+    if (typeof child === "string") {
+      if (CUSTOM_LIST_TOKEN_RE.test(child)) return true;
+      if (child.trim().length > 0) return false;
+    } else if (isValidElement(child)) {
+      const el = child as ReactElement<{ children?: ReactNode }>;
+      if (el.type === "ul" || el.type === "ol") return false;
+      if (hasCustomListMarker(el.props.children)) return true;
+    }
+  }
+  return false;
+}
+
+const HL_COLOR_MAP = new Map<string, (typeof HIGHLIGHT_COLOR_OPTIONS)[number]>(
+  HIGHLIGHT_COLOR_OPTIONS.map((o) => [o.color, o]),
+);
+const COLOR_ALIAS: Record<string, HighlightColor> = {
+  amber: "amber",
+  yellow: "amber",
+  黃: "amber",
+  green: "green",
+  綠: "green",
+  blue: "blue",
+  藍: "blue",
+  purple: "purple",
+  紫: "purple",
+  pink: "pink",
+  粉: "pink",
+  紅: "pink",
+};
+
+type RichToken =
+  | { kind: "text"; text: string }
+  | { kind: "node"; node: ReactNode }
+  | { kind: "list_marker"; listKind: "UL" | "OL"; marker: string }
+  | { kind: "u_delim"; raw: string; canOpen: boolean; canClose: boolean }
+  | { kind: "u_open_tag" }
+  | { kind: "u_close_tag" }
+  | { kind: "hl_open_explicit"; color: HighlightColor; raw: string }
+  | { kind: "hl_delim"; raw: string; canOpen: boolean; canClose: boolean };
+
+const INLINE_TOKEN_RE =
+  /\uE000(UL|OL):([^\uE001]+)\uE001 |<\/?u>|==(?:(amber|yellow|green|blue|purple|pink|黃|綠|藍|紫|粉|紅)[:：])|==|\+\+/gi;
+
+function tokenizeRichNodes(children: ReactNode): RichToken[] {
+  const arr = Children.toArray(children);
+  const tokens: RichToken[] = [];
+
+  for (const child of arr) {
+    if (typeof child !== "string") {
+      tokens.push({ kind: "node", node: child });
+      continue;
+    }
+
+    let lastIdx = 0;
+    let m: RegExpExecArray | null;
+    INLINE_TOKEN_RE.lastIndex = 0;
+    while ((m = INLINE_TOKEN_RE.exec(child)) !== null) {
+      if (m.index > lastIdx) {
+        tokens.push({ kind: "text", text: child.slice(lastIdx, m.index) });
+      }
+      const raw = m[0];
+      const prevChar = m.index > 0 ? child[m.index - 1] : "";
+      const nextChar = m.index + raw.length < child.length ? child[m.index + raw.length] : "";
+
+      if (m[1] && m[2]) {
+        tokens.push({ kind: "list_marker", listKind: m[1] as "UL" | "OL", marker: m[2] });
+      } else if (raw.toLowerCase() === "<u>") {
+        tokens.push({ kind: "u_open_tag" });
+      } else if (raw.toLowerCase() === "</u>") {
+        tokens.push({ kind: "u_close_tag" });
+      } else if (m[3]) {
+        const cKey = COLOR_ALIAS[m[3].toLowerCase()] ?? "amber";
+        tokens.push({ kind: "hl_open_explicit", color: cKey, raw });
+      } else if (raw === "==") {
+        const isPartOfTriple = prevChar === "=" || nextChar === "=";
+        const canOpen = !isPartOfTriple && (nextChar === "" || !/\s/.test(nextChar));
+        const canClose = !isPartOfTriple && (prevChar === "" || !/\s/.test(prevChar));
+        tokens.push({ kind: "hl_delim", raw, canOpen, canClose });
+      } else if (raw === "++") {
+        const adjAlphaNum = /[A-Za-z0-9_+]/.test(prevChar) || /[A-Za-z0-9_+]/.test(nextChar);
+        const canOpen = !adjAlphaNum && (nextChar === "" || !/\s/.test(nextChar));
+        const canClose = !adjAlphaNum && (prevChar === "" || !/\s/.test(prevChar));
+        tokens.push({ kind: "u_delim", raw, canOpen, canClose });
+      }
+      lastIdx = m.index + raw.length;
+    }
+
+    if (lastIdx < child.length) {
+      tokens.push({ kind: "text", text: child.slice(lastIdx) });
+    }
+  }
+  return tokens;
+}
+
+function parseRichTokenStream(tokens: RichToken[], keyPrefix = "r"): ReactNode[] {
+  const out: ReactNode[] = [];
+  let i = 0;
+
+  while (i < tokens.length) {
+    const tok = tokens[i];
+
+    if (tok.kind === "text") {
+      out.push(tok.text);
+      i++;
+      continue;
+    }
+    if (tok.kind === "node") {
+      if (isValidElement(tok.node)) {
+        const el = tok.node as ReactElement<{ children?: ReactNode }>;
+        if (el.type === "strong" || el.type === "em" || el.type === "del") {
+          out.push(cloneElement(el, { key: `${keyPrefix}-el-${i}` }, renderRichChildren(el.props.children)));
+          i++;
+          continue;
+        }
+      }
+      out.push(tok.node);
+      i++;
+      continue;
+    }
+    if (tok.kind === "list_marker") {
+      const isOl = tok.listKind === "OL";
+      out.push(
+        <span
+          key={`${keyPrefix}-lm-${i}`}
+          className="custom-list-marker"
+          style={{
+            display: "inline-block",
+            minWidth: isOl ? "1.9em" : "1.35em",
+            marginLeft: isOl ? "-1.9em" : "-1.35em",
+            color: "var(--accent, #60a5fa)",
+            fontWeight: 600,
+            userSelect: "none",
+          }}
+        >
+          {tok.marker}{" "}
+        </span>,
+      );
+      i++;
+      continue;
+    }
+
+    if (tok.kind === "hl_open_explicit") {
+      let closeIdx = -1;
+      for (let j = i + 1; j < tokens.length; j++) {
+        const cand = tokens[j];
+        if (cand.kind === "hl_delim" && cand.canClose) {
+          closeIdx = j;
+          break;
+        }
+      }
+      if (closeIdx > i + 1) {
+        const style = HL_COLOR_MAP.get(tok.color) ?? HIGHLIGHT_COLOR_OPTIONS[0];
+        const inner = parseRichTokenStream(tokens.slice(i + 1, closeIdx), `${keyPrefix}-hl-${i}`);
+        out.push(
+          <mark
+            key={`${keyPrefix}-mark-${i}`}
+            style={{
+              backgroundColor: style.bg,
+              color: style.text,
+              borderBottom: `2px solid ${style.border}`,
+              padding: "0 4px",
+              borderRadius: 3,
+            }}
+          >
+            {inner}
+          </mark>,
+        );
+        i = closeIdx + 1;
+        continue;
+      }
+      out.push(tok.raw);
+      i++;
+      continue;
+    }
+
+    if (tok.kind === "hl_delim") {
+      if (tok.canOpen) {
+        let closeIdx = -1;
+        for (let j = i + 1; j < tokens.length; j++) {
+          const cand = tokens[j];
+          if (cand.kind === "hl_delim" && cand.canClose) {
+            closeIdx = j;
+            break;
+          }
+        }
+        if (closeIdx > i + 1) {
+          const style = HIGHLIGHT_COLOR_OPTIONS[0];
+          const inner = parseRichTokenStream(tokens.slice(i + 1, closeIdx), `${keyPrefix}-hl-${i}`);
+          out.push(
+            <mark
+              key={`${keyPrefix}-mark-${i}`}
+              style={{
+                backgroundColor: style.bg,
+                color: style.text,
+                borderBottom: `2px solid ${style.border}`,
+                padding: "0 4px",
+                borderRadius: 3,
+              }}
+            >
+              {inner}
+            </mark>,
+          );
+          i = closeIdx + 1;
+          continue;
+        }
+      }
+      out.push(tok.raw);
+      i++;
+      continue;
+    }
+
+    if (tok.kind === "u_delim") {
+      if (tok.canOpen) {
+        let closeIdx = -1;
+        for (let j = i + 1; j < tokens.length; j++) {
+          const cand = tokens[j];
+          if (cand.kind === "u_delim" && cand.canClose) {
+            closeIdx = j;
+            break;
+          }
+        }
+        if (closeIdx > i + 1) {
+          const inner = parseRichTokenStream(tokens.slice(i + 1, closeIdx), `${keyPrefix}-u-${i}`);
+          out.push(
+            <u
+              key={`${keyPrefix}-u-${i}`}
+              style={{
+                textDecoration: "underline",
+                textDecorationThickness: "1.5px",
+                textUnderlineOffset: "3px",
+              }}
+            >
+              {inner}
+            </u>,
+          );
+          i = closeIdx + 1;
+          continue;
+        }
+      }
+      out.push(tok.raw);
+      i++;
+      continue;
+    }
+
+    if (tok.kind === "u_open_tag") {
+      let closeIdx = -1;
+      for (let j = i + 1; j < tokens.length; j++) {
+        if (tokens[j].kind === "u_close_tag") {
+          closeIdx = j;
+          break;
+        }
+      }
+      if (closeIdx > i + 1) {
+        const inner = parseRichTokenStream(tokens.slice(i + 1, closeIdx), `${keyPrefix}-ut-${i}`);
+        out.push(
+          <u
+            key={`${keyPrefix}-ut-${i}`}
+            style={{
+              textDecoration: "underline",
+              textDecorationThickness: "1.5px",
+              textUnderlineOffset: "3px",
+            }}
+          >
+            {inner}
+          </u>,
+        );
+        i = closeIdx + 1;
+        continue;
+      }
+      i++;
+      continue;
+    }
+
+    if (tok.kind === "u_close_tag") {
+      i++;
+      continue;
+    }
+  }
+
+  return out;
+}
+
+function renderRichChildren(children: ReactNode): ReactNode {
+  const tokens = tokenizeRichNodes(children);
+  const hasSpecial = tokens.some((t) => t.kind !== "text" && t.kind !== "node");
+  const hasFormattedElement = tokens.some(
+    (t) =>
+      t.kind === "node" &&
+      isValidElement(t.node) &&
+      (t.node.type === "strong" || t.node.type === "em" || t.node.type === "del"),
+  );
+  if (!hasSpecial && !hasFormattedElement) return children;
+  return parseRichTokenStream(tokens);
+}
+
 export function Markdown({
   source,
   onOpenCard,
@@ -481,9 +833,24 @@ export function Markdown({
   source: string;
   onOpenCard?: (cardId: string) => void;
 }) {
+  const processedSource = useMemo(() => preprocessCustomLists(source), [source]);
+
   const components = useMemo<React.ComponentProps<typeof ReactMarkdown>["components"]>(
     () => ({
       pre: ({ children }) => <>{children}</>,
+      p: ({ children }) => <p>{renderRichChildren(children)}</p>,
+      h1: ({ children }) => <h1>{renderRichChildren(children)}</h1>,
+      h2: ({ children }) => <h2>{renderRichChildren(children)}</h2>,
+      h3: ({ children }) => <h3>{renderRichChildren(children)}</h3>,
+      blockquote: ({ children }) => <blockquote>{renderRichChildren(children)}</blockquote>,
+      li: ({ children }) => {
+        const isCustom = hasCustomListMarker(children);
+        return (
+          <li style={isCustom ? { listStyleType: "none" } : undefined}>
+            {renderRichChildren(children)}
+          </li>
+        );
+      },
       code: ({ className, children }) => {
         const rawText = String(children ?? "");
         const cleanText = rawText.endsWith("\n") ? rawText.slice(0, -1) : rawText;
@@ -540,7 +907,7 @@ export function Markdown({
   return (
     <div className="md">
       <ReactMarkdown urlTransform={markdownUrlTransform} components={components}>
-        {source}
+        {processedSource}
       </ReactMarkdown>
     </div>
   );

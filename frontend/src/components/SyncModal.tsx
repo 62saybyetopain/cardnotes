@@ -470,14 +470,20 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
         card_ids_to_add: Array.from(selectedNewCardIds),
         card_ids_to_update: Array.from(selectedUpdateCardIds),
         tag_ids_to_add: diff.tags_new.map((t) => t.id),
-        tag_ids_to_update: diff.tags_updated.map((t) => t.id),
+        tag_ids_to_update: [], // 標籤沒有修改時間，無法判斷誰較新；套用會讓 iPad 的舊值回退電腦端的新改動
         card_tags_to_add: diff.card_tags_new,
         links_to_add: diff.links_new,
         board_cards_to_add: diff.board_cards_new,
         package: pkg,
       });
+      const notes: string[] = [];
+      if (res.applied.tags_merged) notes.push(`${res.applied.tags_merged} 個同名標籤已併入電腦端既有標籤`);
+      if (res.applied.boards_created) notes.push(`已建立 ${res.applied.boards_created} 塊新白板`);
+      if (res.applied.board_cards_skipped) {
+        notes.push(`⚠️ ${res.applied.board_cards_skipped} 筆白板歸屬因電腦端沒有對應白板而未套用`);
+      }
       info(
-        `同步成功！新增 ${res.applied.cards_added} 張、更新 ${res.applied.cards_updated} 張、建立 ${res.applied.links_added} 條連結`,
+        `同步成功！新增 ${res.applied.cards_added} 張、更新 ${res.applied.cards_updated} 張、建立 ${res.applied.links_added} 條連結${notes.length > 0 ? "；" + notes.join("；") : ""}`,
       );
       onApplied();
       onClose();
@@ -725,8 +731,14 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                   <span className="count">略過未變更／較舊卡片：{diff.cards_unchanged_count} 張</span>
                 </div>
 
+                {diff.tags_updated.length > 0 && (
+                  <div className="muted" style={{ fontSize: 12, padding: "6px 0" }}>
+                    ⚠️ {diff.tags_updated.length} 個標籤在 iPad 與電腦端內容不同，本次<strong>不會套用</strong>
+                    （標籤沒有修改時間，無法判斷哪邊較新）：{diff.tags_updated.map((t) => t.name).join("、")}
+                  </div>
+                )}
                 {!hasChanges ? (
-                  <div className="empty">此封包與電腦端資料完全一致，無需更新。</div>
+                  <div className="empty">沒有可套用的變更。</div>
                 ) : (
                   <>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>

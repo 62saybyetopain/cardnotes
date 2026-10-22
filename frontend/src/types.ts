@@ -358,6 +358,9 @@ export interface SyncApplyResult {
     card_tags_added: number;
     links_added: number;
     board_cards_added: number;
+    tags_merged?: number;
+    board_cards_skipped?: number;
+    boards_created?: number;
   };
 }
 

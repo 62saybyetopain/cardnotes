@@ -680,6 +680,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
             movingBoxes[0],
             others,
             MAGNET_THRESHOLD_PX / rf.getZoom(),
+            undefined,
+            true, // 只吸到放開後不會被推開的位置，紅線才可信
           );
           snapDx = r.x - movingBoxes[0].x;
           snapDy = r.y - movingBoxes[0].y;

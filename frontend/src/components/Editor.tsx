@@ -1,18 +1,27 @@
-// @depends-on ../lib/markdown.ts (applyLineType, detectAtTrigger, detectLineType, formatCardRef, handleListEnter, indentListLines, transformPasteContent)
+// @depends-on ../lib/markdown.ts (BULLET_STYLE_OPTIONS, HIGHLIGHT_COLOR_OPTIONS, ORDERED_STYLE_OPTIONS, applyHighlight, applyInlineWrap, applyLineType, detectAtTrigger, detectLineType, detectListStyleAtCursor, formatCardRef, handleListEnter, indentListLines, transformPasteContent)
 // @depends-on ./MentionPopup.tsx (MentionPopup)
 // @depends-on ./Markdown.tsx (Markdown)
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import {
+  BULLET_STYLE_OPTIONS,
+  HIGHLIGHT_COLOR_OPTIONS,
+  ORDERED_STYLE_OPTIONS,
+  applyHighlight,
+  applyInlineWrap,
   applyLineType,
   detectAtTrigger,
   detectLineType,
+  detectListStyleAtCursor,
   formatCardRef,
   handleListEnter,
   indentListLines,
   transformPasteContent,
+  type BulletStyle,
   type EditPatch,
+  type HighlightColor,
   type LineType,
+  type OrderedStyle,
 } from "../lib/markdown";
 import { insertAtCursor, isAcceptedMime, mediaRef } from "../lib/media";
 import { messageOf } from "../notify";
@@ -123,8 +132,6 @@ const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
   { type: "h1", label: "標題 1" },
   { type: "h2", label: "標題 2" },
   { type: "h3", label: "標題 3" },
-  { type: "ul", label: "項目符號" },
-  { type: "ol", label: "編號" },
 ];
 
 export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, onOpenCard, report }: Props) {
@@ -258,10 +265,30 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
     });
   }, []);
 
-  const handleToolbarLineType = (targetType: LineType) => {
+  const [bulletStyle, setBulletStyle] = useState<BulletStyle>("dash");
+  const [orderedStyle, setOrderedStyle] = useState<OrderedStyle>("decimal");
+  const [highlightColor, setHighlightColor] = useState<HighlightColor>("amber");
+
+  const handleToolbarLineType = (
+    targetType: LineType,
+    styleOpts?: { bulletStyle?: BulletStyle; orderedStyle?: OrderedStyle },
+  ) => {
     const { start: selStart, end: selEnd } = getGlobalSelection();
-    const patch = applyLineType(latest.current.body, selStart, selEnd, targetType);
+    const patch = applyLineType(latest.current.body, selStart, selEnd, targetType, styleOpts);
     applyEditPatch(patch);
+  };
+
+  const handleToolbarInlineWrap = (marker: "**" | "++", placeholder: string) => {
+    const { start: selStart, end: selEnd } = getGlobalSelection();
+    const patch = applyInlineWrap(latest.current.body, selStart, selEnd, marker, placeholder);
+    applyEditPatch(patch);
+  };
+
+  const handleToolbarHighlight = (color: HighlightColor | null) => {
+    const { start: selStart, end: selEnd } = getGlobalSelection();
+    if (color) setHighlightColor(color);
+    const patch = applyHighlight(latest.current.body, selStart, selEnd, color);
+    if (patch) applyEditPatch(patch);
   };
 
   const handleToolbarIndent = (direction: 1 | -1) => {
@@ -371,6 +398,11 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
   };
 
   const currentLineType = detectLineType(body, cursorPos);
+  const currentListStyle = detectListStyleAtCursor(body, cursorPos);
+  const activeBulletStyle = currentListStyle.bulletStyle ?? bulletStyle;
+  const activeOrderedStyle = currentListStyle.orderedStyle ?? orderedStyle;
+  const activeHighlightMeta =
+    HIGHLIGHT_COLOR_OPTIONS.find((c) => c.color === highlightColor) ?? HIGHLIGHT_COLOR_OPTIONS[0];
   const missingMediaCount = warnings
     .filter((w) => w.code === "MISSING_MEDIA")
     .reduce((n, w) => n + w.ids.length, 0);
@@ -430,6 +462,67 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
                 {btn.label}
               </button>
             ))}
+
+            {/* 項目符號（主按鈕＋5 種樣式選單） */}
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
+              <button
+                type="button"
+                className={currentLineType === "ul" ? "on" : ""}
+                aria-pressed={currentLineType === "ul"}
+                onClick={() => handleToolbarLineType("ul", { bulletStyle: activeBulletStyle })}
+                title="套用或取消項目符號"
+              >
+                項目符號
+              </button>
+              <select
+                value={activeBulletStyle}
+                aria-label="選擇項目符號樣式"
+                title="切換項目符號樣式（• / ◦ / ▪ / ▸ / ✓）"
+                style={{ padding: "2px 2px", fontSize: 12, maxWidth: 54 }}
+                onChange={(e) => {
+                  const next = e.target.value as BulletStyle;
+                  setBulletStyle(next);
+                  handleToolbarLineType("ul", { bulletStyle: next });
+                }}
+              >
+                {BULLET_STYLE_OPTIONS.map((o) => (
+                  <option key={o.style} value={o.style}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </span>
+
+            {/* 編號清單（主按鈕＋5 種樣式選單） */}
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
+              <button
+                type="button"
+                className={currentLineType === "ol" ? "on" : ""}
+                aria-pressed={currentLineType === "ol"}
+                onClick={() => handleToolbarLineType("ol", { orderedStyle: activeOrderedStyle })}
+                title="套用或取消編號清單"
+              >
+                編號
+              </button>
+              <select
+                value={activeOrderedStyle}
+                aria-label="選擇編號清單樣式"
+                title="切換編號樣式（1. / (1) / a. / A. / i.）"
+                style={{ padding: "2px 2px", fontSize: 12, maxWidth: 58 }}
+                onChange={(e) => {
+                  const next = e.target.value as OrderedStyle;
+                  setOrderedStyle(next);
+                  handleToolbarLineType("ol", { orderedStyle: next });
+                }}
+              >
+                {ORDERED_STYLE_OPTIONS.map((o) => (
+                  <option key={o.style} value={o.style}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </span>
+
             <button
               type="button"
               onClick={() => handleToolbarIndent(1)}
@@ -444,6 +537,82 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
             >
               取消縮排
             </button>
+
+            {/* 粗體與底線 */}
+            <button
+              type="button"
+              onClick={() => handleToolbarInlineWrap("**", "粗體文字")}
+              title="粗體 (**文字**，快捷鍵 Ctrl+B)"
+              style={{ fontWeight: 700 }}
+            >
+              B 粗體
+            </button>
+            <button
+              type="button"
+              onClick={() => handleToolbarInlineWrap("++", "底線文字")}
+              title="底線 (++文字++，快捷鍵 Ctrl+U)"
+              style={{ textDecoration: "underline" }}
+            >
+              U 底線
+            </button>
+
+            {/* 螢光筆重點（主按鈕＋5 種深色主題色點＋清除） */}
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "1px 6px",
+                borderRadius: 6,
+                border: "1px solid var(--line, #334155)",
+                background: "rgba(15, 23, 42, 0.45)",
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => handleToolbarHighlight(highlightColor)}
+                title={`套用或取消螢光筆（目前顏色：${activeHighlightMeta.label}）`}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  padding: "1px 4px",
+                  borderBottom: `3px solid ${activeHighlightMeta.dotColor}`,
+                  cursor: "pointer",
+                }}
+              >
+                🖍 螢光筆
+              </button>
+              {HIGHLIGHT_COLOR_OPTIONS.map((c) => (
+                <button
+                  key={c.color}
+                  type="button"
+                  aria-label={`螢光筆：${c.label}`}
+                  title={`螢光筆：${c.label}（選取文字後點擊直接套用或換色）`}
+                  onClick={() => handleToolbarHighlight(c.color)}
+                  style={{
+                    width: 14,
+                    height: 14,
+                    padding: 0,
+                    borderRadius: "50%",
+                    background: c.dotColor,
+                    border:
+                      highlightColor === c.color
+                        ? "2px solid #ffffff"
+                        : "1px solid rgba(255,255,255,0.25)",
+                    cursor: "pointer",
+                  }}
+                />
+              ))}
+              <button
+                type="button"
+                onClick={() => handleToolbarHighlight(null)}
+                title="移除選取文字的螢光筆標記"
+                style={{ fontSize: 11, padding: "0 4px", cursor: "pointer" }}
+              >
+                ✕
+              </button>
+            </span>
+
             <button type="button" onClick={openMentionFromToolbar}>
               @ 引用
             </button>
@@ -613,6 +782,19 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
                       const el = e.currentTarget;
                       const gStart = seg.start + (el.selectionStart ?? 0);
                       const gEnd = seg.start + (el.selectionEnd ?? 0);
+                      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+                        const k = e.key.toLowerCase();
+                        if (k === "b") {
+                          e.preventDefault();
+                          applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "**", "粗體文字"));
+                          return;
+                        }
+                        if (k === "u") {
+                          e.preventDefault();
+                          applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "++", "底線文字"));
+                          return;
+                        }
+                      }
                       if (e.key === "Tab") {
                         const patch = indentListLines(latest.current.body, gStart, gEnd, e.shiftKey ? -1 : 1);
                         if (!patch) return;

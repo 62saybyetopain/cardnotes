@@ -44,7 +44,13 @@ describe("貼上圖片", () => {
     setup();
     body().setSelectionRange(5, 5);
     fireEvent.paste(body(), { clipboardData: { files: [file("a.png", "image/png")] } });
-    await waitFor(() => expect(body().value).toBe(`hello![](media:${MID})\n world`));
+// 原因：內文已改成分段編輯器，圖片是獨立區塊不在 textarea 內；改驗「文字 | 圖片 | 文字」的順序，
+    //       圖片必須插在貼上當下的游標處（hello 與 world 之間），而不是插到最後
+    const parts = () =>
+      Array.from(document.querySelectorAll<HTMLElement>(".segmented-editor textarea, .segmented-editor img")).map((el) =>
+        el instanceof HTMLTextAreaElement ? el.value : `img:${el.getAttribute("src")}`,
+      );
+    await waitFor(() => expect(parts()).toEqual(["hello", `img:/api/media/${MID}`, " world"]));
     expect(status()).toBe("未儲存");
   });
 
@@ -73,8 +79,10 @@ describe("貼上圖片", () => {
     setup();
     body().setSelectionRange(0, 0);
     fireEvent.paste(body(), { clipboardData: { files: [file("a.png", "image/png"), file("b.png", "image/png")] } });
-    await waitFor(() => expect(body().value.match(/media:/g)).toHaveLength(2));
-    expect(body().value.endsWith("hello world")).toBe(true);
+    // 原因：同上，圖片不在 textarea 內；改數圖片區塊。游標在 0，所以原文必須仍排在最後（兩張圖都沒有蓋掉它）
+    await waitFor(() => expect(document.querySelectorAll(".segmented-editor img")).toHaveLength(2));
+    const areas = document.querySelectorAll<HTMLTextAreaElement>(".segmented-editor textarea");
+    expect(areas[areas.length - 1].value.endsWith("hello world")).toBe(true);
   });
 
   it("上傳進行中暫停自動儲存，完成後才存", async () => {
