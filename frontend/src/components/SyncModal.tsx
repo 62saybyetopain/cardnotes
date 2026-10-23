@@ -2,7 +2,8 @@
 // @depends-on ../lib/media.ts (mediaUrl)
 // @depends-on ../lib/p2p.ts (getSavedCloudCredential, pullIpadPackageFromCloud, pullP2PPackageFromPc, saveCloudCredential, sendP2PPackage, uploadPcBackupToCloud)
 // @depends-on ../lib/storage/index.ts (getPreferredDriverType, storage)
-// @depends-on ../types.ts (CardDetail, SyncPackage, SyncDiffReport, SyncCardDiff)
+// @depends-on ../lib/storage/index.ts (getPreferredDriverType, storage)
+// @depends-on ../types.ts (CARD_TYPE_LABELS, CardDetail, CardType, SyncPackage, SyncDiffReport, SyncCardDiff)
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { mediaUrl } from "../lib/media";
@@ -15,7 +16,47 @@ import {
   uploadPcBackupToCloud,
 } from "../lib/p2p";
 import { getPreferredDriverType, storage } from "../lib/storage";
-import type { CardDetail, SyncCardDiff, SyncDiffReport, SyncPackage } from "../types";
+import {
+  CARD_TYPE_LABELS,
+  type CardDetail,
+  type CardType,
+  type SyncCardDiff,
+  type SyncDiffReport,
+  type SyncPackage,
+} from "../types";
+
+type ExtendedCardDiff = SyncCardDiff & {
+  old_card_type?: string;
+  new_card_type?: string;
+  old_curation_status?: string;
+  new_curation_status?: string;
+  old_tags?: string[];
+  new_tags?: string[];
+  old_links?: string[];
+  new_links?: string[];
+  diff_fields?: string[];
+  is_newer?: boolean;
+};
+
+function isCardNewer(c: ExtendedCardDiff): boolean {
+  if (typeof c.is_newer === "boolean") return c.is_newer;
+  return (c.new_updated_at || "") > (c.old_updated_at || "");
+}
+
+function formatSyncTime(iso: string | undefined): string {
+  if (!iso) return "未知時間";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+function formatCardType(t: string | undefined): string {
+  if (!t) return "未分類";
+  return CARD_TYPE_LABELS[t as CardType] ?? t;
+}
+
+function formatCuration(s: string | undefined): string {
+  return s === "curated" ? "✓ 已整理" : "📥 待整理（收件夾）";
+}
 
 interface Props {
   onClose(): void;
@@ -117,11 +158,28 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
   // ---- 電腦版專用狀態 ----
   const [pkg, setPkg] = useState<SyncPackage | null>(null);
   const [diff, setDiff] = useState<SyncDiffReport | null>(null);
+  const [activeTab, setActiveTab] = useState<"new" | "updated">("new");
   const [comparing, setComparing] = useState(false);
   const [applying, setApplying] = useState(false);
   const [selectedNewCardIds, setSelectedNewCardIds] = useState<Set<string>>(new Set());
   const [selectedUpdateCardIds, setSelectedUpdateCardIds] = useState<Set<string>>(new Set());
-  const [viewingDiffCard, setViewingDiffCard] = useState<SyncCardDiff | null>(null);
+  const [expandedDiffIds, setExpandedDiffIds] = useState<Set<string>>(new Set());
+
+  const initDiffSelection = (res: SyncDiffReport) => {
+    setDiff(res);
+    setSelectedNewCardIds(new Set(res.cards_new.map((c: { id: string }) => c.id)));
+    // 自動勾選匯入檔較新的卡片
+    const newerIds = (res.cards_updated as ExtendedCardDiff[])
+      .filter((c) => isCardNewer(c))
+      .map((c) => c.id);
+    setSelectedUpdateCardIds(new Set(newerIds));
+    setExpandedDiffIds(new Set());
+    if (res.cards_new.length === 0 && res.cards_updated.length > 0) {
+      setActiveTab("updated");
+    } else {
+      setActiveTab("new");
+    }
+  };
 
   // ---- iPad 版專用狀態（時間戳過濾與匯出預覽） ----
   const [ipadFullPkg, setIpadFullPkg] = useState<SyncPackage | null>(null);
@@ -361,16 +419,13 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
     setCloudBusy(true);
     setComparing(true);
     setDiff(null);
-    setViewingDiffCard(null);
     try {
       saveCloudCredential(cred);
       const receivedPkg = await pullIpadPackageFromCloud(cred);
       setPkg(receivedPkg);
       const res: SyncDiffReport = await api.syncDiff(receivedPkg);
-      setDiff(res);
-      setSelectedNewCardIds(new Set(res.cards_new.map((c: { id: string }) => c.id)));
-      setSelectedUpdateCardIds(new Set(res.cards_updated.map((c: SyncCardDiff) => c.id)));
-      info(`☁️ 已從 Google Drive 載入 iPad 資料：${res.cards_new.length} 張新增、${res.cards_updated.length} 張待更新`);
+      initDiffSelection(res);
+      info(`☁️ 已從 Google Drive 載入 iPad 資料：${res.cards_new.length} 張新卡片、${res.cards_updated.length} 張兩邊不一致`);
     } catch (err) {
       report(err, "從 Google Drive 拉取 iPad 資料失敗");
     } finally {
@@ -401,7 +456,6 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
     if (!file) return;
     setComparing(true);
     setDiff(null);
-    setViewingDiffCard(null);
     try {
       const text = await file.text();
       const parsed = JSON.parse(text) as SyncPackage;
@@ -410,27 +464,14 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       }
       setPkg(parsed);
       const res: SyncDiffReport = await api.syncDiff(parsed);
-      setDiff(res);
-      setSelectedNewCardIds(new Set(res.cards_new.map((c: { id: string }) => c.id)));
-      setSelectedUpdateCardIds(new Set(res.cards_updated.map((c: SyncCardDiff) => c.id)));
-      info(`已解析差異：${res.cards_new.length} 張新增、${res.cards_updated.length} 張待更新`);
+      initDiffSelection(res);
+      info(`已解析差異：${res.cards_new.length} 張新卡片、${res.cards_updated.length} 張兩邊不一致`);
     } catch (err) {
       report(err, "讀取或比對同步檔案失敗");
       setPkg(null);
     } finally {
       setComparing(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  };
-
-  const toggleSelectAll = (checked: boolean) => {
-    if (!diff) return;
-    if (checked) {
-      setSelectedNewCardIds(new Set(diff.cards_new.map((c) => c.id)));
-      setSelectedUpdateCardIds(new Set(diff.cards_updated.map((c) => c.id)));
-    } else {
-      setSelectedNewCardIds(new Set());
-      setSelectedUpdateCardIds(new Set());
     }
   };
 
@@ -444,6 +485,14 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
 
   const toggleUpdateCard = (id: string) => {
     setSelectedUpdateCardIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const toggleExpandDiff = (id: string) => {
+    setExpandedDiffIds((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
@@ -741,82 +790,322 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                   <div className="empty">沒有可套用的變更。</div>
                 ) : (
                   <>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <label className="sync-check-row" style={{ fontWeight: 600 }}>
-                        <input
-                          type="checkbox"
-                          checked={
-                            selectedNewCardIds.size === diff.cards_new.length &&
-                            selectedUpdateCardIds.size === diff.cards_updated.length
-                          }
-                          onChange={(e) => toggleSelectAll(e.target.checked)}
-                        />
-                        全選所有卡片變更（{diff.cards_new.length + diff.cards_updated.length} 張卡片）
-                      </label>
-                      <span className="muted" style={{ fontSize: 12 }}>
-                        附帶追加：{diff.tags_new.length} 標籤 · {diff.links_new.length} 連結 · {diff.board_cards_new.length} 白板歸屬
-                      </span>
+                    <div className="tabs" role="tablist" style={{ marginBottom: 4 }}>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={activeTab === "new"}
+                        className={activeTab === "new" ? "on" : ""}
+                        onClick={() => setActiveTab("new")}
+                      >
+                        🆕 新卡片（{diff.cards_new.length}） — 已選 {selectedNewCardIds.size}
+                      </button>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={activeTab === "updated"}
+                        className={activeTab === "updated" ? "on" : ""}
+                        onClick={() => setActiveTab("updated")}
+                      >
+                        🔄 既有卡片兩邊不一致（{diff.cards_updated.length}） — 已選 {selectedUpdateCardIds.size}
+                      </button>
                     </div>
 
-                    <div className="sync-diff-list">
-                      {diff.cards_new.map((c) => (
-                        <div key={c.id} className="sync-diff-item">
-                          <label className="sync-check-row">
+                    {activeTab === "new" ? (
+                      <>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <label className="sync-check-row" style={{ fontWeight: 600 }}>
                             <input
                               type="checkbox"
-                              checked={selectedNewCardIds.has(c.id)}
-                              onChange={() => toggleNewCard(c.id)}
+                              checked={
+                                diff.cards_new.length > 0 &&
+                                selectedNewCardIds.size === diff.cards_new.length
+                              }
+                              disabled={diff.cards_new.length === 0}
+                              onChange={(e) =>
+                                setSelectedNewCardIds(
+                                  e.target.checked ? new Set(diff.cards_new.map((c) => c.id)) : new Set(),
+                                )
+                              }
                             />
-                            <span className="facet-badge" style={{ background: "rgba(16, 185, 129, 0.15)", color: "#10b981" }}>
-                              新增
-                            </span>
-                            <strong>{c.title || "（無標題）"}</strong>
+                            全選所有新卡片（{diff.cards_new.length} 張）
                           </label>
-                          <span className="snippet" style={{ maxWidth: 240 }}>
-                            {c.body.slice(0, 40) || "（空內文）"}
+                          <span className="muted" style={{ fontSize: 12 }}>
+                            附帶追加：{diff.tags_new.length} 標籤 · {diff.board_cards_new.length} 白板歸屬
                           </span>
                         </div>
-                      ))}
 
-                      {diff.cards_updated.map((c) => (
-                        <div key={c.id} className="sync-diff-item" style={{ flexDirection: "column", alignItems: "stretch" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                            <label className="sync-check-row">
-                              <input
-                                type="checkbox"
-                                checked={selectedUpdateCardIds.has(c.id)}
-                                onChange={() => toggleUpdateCard(c.id)}
-                              />
-                              <span className="facet-badge" style={{ background: "rgba(59, 130, 246, 0.15)", color: "#3b82f6" }}>
-                                修改
+                        <div className="sync-diff-list">
+                          {diff.cards_new.length === 0 && (
+                            <div className="empty">本次匯入沒有新卡片。請切換至「既有卡片兩邊不一致」分頁檢視修改。</div>
+                          )}
+                          {diff.cards_new.map((c) => (
+                            <div key={c.id} className="sync-diff-item">
+                              <label className="sync-check-row">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedNewCardIds.has(c.id)}
+                                  onChange={() => toggleNewCard(c.id)}
+                                />
+                                <span
+                                  className="facet-badge"
+                                  style={{ background: "rgba(16, 185, 129, 0.15)", color: "#10b981" }}
+                                >
+                                  新增
+                                </span>
+                                <strong>{c.title || "（無標題）"}</strong>
+                              </label>
+                              <span className="snippet" style={{ maxWidth: 260 }}>
+                                {c.body.slice(0, 50) || "（空內文）"}
                               </span>
-                              <strong>{c.new_title || c.title || "（無標題）"}</strong>
-                            </label>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+                          <label className="sync-check-row" style={{ fontWeight: 600 }}>
+                            <input
+                              type="checkbox"
+                              checked={
+                                diff.cards_updated.length > 0 &&
+                                selectedUpdateCardIds.size === diff.cards_updated.length
+                              }
+                              disabled={diff.cards_updated.length === 0}
+                              onChange={(e) =>
+                                setSelectedUpdateCardIds(
+                                  e.target.checked ? new Set(diff.cards_updated.map((c) => c.id)) : new Set(),
+                                )
+                              }
+                            />
+                            全選不一致卡片（{diff.cards_updated.length} 張）
+                          </label>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                             <button
                               type="button"
-                              onClick={() => setViewingDiffCard((cur) => (cur?.id === c.id ? null : c))}
+                              style={{ fontSize: 11, padding: "2px 8px" }}
+                              onClick={() => {
+                                const newer = (diff.cards_updated as ExtendedCardDiff[])
+                                  .filter((c) => isCardNewer(c))
+                                  .map((c) => c.id);
+                                setSelectedUpdateCardIds(new Set(newer));
+                              }}
+                              title="只勾選匯入檔最後修改時間較電腦端更新的卡片"
                             >
-                              {viewingDiffCard?.id === c.id ? "收合對照" : "比對差異 (Diff)"}
+                              ⚡ 只勾選匯入檔較新
                             </button>
                           </div>
-
-                          {viewingDiffCard?.id === c.id && (
-                            <div className="diff-view-box">
-                              <div className="diff-pane">
-                                <div className="diff-pane-head">電腦端目前內容</div>
-                                <div className="diff-pane-title">標題：{c.old_title || "（無標題）"}</div>
-                                <pre className="diff-pane-body">{c.old_body || "（空）"}</pre>
-                              </div>
-                              <div className="diff-pane new">
-                                <div className="diff-pane-head">iPad 新內容</div>
-                                <div className="diff-pane-title">標題：{c.new_title || "（無標題）"}</div>
-                                <pre className="diff-pane-body">{c.new_body || "（空）"}</pre>
-                              </div>
-                            </div>
-                          )}
                         </div>
-                      ))}
-                    </div>
+
+                        <div className="sync-diff-list">
+                          {diff.cards_updated.length === 0 && (
+                            <div className="empty">所有既有卡片在兩邊內容、標籤與連結皆完全一致。</div>
+                          )}
+                          {(diff.cards_updated as ExtendedCardDiff[]).map((c) => {
+                            const newer = isCardNewer(c);
+                            const isExpanded = expandedDiffIds.has(c.id);
+                            const fields =
+                              c.diff_fields && c.diff_fields.length > 0
+                                ? c.diff_fields
+                                : [
+                                    ...(c.old_title !== c.new_title ? ["標題"] : []),
+                                    ...(c.old_body !== c.new_body ? ["內容"] : []),
+                                  ];
+                            const titleDiff = c.old_title !== c.new_title;
+                            const bodyDiff = c.old_body !== c.new_body;
+                            const typeDiff =
+                              c.old_card_type !== undefined &&
+                              c.new_card_type !== undefined &&
+                              c.old_card_type !== c.new_card_type;
+                            const statusDiff =
+                              c.old_curation_status !== undefined &&
+                              c.new_curation_status !== undefined &&
+                              c.old_curation_status !== c.new_curation_status;
+                            const tagsDiff =
+                              JSON.stringify(c.old_tags ?? []) !== JSON.stringify(c.new_tags ?? []);
+                            const linksDiff =
+                              JSON.stringify(c.old_links ?? []) !== JSON.stringify(c.new_links ?? []);
+
+                            return (
+                              <div
+                                key={c.id}
+                                className="sync-diff-item"
+                                style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}
+                              >
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    gap: 8,
+                                    flexWrap: "wrap",
+                                  }}
+                                >
+                                  <label className="sync-check-row" style={{ flex: 1, minWidth: 200 }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedUpdateCardIds.has(c.id)}
+                                      onChange={() => toggleUpdateCard(c.id)}
+                                    />
+                                    <span
+                                      className="facet-badge"
+                                      style={
+                                        newer
+                                          ? { background: "rgba(16, 185, 129, 0.16)", color: "#10b981" }
+                                          : { background: "rgba(245, 158, 11, 0.16)", color: "#f59e0b" }
+                                      }
+                                    >
+                                      {newer ? "匯入檔較新" : "電腦端較新"}
+                                    </span>
+                                    <strong>{c.new_title || c.old_title || c.title || "（無標題）"}</strong>
+                                    {fields.map((f) => (
+                                      <span key={f} className="facet-badge">
+                                        {f}
+                                      </span>
+                                    ))}
+                                  </label>
+
+                                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                    <span className="muted" style={{ fontSize: 11, textAlign: "right" }}>
+                                      匯入：{formatSyncTime(c.new_updated_at)}
+                                      <br />
+                                      電腦：{formatSyncTime(c.old_updated_at)}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      style={{ fontSize: 12, padding: "2px 8px" }}
+                                      onClick={() => toggleExpandDiff(c.id)}
+                                    >
+                                      {isExpanded ? "▴ 收合差異" : "▾ 展開差異"}
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {isExpanded && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      flexDirection: "column",
+                                      gap: 8,
+                                      marginTop: 4,
+                                      paddingTop: 8,
+                                      borderTop: "1px dashed var(--line)",
+                                      fontSize: 12,
+                                    }}
+                                  >
+                                    {titleDiff && (
+                                      <div className="diff-view-box" style={{ marginTop: 0, paddingTop: 0, borderTop: "none" }}>
+                                        <div className="diff-pane">
+                                          <div className="diff-pane-head">標題（電腦端）</div>
+                                          <div>{c.old_title || "（無標題）"}</div>
+                                        </div>
+                                        <div className="diff-pane new">
+                                          <div className="diff-pane-head">標題（匯入檔）</div>
+                                          <div>{c.new_title || "（無標題）"}</div>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {(typeDiff || statusDiff) && (
+                                      <div className="diff-view-box" style={{ marginTop: 0, paddingTop: 0, borderTop: "none" }}>
+                                        <div className="diff-pane">
+                                          <div className="diff-pane-head">型態與整理狀態（電腦端）</div>
+                                          <div>
+                                            型態：{formatCardType(c.old_card_type)} ／ 狀態：{formatCuration(c.old_curation_status)}
+                                          </div>
+                                        </div>
+                                        <div className="diff-pane new">
+                                          <div className="diff-pane-head">型態與整理狀態（匯入檔）</div>
+                                          <div>
+                                            型態：{formatCardType(c.new_card_type)} ／ 狀態：{formatCuration(c.new_curation_status)}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {tagsDiff && (
+                                      <div className="diff-view-box" style={{ marginTop: 0, paddingTop: 0, borderTop: "none" }}>
+                                        <div className="diff-pane">
+                                          <div className="diff-pane-head">標籤（電腦端）</div>
+                                          <div className="chips">
+                                            {(c.old_tags ?? []).length === 0 ? (
+                                              <span className="muted">無標籤</span>
+                                            ) : (
+                                              (c.old_tags ?? []).map((t) => (
+                                                <span key={t} className="chip">
+                                                  {t}
+                                                </span>
+                                              ))
+                                            )}
+                                          </div>
+                                        </div>
+                                        <div className="diff-pane new">
+                                          <div className="diff-pane-head">標籤（匯入檔）</div>
+                                          <div className="chips">
+                                            {(c.new_tags ?? []).length === 0 ? (
+                                              <span className="muted">無標籤</span>
+                                            ) : (
+                                              (c.new_tags ?? []).map((t) => (
+                                                <span key={t} className="chip">
+                                                  {t}
+                                                </span>
+                                              ))
+                                            )}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {linksDiff && (
+                                      <div className="diff-view-box" style={{ marginTop: 0, paddingTop: 0, borderTop: "none" }}>
+                                        <div className="diff-pane">
+                                          <div className="diff-pane-head">語意連結（電腦端）</div>
+                                          {(c.old_links ?? []).length === 0 ? (
+                                            <span className="muted">無連結</span>
+                                          ) : (
+                                            <ul className="plain" style={{ fontSize: 11 }}>
+                                              {(c.old_links ?? []).map((l, idx) => (
+                                                <li key={idx}>{l}</li>
+                                              ))}
+                                            </ul>
+                                          )}
+                                        </div>
+                                        <div className="diff-pane new">
+                                          <div className="diff-pane-head">語意連結（匯入檔）</div>
+                                          {(c.new_links ?? []).length === 0 ? (
+                                            <span className="muted">無連結</span>
+                                          ) : (
+                                            <ul className="plain" style={{ fontSize: 11 }}>
+                                              {(c.new_links ?? []).map((l, idx) => (
+                                                <li key={idx}>{l}</li>
+                                              ))}
+                                            </ul>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {bodyDiff && (
+                                      <div className="diff-view-box" style={{ marginTop: 0, paddingTop: 0, borderTop: "none" }}>
+                                        <div className="diff-pane">
+                                          <div className="diff-pane-head">內文（電腦端目前內容）</div>
+                                          <pre className="diff-pane-body">{c.old_body || "（空）"}</pre>
+                                        </div>
+                                        <div className="diff-pane new">
+                                          <div className="diff-pane-head">內文（匯入檔案新內容）</div>
+                                          <pre className="diff-pane-body">{c.new_body || "（空）"}</pre>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
               </div>
@@ -841,7 +1130,9 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                   }
                   onClick={() => void applyChanges()}
                 >
-                  {applying ? "套用中…" : `確認套用所選變更（${selectedNewCardIds.size + selectedUpdateCardIds.size} 張卡片）`}
+                  {applying
+                    ? "套用中…"
+                    : `確認套用所選變更（新卡 ${selectedNewCardIds.size}＋更新 ${selectedUpdateCardIds.size}）`}
                 </button>
               )}
             </div>

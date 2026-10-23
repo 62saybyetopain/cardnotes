@@ -39,6 +39,15 @@ export default function App() {
     }
     return 420;
   });
+  const [leftOpen, setLeftOpen] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("cardboard:left-open");
+      if (saved !== null) return saved === "true";
+    } catch {
+      /* localStorage 不可用時忽略 */
+    }
+    return true;
+  });
   const [version, setVersion] = useState(0);
   const [booted, setBooted] = useState(false);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
@@ -64,6 +73,18 @@ export default function App() {
 
   const toggleTheme = useCallback(() => {
     setTheme((t) => (t === "dark" ? "light" : "dark"));
+  }, []);
+
+  const toggleLeft = useCallback(() => {
+    setLeftOpen((cur) => {
+      const next = !cur;
+      try {
+        localStorage.setItem("cardboard:left-open", String(next));
+      } catch {
+        /* 忽略寫入失敗 */
+      }
+      return next;
+    });
   }, []);
 
   const startResize = useCallback((e: React.MouseEvent) => {
@@ -124,7 +145,7 @@ export default function App() {
         const cardSummaries: CardSummary[] = b.cards.map((c) => ({
           id: c.card_id,
           title: c.title,
-          snippet: c.body.slice(0, 160),
+          snippet: c.body,
           updated_at: c.updated_at,
         }));
         setIpadCardList(cardSummaries);
@@ -281,8 +302,10 @@ export default function App() {
   return (
     <CardOpenProvider onOpenCard={openCardPreview}>
       <div
-        className={`app${rightOpen ? "" : " right-closed"}`}
-        style={rightOpen ? { gridTemplateColumns: `260px 1fr ${rightWidth}px` } : undefined}
+        className={`app${leftOpen ? "" : " left-closed"}${rightOpen ? "" : " right-closed"}`}
+        style={{
+          gridTemplateColumns: `${leftOpen ? "260px" : "0px"} 1fr${rightOpen ? ` ${rightWidth}px` : ""}`,
+        }}
       >
         <LeftPanel
           boards={boards}
@@ -292,6 +315,9 @@ export default function App() {
           inboxCount={inboxCount}
           filter={filter}
           isSearchTab={rightOpen && tab === "search"}
+          theme={theme}
+          onToggleTheme={toggleTheme}
+          onToggleCollapse={toggleLeft}
           onSelectBoard={(id) => {
             setBoardId(id);
             setViewMode("board");
@@ -304,6 +330,29 @@ export default function App() {
           report={report}
         />
         <main className="center">
+          {!leftOpen && (
+            <div className="left-collapsed-bar" role="toolbar" aria-label="左側面板控制">
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={toggleLeft}
+                aria-label="展開左側面板"
+                title="展開左側面板"
+              >
+                ▶
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={toggleTheme}
+                aria-label={theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
+                title={theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
+              >
+                {theme === "dark" ? "☀️" : "🌙"}
+              </button>
+            </div>
+          )}
+
           {!isStandalone ? (
             <>
               <div className="board-toolbar">
@@ -349,14 +398,6 @@ export default function App() {
                     </svg>
                   </button>
                 )}
-                <button
-                  className="icon-btn"
-                  onClick={toggleTheme}
-                  aria-label={theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
-                  title={theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
-                >
-                  {theme === "dark" ? "☀️" : "🌙"}
-                </button>
                 <button
                   className="icon-btn primary"
                   onClick={() => void createCard()}

@@ -19,6 +19,7 @@ export const ORDERED_STYLE_OPTIONS: readonly { style: OrderedStyle; sample: stri
   { style: "roman", sample: "i.", label: "i. 羅馬數字" },
 ];
 
+// bg／border 是 CSS 變數（實際色值依主題定義在 styles.css 的 --hl-*）；dotColor 是工具列色點，固定色
 export const HIGHLIGHT_COLOR_OPTIONS: readonly {
   color: HighlightColor;
   label: string;
@@ -31,41 +32,41 @@ export const HIGHLIGHT_COLOR_OPTIONS: readonly {
     color: "amber",
     label: "琥珀黃",
     dotColor: "#f59e0b",
-    bg: "rgba(245, 158, 11, 0.28)",
+    bg: "var(--hl-amber-bg)",
     text: "#fde68a",
-    border: "rgba(245, 158, 11, 0.65)",
+    border: "var(--hl-amber-border)",
   },
   {
     color: "green",
     label: "翠綠",
     dotColor: "#10b981",
-    bg: "rgba(16, 185, 129, 0.26)",
+    bg: "var(--hl-green-bg)",
     text: "#a7f3d0",
-    border: "rgba(16, 185, 129, 0.65)",
+    border: "var(--hl-green-border)",
   },
   {
     color: "blue",
     label: "天空藍",
     dotColor: "#3b82f6",
-    bg: "rgba(59, 130, 246, 0.28)",
+    bg: "var(--hl-blue-bg)",
     text: "#bfdbfe",
-    border: "rgba(59, 130, 246, 0.65)",
+    border: "var(--hl-blue-border)",
   },
   {
     color: "purple",
     label: "薰衣草紫",
     dotColor: "#8b5cf6",
-    bg: "rgba(139, 92, 246, 0.28)",
+    bg: "var(--hl-purple-bg)",
     text: "#ddd6fe",
-    border: "rgba(139, 92, 246, 0.65)",
+    border: "var(--hl-purple-border)",
   },
   {
     color: "pink",
     label: "珊瑚粉",
     dotColor: "#f43f5e",
-    bg: "rgba(244, 63, 94, 0.28)",
+    bg: "var(--hl-pink-bg)",
     text: "#fecdd3",
-    border: "rgba(244, 63, 94, 0.65)",
+    border: "var(--hl-pink-border)",
   },
 ];
 

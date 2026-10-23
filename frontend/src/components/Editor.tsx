@@ -1,6 +1,8 @@
 // @depends-on ../lib/markdown.ts (BULLET_STYLE_OPTIONS, HIGHLIGHT_COLOR_OPTIONS, ORDERED_STYLE_OPTIONS, applyHighlight, applyInlineWrap, applyLineType, detectAtTrigger, detectLineType, detectListStyleAtCursor, formatCardRef, handleListEnter, indentListLines, transformPasteContent)
 // @depends-on ./MentionPopup.tsx (MentionPopup)
 // @depends-on ./Markdown.tsx (Markdown)
+// @depends-on ./LiveSegmentEditor.tsx (LiveSegmentEditor, SegmentHandle；內文編輯改用 CodeMirror，位移一律是 body 的全域字元位移)
+// @depends-on ../lib/liveMarkdown.ts (編輯中的即時渲染；語法規則與 Markdown.tsx 重複一份)
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import {
@@ -26,6 +28,7 @@ import {
 import { insertAtCursor, isAcceptedMime, mediaRef } from "../lib/media";
 import { messageOf } from "../notify";
 import type { BoardLink, CardDetail } from "../types";
+import { LiveSegmentEditor, type SegmentHandle } from "./LiveSegmentEditor";
 import { Markdown, MediaEmbed } from "./Markdown";
 import { MentionPopup } from "./MentionPopup";
 
@@ -55,6 +58,11 @@ type BodySegment =
     };
 
 const INLINE_MEDIA_RE = /!\[([^\]]*)\]\(media:([0-9a-fA-F-]{36})\)/g;
+
+// CodeMirror 會把 \r\n 視為單一換行，若 body 留著 \r，全域字元位移會與 view 錯位；載入時統一成 \n
+function normalizeNewlines(s: string): string {
+  return s.replace(/\r\n?/g, "\n");
+}
 
 function extractWidthFromAlt(alt: string): { baseAlt: string; width?: string } {
   const pipeIdx = alt.lastIndexOf("|");
@@ -136,7 +144,7 @@ const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
 
 export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, onOpenCard, report }: Props) {
   const [title, setTitle] = useState(card.title);
-  const [body, setBody] = useState(card.body);
+  const [body, setBody] = useState(() => normalizeNewlines(card.body));
   const [cursorPos, setCursorPos] = useState(0);
   const [previewing, setPreviewing] = useState(false);
   const [status, setStatus] = useState<Status>("saved");
@@ -150,10 +158,10 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
   } | null>(null);
 
   const versionRef = useRef(card.updated_at);
-  const latest = useRef({ title: card.title, body: card.body });
+  const latest = useRef({ title: card.title, body: normalizeNewlines(card.body) });
   const savingRef = useRef(false);
   const pendingRef = useRef(false);
-  const textRef = useRef<HTMLTextAreaElement>(null);
+  const textRef = useRef<SegmentHandle | null>(null);
   const statusRef = useRef<Status>("saved");
   statusRef.current = status;
 
@@ -228,73 +236,43 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
     markDirty();
   };
 
-  const activeSegStartRef = useRef(0);
-  const segRefs = useRef<Map<number, HTMLTextAreaElement>>(new Map());
-  const containerRef = useRef<HTMLDivElement>(null);
-  const lastSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
-  const [activeEditing, setActiveEditing] = useState(false);
+  const segRefs = useRef<Map<number, SegmentHandle>>(new Map());
 
   const getGlobalSelection = (): { start: number; end: number } => {
-    const el = textRef.current;
-    const offset = activeSegStartRef.current;
-    if (el) {
-      const s = el.selectionStart ?? 0;
-      const e = el.selectionEnd ?? s;
-      if (s !== e || document.activeElement === el) {
-        lastSelectionRef.current = { start: offset + s, end: offset + e };
-        return lastSelectionRef.current;
-      }
-    }
-    // 支援直接在渲染畫面上反白文字套用格式
-    const sel = window.getSelection();
-    if (sel && !sel.isCollapsed && containerRef.current?.contains(sel.anchorNode)) {
-      const str = sel.toString();
-      if (str.trim().length > 0) {
-        const idx = latest.current.body.indexOf(str);
-        if (idx >= 0) {
-          lastSelectionRef.current = { start: idx, end: idx + str.length };
-          return lastSelectionRef.current;
-        }
-      }
-    }
-    return lastSelectionRef.current.start !== lastSelectionRef.current.end
-      ? lastSelectionRef.current
-      : { start: cursorPos, end: cursorPos };
+    // 目前段落若已被移除（例如刪掉圖片後前後段落合併），退回第一段，不讀已銷毀的 view
+    let h = textRef.current;
+    if (!h || !h.alive) h = segRefs.current.get(0) ?? null;
+    if (!h) return { start: cursorPos, end: cursorPos };
+    const sel = h.getSelection();
+    return { start: h.start + sel.from, end: h.start + sel.to };
   };
 
-  const applyEditPatch = useCallback((patch: EditPatch) => {
-    // 記錄當前各滾動容器的 scrollTop，防止畫面被自動拉到卡片最下方
-    const savedContainerScroll = containerRef.current?.scrollTop;
-    const activeEl = textRef.current;
-    const savedElScroll = activeEl?.scrollTop;
-
-    onBody(patch.text);
-    setCursorPos(patch.selectionStart);
-    lastSelectionRef.current = { start: patch.selectionStart, end: patch.selectionEnd };
-
-    requestAnimationFrame(() => {
-      const nextSegs = splitBodySegments(patch.text);
-      for (const s of nextSegs) {
-        if (s.kind === "text" && patch.selectionStart >= s.start && patch.selectionStart <= s.end) {
-          const el = segRefs.current.get(s.start);
-          if (el) {
-            textRef.current = el;
-            activeSegStartRef.current = s.start;
-            // preventScroll 避免游標跳轉造成容器滾動到底部
-            el.focus({ preventScroll: true });
-            const localStart = Math.max(0, patch.selectionStart - s.start);
-            const localEnd = Math.max(localStart, Math.min(s.end - s.start, patch.selectionEnd - s.start));
-            el.setSelectionRange(localStart, localEnd);
-            if (savedElScroll !== undefined) el.scrollTop = savedElScroll;
-          }
-          break;
+  // 依「整份 body 的全域位置」找到對應段落並放置選取
+  const placeSelection = useCallback((text: string, from: number, to: number) => {
+    for (const s of splitBodySegments(text)) {
+      if (s.kind === "text" && from >= s.start && from <= s.end) {
+        const h = segRefs.current.get(s.start);
+        if (h) {
+          textRef.current = h;
+          const localStart = Math.max(0, from - s.start);
+          const localEnd = Math.max(localStart, Math.min(s.end - s.start, to - s.start));
+          h.focus();
+          h.setSelection(localStart, localEnd);
         }
+        return;
       }
-      if (containerRef.current && savedContainerScroll !== undefined) {
-        containerRef.current.scrollTop = savedContainerScroll;
-      }
-    });
+    }
   }, []);
+
+  const applyEditPatch = useCallback(
+    (patch: EditPatch) => {
+      onBody(patch.text);
+      setCursorPos(patch.selectionStart);
+      // 新內容要等 React 提交後才由 LiveSegmentEditor 同步進 view，所以選取等下一個 frame 再放
+      requestAnimationFrame(() => placeSelection(patch.text, patch.selectionStart, patch.selectionEnd));
+    },
+    [placeSelection],
+  );
 
   const [bulletStyle, setBulletStyle] = useState<BulletStyle>("dash");
   const [orderedStyle, setOrderedStyle] = useState<OrderedStyle>("decimal");
@@ -372,7 +350,7 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
         const r = insertAtCursor(latest.current.body, cursor, cursor, mediaRef(info.id) + "\n");
         cursor = r.cursor;
         onBody(r.text);
-        requestAnimationFrame(() => textRef.current?.setSelectionRange(r.cursor, r.cursor));
+        requestAnimationFrame(() => placeSelection(r.text, r.cursor, r.cursor));
       } catch (e) {
         report(e, `上傳「${f.name}」失敗，未插入任何內容`);
       } finally {
@@ -606,7 +584,7 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
                 padding: "1px 6px",
                 borderRadius: 6,
                 border: "1px solid var(--line, #334155)",
-                background: "rgba(15, 23, 42, 0.45)",
+                background: "var(--bg)",
               }}
             >
               <button
@@ -638,8 +616,8 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
                     background: c.dotColor,
                     border:
                       highlightColor === c.color
-                        ? "2px solid #ffffff"
-                        : "1px solid rgba(255,255,255,0.25)",
+                        ? "2px solid var(--text)"
+                        : "1px solid var(--line)",
                     cursor: "pointer",
                   }}
                 />
@@ -709,247 +687,150 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
       )}
 
       {!previewing ? (
-        <div
-          ref={containerRef}
-          className="live-editor-wrap"
-          style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: compact ? 120 : 320 }}
-        >
-          {!activeEditing ? (
-            <div
-              className="preview live-render-active"
-              style={{ flex: 1, cursor: "text", minHeight: compact ? 120 : 320 }}
-              title="點擊此處即可就地編輯文字內容；選取文字可直接點擊工具列套用螢光筆或格式"
-              onClick={() => {
-                setActiveEditing(true);
-                requestAnimationFrame(() => textRef.current?.focus({ preventScroll: true }));
-              }}
-            >
-              {body.trim() ? (
-                <Markdown source={body} onOpenCard={onOpenCard} />
-              ) : (
-                <span className="muted">點擊此處開始輸入卡片內容（支援 Markdown、貼上圖片與 @ 引用）…</span>
-              )}
-            </div>
-          ) : (
-            (() => {
-              const segments = splitBodySegments(body);
-              const hasMedia = segments.length > 1;
-              return (
-                <div
-                  className={hasMedia ? "body-input segmented-editor" : "segmented-editor-single"}
-                  style={
-                    hasMedia
-                      ? {
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: 6,
-                          overflowY: "auto",
-                          padding: 8,
-                          minHeight: compact ? 120 : 220,
-                        }
-                      : { display: "flex", flexDirection: "column", flex: 1, minHeight: compact ? 120 : undefined }
-                  }
-                >
-                  {segments.map((seg, idx) => {
-                    if (seg.kind === "media") {
-                      return (
-                        <div
-                          key={`media-${seg.mediaId}-${seg.rawStart}`}
-                          style={{
-                            padding: "4px 6px",
-                            borderRadius: 6,
-                            background: "var(--bg)",
-                            border: "1px solid var(--line, #334155)",
-                          }}
-                        >
-                          <MediaEmbed
-                            id={seg.mediaId}
-                            explicitWidth={seg.explicitWidth}
-                            onChangeWidth={(w) => {
-                              const { baseAlt } = extractWidthFromAlt(seg.alt);
-                              const nextToken = `![${baseAlt}|${w}](media:${seg.mediaId})`;
-                              const cur = latest.current.body;
-                              onBody(cur.slice(0, seg.rawStart) + nextToken + cur.slice(seg.rawEnd));
-                            }}
-                            onRemove={() => {
-                              const cur = latest.current.body;
-                              onBody(cur.slice(0, seg.removeStart) + cur.slice(seg.removeEnd));
-                            }}
-                          />
-                        </div>
-                      );
-                    }
-
-                    const lineCount = Math.max(1, seg.text.split("\n").length);
-                    return (
-                      <textarea
-                        key={`text-${idx}`}
-                        ref={(el) => {
-                          if (el) {
-                            segRefs.current.set(seg.start, el);
-                            if (idx === 0) textRef.current = el;
-                          } else {
-                            segRefs.current.delete(seg.start);
-                          }
-                        }}
-                        className={hasMedia ? "body-segment-input" : "body-input"}
-                        rows={hasMedia ? Math.max(2, lineCount) : undefined}
-                        style={
-                          hasMedia
-                            ? {
-                                width: "100%",
-                                resize: "vertical",
-                                border: "1px dashed rgba(148, 163, 184, 0.25)",
-                                borderRadius: 4,
-                                background: "transparent",
-                                color: "inherit",
-                                padding: "4px 6px",
-                                fontFamily: "inherit",
-                                fontSize: "inherit",
-                                lineHeight: 1.5,
-                              }
-                            : compact
-                              ? { minHeight: 110 }
-                              : undefined
-                        }
-                        value={seg.text}
-                        placeholder={
-                          idx === 0
-                            ? "內文（Markdown）。可直接貼上或拖入圖片、影片，或輸入 @ 引用其他卡片。"
-                            : "繼續輸入段落內容（支援 Markdown 語法）…"
-                        }
-                        aria-label={idx === 0 ? "卡片內文" : `卡片內文段落 ${idx + 1}`}
-                        onFocus={(e) => {
-                          textRef.current = e.currentTarget;
-                          activeSegStartRef.current = seg.start;
-                        }}
-                        onBlur={(e) => {
-                          // 若焦點不是移往工具列按鈕，則自動回歸視覺渲染效果
-                          const related = e.relatedTarget as HTMLElement | null;
-                          if (!related || !related.closest(".editor-toolbar")) {
-                            setActiveEditing(false);
-                          }
-                        }}
-                        onSelect={(e) => {
-                          textRef.current = e.currentTarget;
-                          activeSegStartRef.current = seg.start;
-                          const s = seg.start + (e.currentTarget.selectionStart ?? 0);
-                          const endPos = seg.start + (e.currentTarget.selectionEnd ?? 0);
-                          setCursorPos(s);
-                          lastSelectionRef.current = { start: s, end: endPos };
-                        }}
-                        onKeyUp={(e) => {
-                          textRef.current = e.currentTarget;
-                          activeSegStartRef.current = seg.start;
-                          const s = seg.start + (e.currentTarget.selectionStart ?? 0);
-                          const endPos = seg.start + (e.currentTarget.selectionEnd ?? 0);
-                          setCursorPos(s);
-                          lastSelectionRef.current = { start: s, end: endPos };
-                        }}
-                        onClick={(e) => {
-                          textRef.current = e.currentTarget;
-                          activeSegStartRef.current = seg.start;
-                          const s = seg.start + (e.currentTarget.selectionStart ?? 0);
-                          const endPos = seg.start + (e.currentTarget.selectionEnd ?? 0);
-                          setCursorPos(s);
-                          lastSelectionRef.current = { start: s, end: endPos };
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-                          const el = e.currentTarget;
-                          const gStart = seg.start + (el.selectionStart ?? 0);
-                          const gEnd = seg.start + (el.selectionEnd ?? 0);
-                          if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
-                            const k = e.key.toLowerCase();
-                            if (k === "b") {
-                              e.preventDefault();
-                              applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "**", "粗體文字"));
-                              return;
-                            }
-                            if (k === "u") {
-                              e.preventDefault();
-                              applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "++", "底線文字"));
-                              return;
-                            }
-                          }
-                          if (e.key === "Tab") {
-                            const patch = indentListLines(latest.current.body, gStart, gEnd, e.shiftKey ? -1 : 1);
-                            if (!patch) return;
-                            e.preventDefault();
-                            applyEditPatch(patch);
-                            return;
-                          }
-                          if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-                            const patch = handleListEnter(latest.current.body, gStart, gEnd);
-                            if (!patch) return;
-                            e.preventDefault();
-                            applyEditPatch(patch);
-                          }
-                        }}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          const localPos = e.currentTarget.selectionStart ?? val.length;
+        (() => {
+          const segments = splitBodySegments(body);
+          return (
+            <div className="live-editor" style={compact ? { minHeight: 120 } : undefined}>
+              {segments.map((seg, idx) => {
+                if (seg.kind === "media") {
+                  return (
+                    <div
+                      key={`media-${seg.mediaId}-${seg.rawStart}`}
+                      style={{
+                        padding: "4px 6px",
+                        borderRadius: 6,
+                        background: "var(--bg)",
+                        border: "1px solid var(--line, #334155)",
+                      }}
+                    >
+                      <MediaEmbed
+                        id={seg.mediaId}
+                        explicitWidth={seg.explicitWidth}
+                        onChangeWidth={(w) => {
+                          const { baseAlt } = extractWidthFromAlt(seg.alt);
+                          const nextToken = `![${baseAlt}|${w}](media:${seg.mediaId})`;
                           const cur = latest.current.body;
-                          const prevLen = cur.length;
-                          const nextBody = cur.slice(0, seg.start) + val + cur.slice(seg.end);
-                          const globalPos = seg.start + localPos;
-                          onBody(nextBody);
-                          setCursorPos(globalPos);
-                          if (nextBody.length >= prevLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
-                            const trig = detectAtTrigger(nextBody, globalPos);
-                            if (trig && trig.query === "") {
-                              setMentionState({
-                                replaceFrom: trig.atIndex,
-                                replaceTo: globalPos,
-                                initialQuery: "",
-                              });
-                            }
-                          }
+                          onBody(cur.slice(0, seg.rawStart) + nextToken + cur.slice(seg.rawEnd));
                         }}
-                        onPaste={(e) => {
-                          const gFrom = seg.start + (e.currentTarget.selectionStart ?? seg.text.length);
-                          const gTo = seg.start + (e.currentTarget.selectionEnd ?? e.currentTarget.selectionStart ?? seg.text.length);
-                          if (e.clipboardData.files.length) {
-                            e.preventDefault();
-                            const files = takeFiles(e.clipboardData.files);
-                            if (files.length) void uploadFiles(files, gFrom);
-                            return;
-                          }
-                          const plain = e.clipboardData.getData("text/plain");
-                          const html = e.clipboardData.getData("text/html");
-                          const transformed = transformPasteContent(plain, html);
-                          if (transformed === null) return;
-                          e.preventDefault();
+                        onRemove={() => {
                           const cur = latest.current.body;
-                          const nextText = cur.slice(0, gFrom) + transformed + cur.slice(gTo);
-                          const nextCursor = gFrom + transformed.length;
-                          applyEditPatch({
-                            text: nextText,
-                            selectionStart: nextCursor,
-                            selectionEnd: nextCursor,
-                            replaceFrom: gFrom,
-                            replaceTo: gTo,
-                            insertText: transformed,
-                          });
-                        }}
-                        onDragOver={(e) => {
-                          if (e.dataTransfer.types.includes("Files")) e.preventDefault();
-                        }}
-                        onDrop={(e) => {
-                          if (!e.dataTransfer.files.length) return;
-                          e.preventDefault();
-                          const gAt = seg.start + (e.currentTarget.selectionStart ?? seg.text.length);
-                          const files = takeFiles(e.dataTransfer.files);
-                          if (files.length) void uploadFiles(files, gAt);
+                          onBody(cur.slice(0, seg.removeStart) + cur.slice(seg.removeEnd));
                         }}
                       />
-                    );
-                  })}
-                </div>
-              );
-            })()
-          )}
-        </div>
+                    </div>
+                  );
+                }
+
+                return (
+                  <LiveSegmentEditor
+                    key={`text-${idx}`}
+                    ref={(h) => {
+                      if (h) {
+                        segRefs.current.set(seg.start, h);
+                        if (idx === 0 && !textRef.current) textRef.current = h;
+                      } else {
+                        segRefs.current.delete(seg.start);
+                      }
+                    }}
+                    value={seg.text}
+                    start={seg.start}
+                    placeholder={
+                      idx === 0
+                        ? "內文（Markdown）。可直接貼上或拖入圖片、影片，或輸入 @ 引用其他卡片。"
+                        : "繼續輸入段落內容（支援 Markdown 語法）…"
+                    }
+                    ariaLabel={idx === 0 ? "卡片內文" : `卡片內文段落 ${idx + 1}`}
+                    onFocus={() => {
+                      const h = segRefs.current.get(seg.start);
+                      if (h) textRef.current = h;
+                    }}
+                    onSelectionChange={(from) => setCursorPos(seg.start + from)}
+                    onDocChange={(val, prevLen, cursor) => {
+                      // prevLen 是變動前的段落長度：不依賴渲染時的 seg.end，連續兩次變動也不會用到過期範圍
+                      const cur = latest.current.body;
+                      const prevBodyLen = cur.length;
+                      const nextBody = cur.slice(0, seg.start) + val + cur.slice(seg.start + prevLen);
+                      const globalPos = seg.start + cursor;
+                      onBody(nextBody);
+                      setCursorPos(globalPos);
+                      if (nextBody.length >= prevBodyLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
+                        const trig = detectAtTrigger(nextBody, globalPos);
+                        if (trig && trig.query === "") {
+                          setMentionState({
+                            replaceFrom: trig.atIndex,
+                            replaceTo: globalPos,
+                            initialQuery: "",
+                          });
+                        }
+                      }
+                    }}
+                    onKeyDown={(e, from, to) => {
+                      if (e.isComposing || e.keyCode === 229) return false;
+                      const gStart = seg.start + from;
+                      const gEnd = seg.start + to;
+                      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+                        const k = e.key.toLowerCase();
+                        if (k === "b") {
+                          applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "**", "粗體文字"));
+                          return true;
+                        }
+                        if (k === "u") {
+                          applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "++", "底線文字"));
+                          return true;
+                        }
+                      }
+                      if (e.key === "Tab") {
+                        const patch = indentListLines(latest.current.body, gStart, gEnd, e.shiftKey ? -1 : 1);
+                        if (!patch) return false;
+                        applyEditPatch(patch);
+                        return true;
+                      }
+                      if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                        const patch = handleListEnter(latest.current.body, gStart, gEnd);
+                        if (!patch) return false;
+                        applyEditPatch(patch);
+                        return true;
+                      }
+                      return false;
+                    }}
+                    onPaste={(e, from, to) => {
+                      const cd = e.clipboardData;
+                      if (!cd) return false;
+                      const gFrom = seg.start + from;
+                      const gTo = seg.start + to;
+                      if (cd.files.length) {
+                        const files = takeFiles(cd.files);
+                        if (files.length) void uploadFiles(files, gFrom);
+                        return true;
+                      }
+                      const transformed = transformPasteContent(cd.getData("text/plain"), cd.getData("text/html"));
+                      if (transformed === null) return false;
+                      const cur = latest.current.body;
+                      const nextText = cur.slice(0, gFrom) + transformed + cur.slice(gTo);
+                      const nextCursor = gFrom + transformed.length;
+                      applyEditPatch({
+                        text: nextText,
+                        selectionStart: nextCursor,
+                        selectionEnd: nextCursor,
+                        replaceFrom: gFrom,
+                        replaceTo: gTo,
+                        insertText: transformed,
+                      });
+                      return true;
+                    }}
+                    onDropFiles={(e, at) => {
+                      const dt = e.dataTransfer;
+                      if (!dt || !dt.files.length) return false;
+                      const files = takeFiles(dt.files);
+                      if (files.length) void uploadFiles(files, seg.start + at);
+                      return true;
+                    }}
+                  />
+                );
+              })}
+            </div>
+          );
+        })()
       ) : (
         <div className="preview" data-testid="editor-preview">
           <Markdown source={body} onOpenCard={onOpenCard} />
@@ -1060,7 +941,7 @@ function isAiTrailingProseLine(line: string): boolean {
   return false;
 }
 
-// 統一淨化器：同時支援「有 ``` 圍欄」與「無圍欄（從網頁直接複製含 TypeScript 標題與下方原因說明）」
+// 統一淨化器：同時支援「有 ``` 圍欄」與「無圍欄」，並剝除前後提示贅詞與保留開頭縮排
 function stripOuterFence(raw: string): string {
   const FENCE = "`".repeat(3);
   const trimBlank = (arr: string[]): string[] => {
@@ -1081,7 +962,7 @@ function stripOuterFence(raw: string): string {
     }
   }
 
-  // Case B: 無圍欄（網頁直接反白複製），剝除首行語言標籤（如 TypeScript / Copy code）
+  // Case B: 無圍欄，剝除首行語言標籤（如 TypeScript / Copy code）
   while (lines.length > 0) {
     const first = lines[0].trim();
     if (
@@ -1094,7 +975,20 @@ function stripOuterFence(raw: string): string {
     }
   }
 
-  // 剝除尾部的說明文字或下一個檔案標題（如「原因：...」、「lib/storage/httpDriver.ts（一處）」）
+  // 剝除首部常見提示詞贅字（如「貼出實際替換區段...」、「貼出完整可直接...」）
+  while (lines.length > 0) {
+    const first = lines[0].trim();
+    if (
+      /^(貼出實際替換|貼出完整可直接|請貼出|以下是|替換說明)/.test(first) ||
+      isAiTrailingProseLine(first)
+    ) {
+      lines = trimBlank(lines.slice(1));
+    } else {
+      break;
+    }
+  }
+
+  // 剝除尾部的說明文字或下一個檔案標題（如「原因：...」）
   let cutIdx = lines.length;
   for (let i = 0; i < lines.length; i++) {
     if (isAiTrailingProseLine(lines[i])) {
@@ -1106,15 +1000,63 @@ function stripOuterFence(raw: string): string {
   return lines.join("\n");
 }
 
+// 智慧貼上預處理器：在【前、】後與語言標記後自動補換行，且絕不吃掉代碼第一行的前導縮排空格
+// 智慧貼上預處理器：在【前、】後自動換行，並自動剝除黏著在第一行的語言標記（如 CSS.app -> .app）
+function normalizeSmartPasteInput(rawInput: string): string {
+  let text = normalizeCodeText(rawInput);
+
+  const LANGS =
+    "typescript|javascript|ts|tsx|js|jsx|python|py|sql|sqlite|json|html|css|scss|bash|sh|shell|yaml|yml|toml|markdown|md|diff|plaintext|text|c|cpp|csharp|java|go|rust|ruby|php|swift|kotlin";
+
+  // 1. 自動匹配：【尋找這段代碼】或【替換為以下代碼】，後方可接語言標籤（如 CSS、Python）
+  // 語言標籤與代碼可能是點號相連（如 CSS.app）、空格相連（如 Python   return）、或直接換行
+  const markerRegex = new RegExp(
+    `([^\n\r])?[ \\t]*` +
+      `([#*>\`\\-\\s0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
+      `(?:[ \\t]*(?:` +
+      LANGS +
+      `)(?:[ \\t]*(?:copy(?:[ \\t]*code)?|複製(?:[ \\t]*代碼|[ \\t]*程式碼)?))?)?` +
+      `[ \\t.:：]*(?=[\\r\\n]|$)`,
+    "gi",
+  );
+
+  text = text.replace(markerRegex, (_match, beforeChar, marker) => {
+    const prefix = beforeChar ? `${beforeChar}\n\n` : "\n";
+    const cleanMarker = marker.replace(/^[#*>\`\\-\\s0-9.:：]+/, "").replace(/\*+$/g, "");
+    return `${prefix}${cleanMarker}\n`;
+  });
+
+  // 2. 針對未在行尾的標記（例如標記與代碼連在同一行：【尋找這段代碼】 CSS.app...）
+  // 在標記前補換行、標記後補換行，並將緊鄰的語言標記剝除，把純代碼保留到下一行
+  const inlineMarkerRegex = new RegExp(
+    `([^\n\r])?[ \\t]*` +
+      `([#*>\`\\-\\s0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
+      `(?:[ \\t]*(?:` +
+      LANGS +
+      `)(?:[ \\t]*(?:copy(?:[ \\t]*code)?|複製(?:[ \\t]*代碼|[ \\t]*程式碼)?))?)?` +
+      `[ \\t.:：]*` +
+      `(?=[^\\r\\n\\s])`,
+    "gi",
+  );
+
+  text = text.replace(inlineMarkerRegex, (_match, beforeChar, marker) => {
+    const prefix = beforeChar ? `${beforeChar}\n\n` : "\n";
+    const cleanMarker = marker.replace(/^[#*>\`\\-\\s0-9.:：]+/, "").replace(/\*+$/g, "");
+    return `${prefix}${cleanMarker}\n`;
+  });
+
+  return text;
+}
+
 function parseAiPatchPairs(rawInput: string): PatchPair[] {
-  const text = normalizeCodeText(rawInput);
+  const text = normalizeSmartPasteInput(rawInput);
   const findMarker = "【尋找這段代碼】";
   const replaceMarker = "【替換為以下代碼】";
   const FENCE = "`".repeat(3);
   const lines = text.split("\n");
 
-  // 逐行掃描：圍欄內的任何文字（含代碼裡的字串常數）一律不當標記；
-  // 標記只在圍欄外、且去除標題／粗體／編號裝飾後以標記開頭的行才成立
+  // 逐行掃描：圍欄內或引號賦值內的任何文字一律不當標記；
+  // 標記只在圍欄外、且去除標題／粗體／編號裝飾後以標記開頭、且不含賦值語法時才成立
   const marks: { kind: "find" | "replace"; line: number }[] = [];
   let fenceLen = 0;
   for (let i = 0; i < lines.length; i++) {
@@ -1129,7 +1071,11 @@ function parseAiPatchPairs(rawInput: string): PatchPair[] {
       fenceLen = n;
       continue;
     }
-    const d = t.replace(/^[#*>\-\s0-9.:：]+/, "");
+    // 嚴格判定：若該行包含引號賦值（例如 const x = "【尋找這段代碼】"），視為代碼而非章節標記
+    if (/^(const|let|var|val|string|[a-zA-Z0-9_$]+)\s*=/.test(t) || /["'`]/.test(t.slice(0, t.indexOf("【")))) {
+      continue;
+    }
+    const d = t.replace(/^[#*>`\-\s0-9.:：]+/, "");
     if (d.startsWith(findMarker)) marks.push({ kind: "find", line: i });
     else if (d.startsWith(replaceMarker)) marks.push({ kind: "replace", line: i });
   }
@@ -1182,7 +1128,7 @@ function findUniqueRange(
   target: string,
 ): { status: "ok"; start: number; end: number } | { status: "not_found" } | { status: "ambiguous"; count: number } {
   if (!target) return { status: "not_found" };
-  // Stage 1: 直接精確比對
+  // Stage 1: 直接精確字串比對
   let count = 0;
   let firstIdx = -1;
   let pos = 0;
@@ -1200,7 +1146,7 @@ function findUniqueRange(
     return { status: "ambiguous", count };
   }
 
-  // Stage 2: 忽略每行行尾多餘空白比對
+  // 建立行位移索引
   const srcLines = source.split("\n");
   const tgtLines = target.split("\n");
   if (tgtLines.length === 0 || tgtLines.length > srcLines.length) {
@@ -1213,7 +1159,8 @@ function findUniqueRange(
     acc += srcLines[i].length + 1;
   }
 
-  const matchedStarts: { start: number; end: number }[] = [];
+  // Stage 2: 忽略每行行尾多餘空白比對
+  const stage2Matches: { start: number; end: number }[] = [];
   for (let i = 0; i <= srcLines.length - tgtLines.length; i++) {
     let match = true;
     for (let j = 0; j < tgtLines.length; j++) {
@@ -1226,17 +1173,59 @@ function findUniqueRange(
       const startOffset = lineOffsets[i];
       const lastLineIdx = i + tgtLines.length - 1;
       const endOffset = lineOffsets[lastLineIdx] + srcLines[lastLineIdx].length;
-      matchedStarts.push({ start: startOffset, end: endOffset });
+      stage2Matches.push({ start: startOffset, end: endOffset });
     }
   }
 
-  if (matchedStarts.length === 1) {
-    return { status: "ok", start: matchedStarts[0].start, end: matchedStarts[0].end };
+  if (stage2Matches.length === 1) {
+    return { status: "ok", start: stage2Matches[0].start, end: stage2Matches[0].end };
   }
-  if (matchedStarts.length > 1) {
-    return { status: "ambiguous", count: matchedStarts.length };
+  if (stage2Matches.length > 1) {
+    return { status: "ambiguous", count: stage2Matches.length };
   }
+
+  // Stage 3: 智慧縮排容錯比對（解決反白複製第一行前綴空格遺失、或整體縮排層級不同的問題）
+  const stage3Matches: { start: number; end: number }[] = [];
+  for (let i = 0; i <= srcLines.length - tgtLines.length; i++) {
+    let match = true;
+    for (let j = 0; j < tgtLines.length; j++) {
+      if (srcLines[i + j].trim() !== tgtLines[j].trim()) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      const startOffset = lineOffsets[i];
+      const lastLineIdx = i + tgtLines.length - 1;
+      const endOffset = lineOffsets[lastLineIdx] + srcLines[lastLineIdx].length;
+      stage3Matches.push({ start: startOffset, end: endOffset });
+    }
+  }
+
+  if (stage3Matches.length === 1) {
+    return { status: "ok", start: stage3Matches[0].start, end: stage3Matches[0].end };
+  }
+  if (stage3Matches.length > 1) {
+    return { status: "ambiguous", count: stage3Matches.length };
+  }
+
   return { status: "not_found" };
+}
+
+// 智慧縮排對齊：若原代碼具有前綴縮排，但貼上的取代代碼第一行缺少縮排，自動對齊原版縮排深度
+function alignIndent(originalBlock: string, replacementCode: string): string {
+  const origFirstLine = originalBlock.split("\n")[0] ?? "";
+  const repLines = replacementCode.split("\n");
+  if (!repLines.length) return replacementCode;
+  const origIndentMatch = /^([ \t]+)/.exec(origFirstLine);
+  const repIndentMatch = /^([ \t]+)/.exec(repLines[0]);
+  const origIndent = origIndentMatch ? origIndentMatch[1] : "";
+  const repIndent = repIndentMatch ? repIndentMatch[1] : "";
+
+  if (origIndent && !repIndent) {
+    return repLines.map((l) => (l.trim().length > 0 ? origIndent + l : l)).join("\n");
+  }
+  return replacementCode;
 }
 
 function applyCodePatches(
@@ -1272,7 +1261,9 @@ function applyCodePatches(
           " 處，無法唯一鎖定。請在定位代碼中多包含前後 1～2 行上下文。",
       };
     }
-    working = working.slice(0, loc.start) + cleanReplace + working.slice(loc.end);
+    const matchedSource = working.slice(loc.start, loc.end);
+    const alignedReplace = alignIndent(matchedSource, cleanReplace);
+    working = working.slice(0, loc.start) + alignedReplace + working.slice(loc.end);
   }
   return { ok: true, resultCode: working, appliedCount: pairs.length };
 }
@@ -1315,9 +1306,10 @@ function CodeReplaceModal(props: {
   };
 
   const handleSmartPasteChange = (val: string) => {
-    setSmartInput(val);
+    const formatted = normalizeSmartPasteInput(val);
+    setSmartInput(formatted);
     setFeedback(null);
-    const parsed = parseAiPatchPairs(val);
+    const parsed = parseAiPatchPairs(formatted);
     if (parsed.length > 0) {
       setPairs(parsed);
       setActivePairIndex(0);
@@ -1329,10 +1321,7 @@ function CodeReplaceModal(props: {
   };
 
   const handleFindChange = (val: string) => {
-    if (val.includes("【尋找這段代碼】") && val.includes("【替換為以下代碼】")) {
-      handleSmartPasteChange(val);
-      return;
-    }
+    // 移除過度攔截：定位代碼框必須忠實接收使用者的輸入（即使代碼內含「【尋找這段代碼】」字串常數）
     updateCurrentPair(val, currentPair.replaceText);
     setFeedback(null);
   };
@@ -1462,125 +1451,172 @@ function CodeReplaceModal(props: {
   };
 
   return (
-    <div className="modal" role="dialog" aria-label="代碼自動定位與取代">
-      <div className="modal-card" style={{ minWidth: 680, maxWidth: "92vw", maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+    <div className="modal" role="dialog" aria-label="代碼自動定位與取代" style={{ padding: 12 }}>
+      <div
+        className="modal-card"
+        style={{
+          width: "96vw",
+          maxWidth: "96vw",
+          height: "96vh",
+          maxHeight: "96vh",
+          display: "flex",
+          flexDirection: "column",
+          padding: "16px 20px",
+          boxSizing: "border-box",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
           <h4 style={{ margin: 0 }}>⚡ 代碼自動定位與取代</h4>
-          <button type="button" onClick={onClose} style={{ padding: "2px 8px" }} title="關閉彈窗">
+          <button type="button" onClick={onClose} style={{ padding: "3px 10px" }} title="關閉彈窗">
             ✕ 關閉
           </button>
         </div>
 
-        <div className="field-row" style={{ marginTop: 10 }}>
-          <span className="muted">① 選擇目標代碼塊（原版全文來源）：</span>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <select
-              value={targetKey}
-              onChange={(e) => {
-                setTargetKey(e.target.value);
-                setFeedback(null);
-              }}
-              aria-label="選擇目標代碼塊"
-              style={{ flex: 1, minWidth: 240 }}
-            >
-              {blocks.map((b) => (
-                <option key={b.index} value={String(b.index)}>
-                  {"區塊 #" + String(b.index + 1) + "：" + b.label + "（" + String(b.lineCount) + " 行）"}
-                </option>
-              ))}
-              <option value="__new__">➕ 手動貼上外部原版全文（取代後存為卡片新代碼塊）</option>
-            </select>
-            {targetKey === "__new__" && (
-              <input
-                value={newBlockName}
-                onChange={(e) => setNewBlockName(e.target.value)}
-                placeholder="新代碼塊檔名（如 Board.tsx）"
-                style={{ width: 200 }}
-              />
-            )}
-          </div>
-        </div>
-
-        {targetKey === "__new__" ? (
-          <label className="field-row">
-            <span className="muted">貼上原版（全文代碼）：</span>
-            <textarea
-              rows={5}
-              value={manualSource}
-              onChange={(e) => {
-                setManualSource(e.target.value);
-                setFeedback(null);
-              }}
-              placeholder="在此貼上要被修改的完整原始檔案代碼..."
-              style={{ fontFamily: "monospace", fontSize: 12 }}
-            />
-          </label>
-        ) : (
-          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-            已鎖定卡片內「{selectedBlock?.label}」（共 {String(selectedBlock?.lineCount ?? 0)} 行）。連續取代時將自動在此最新內容上即時更新。
-          </div>
-        )}
-
-        <label className="field-row">
-          <span className="muted">
-            ② 智慧貼上區（直接貼上 AI 回覆，自動拆解並剝除空代碼塊、Markdown 標題與圍欄）：
-          </span>
-          <textarea
-            rows={3}
-            value={smartInput}
-            onChange={(e) => handleSmartPasteChange(e.target.value)}
-            placeholder="貼上 AI 回覆段落（自動解析一組或多組【尋找／替換】區塊）..."
-            style={{ fontFamily: "monospace", fontSize: 12 }}
-          />
-        </label>
-
-        {pairs.length > 1 && (
-          <div style={{ display: "flex", gap: 6, alignItems: "center", margin: "8px 0", flexWrap: "wrap" }}>
-            <span className="muted" style={{ fontSize: 12 }}>
-              組別切換：
-            </span>
-            {pairs.map((_, idx) => (
-              <button
-                key={idx}
-                type="button"
-                className={activePairIndex === idx ? "primary" : ""}
-                style={{ fontSize: 11, padding: "2px 8px" }}
-                onClick={() => {
-                  setActivePairIndex(idx);
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflowY: "auto", gap: 10, marginTop: 10 }}>
+          <div className="field-row" style={{ flexShrink: 0 }}>
+            <span className="muted">① 選擇目標代碼塊（原版全文來源）：</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <select
+                value={targetKey}
+                onChange={(e) => {
+                  setTargetKey(e.target.value);
                   setFeedback(null);
                 }}
+                aria-label="選擇目標代碼塊"
+                style={{ flex: 1, minWidth: 240 }}
               >
-                第 {idx + 1} 組
-              </button>
-            ))}
+                {blocks.map((b) => (
+                  <option key={b.index} value={String(b.index)}>
+                    {"區塊 #" + String(b.index + 1) + "：" + b.label + "（" + String(b.lineCount) + " 行）"}
+                  </option>
+                ))}
+                <option value="__new__">➕ 手動貼上外部原版全文（取代後存為卡片新代碼塊）</option>
+              </select>
+              {targetKey === "__new__" && (
+                <input
+                  value={newBlockName}
+                  onChange={(e) => setNewBlockName(e.target.value)}
+                  placeholder="新代碼塊檔名（如 Board.tsx）"
+                  style={{ width: 200 }}
+                />
+              )}
+            </div>
           </div>
-        )}
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <label className="field-row" style={{ margin: 0 }}>
+          {targetKey === "__new__" ? (
+            <label className="field-row" style={{ flexShrink: 0 }}>
+              <span className="muted">貼上原版（全文代碼）：</span>
+              <textarea
+                rows={6}
+                value={manualSource}
+                onChange={(e) => {
+                  setManualSource(e.target.value);
+                  setFeedback(null);
+                }}
+                placeholder="在此貼上要被修改的完整原始檔案代碼..."
+                style={{
+                  fontFamily: "monospace",
+                  fontSize: 12,
+                  resize: "vertical",
+                  minHeight: 120,
+                  width: "100%",
+                  boxSizing: "border-box",
+                }}
+              />
+            </label>
+          ) : (
+            <div className="muted" style={{ fontSize: 12, flexShrink: 0 }}>
+              已鎖定卡片內「{selectedBlock?.label}」（共 {String(selectedBlock?.lineCount ?? 0)} 行）。連續取代時將自動在此最新內容上即時更新。
+            </div>
+          )}
+
+          <label className="field-row" style={{ flexShrink: 0 }}>
             <span className="muted">
-              定位代碼（第 {activePairIndex + 1}/{pairs.length} 組）：
+              ② 智慧貼上區（直接貼上 AI 回覆，自動拆解並剝除空代碼塊、Markdown 標題與圍欄）：
             </span>
             <textarea
-              rows={7}
-              value={currentPair.findText}
-              onChange={(e) => handleFindChange(e.target.value)}
-              placeholder="要被取代的舊代碼片段..."
-              style={{ fontFamily: "monospace", fontSize: 12 }}
+              rows={8}
+              value={smartInput}
+              onChange={(e) => handleSmartPasteChange(e.target.value)}
+              placeholder="貼上 AI 回覆段落（自動解析一組或多組【尋找／替換】區塊）..."
+              style={{
+                fontFamily: "monospace",
+                fontSize: 12,
+                resize: "vertical",
+                minHeight: 180,
+                width: "100%",
+                boxSizing: "border-box",
+                lineHeight: 1.45,
+              }}
             />
           </label>
-          <label className="field-row" style={{ margin: 0 }}>
-            <span className="muted">
-              取代代碼（第 {activePairIndex + 1}/{pairs.length} 組）：
-            </span>
-            <textarea
-              rows={7}
-              value={currentPair.replaceText}
-              onChange={(e) => handleReplaceChange(e.target.value)}
-              placeholder="要換上的新代碼片段..."
-              style={{ fontFamily: "monospace", fontSize: 12 }}
-            />
-          </label>
+
+          {pairs.length > 1 && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", margin: "4px 0", flexWrap: "wrap", flexShrink: 0 }}>
+              <span className="muted" style={{ fontSize: 12 }}>
+                組別切換：
+              </span>
+              {pairs.map((_, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  className={activePairIndex === idx ? "primary" : ""}
+                  style={{ fontSize: 11, padding: "2px 8px" }}
+                  onClick={() => {
+                    setActivePairIndex(idx);
+                    setFeedback(null);
+                  }}
+                >
+                  第 {idx + 1} 組
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, flex: 1, minHeight: 280 }}>
+            <label className="field-row" style={{ margin: 0, display: "flex", flexDirection: "column", height: "100%" }}>
+              <span className="muted">
+                定位代碼（第 {activePairIndex + 1}/{pairs.length} 組）：
+              </span>
+              <textarea
+                rows={12}
+                value={currentPair.findText}
+                onChange={(e) => handleFindChange(e.target.value)}
+                placeholder="要被取代的舊代碼片段..."
+                style={{
+                  fontFamily: "monospace",
+                  fontSize: 12,
+                  resize: "vertical",
+                  flex: 1,
+                  minHeight: 220,
+                  width: "100%",
+                  boxSizing: "border-box",
+                  lineHeight: 1.45,
+                }}
+              />
+            </label>
+            <label className="field-row" style={{ margin: 0, display: "flex", flexDirection: "column", height: "100%" }}>
+              <span className="muted">
+                取代代碼（第 {activePairIndex + 1}/{pairs.length} 組）：
+              </span>
+              <textarea
+                rows={12}
+                value={currentPair.replaceText}
+                onChange={(e) => handleReplaceChange(e.target.value)}
+                placeholder="要換上的新代碼片段..."
+                style={{
+                  fontFamily: "monospace",
+                  fontSize: 12,
+                  resize: "vertical",
+                  flex: 1,
+                  minHeight: 220,
+                  width: "100%",
+                  boxSizing: "border-box",
+                  lineHeight: 1.45,
+                }}
+              />
+            </label>
+          </div>
         </div>
 
         {feedback && (

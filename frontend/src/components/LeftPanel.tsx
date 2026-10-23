@@ -17,6 +17,9 @@ interface Props {
   inboxCount?: number;
   filter: Filter;
   isSearchTab?: boolean;
+  theme: "dark" | "light";
+  onToggleTheme(): void;
+  onToggleCollapse(): void;
   onSelectBoard(id: string): void;
   onBoardsChanged(): void;
   onFilter(f: Filter): void;
@@ -164,6 +167,30 @@ export function LeftPanel(p: Props) {
 
   return (
     <nav className="left" aria-label="路徑與功能">
+      <div className="left-header">
+        <span className="left-header-title">白板筆記</span>
+        <div className="left-header-actions">
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={p.onToggleTheme}
+            aria-label={p.theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
+            title={p.theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
+          >
+            {p.theme === "dark" ? "☀️" : "🌙"}
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={p.onToggleCollapse}
+            aria-label="收納左側面板"
+            title="收納左側面板"
+          >
+            ◀
+          </button>
+        </div>
+      </div>
+
       <section>
         <div className="section-head">
           <h3>白板</h3>

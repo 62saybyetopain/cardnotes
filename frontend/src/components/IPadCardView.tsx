@@ -1,7 +1,13 @@
-// @depends-on ../lib/storage/index.ts (storage)
 // @depends-on ../types.ts (BoardSummary, CardSummary, SyncPackage, Tag)
+// @depends-on ./Markdown.tsx (Markdown)
+import { useCallback, useRef, useState } from "react";
 import { storage } from "../lib/storage";
 import type { BoardSummary, CardSummary, SyncPackage, Tag } from "../types";
+import { Markdown } from "./Markdown";
+
+const DEFAULT_CARD_HEIGHT = 200;
+const DEFAULT_EXPANDED_HEIGHT = 380;
+const HEIGHT_STORAGE_KEY = "cardboard:ipad-card-heights";
 
 interface Props {
   cards: CardSummary[];
@@ -60,6 +66,81 @@ export function IPadCardView({
   info,
 }: Props) {
   const activeBoard = filtered ? undefined : boards.find((b) => b.id === boardId);
+
+  // 記錄展開狀態與每張卡片的自訂高度
+  const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set());
+  const [heightMap, setHeightMap] = useState<Record<string, number>>(() => {
+    try {
+      const raw = localStorage.getItem(HEIGHT_STORAGE_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch {
+      /* 忽略快取損毀 */
+    }
+    return {};
+  });
+
+  const resizingRef = useRef<{ cardId: string; startY: number; startH: number } | null>(null);
+
+  const saveHeights = useCallback((map: Record<string, number>) => {
+    setHeightMap(map);
+    try {
+      localStorage.setItem(HEIGHT_STORAGE_KEY, JSON.stringify(map));
+    } catch {
+      /* 忽略儲存失敗 */
+    }
+  }, []);
+
+  const toggleExpand = useCallback((e: React.MouseEvent, cardId: string) => {
+    e.stopPropagation();
+    setExpandedCards((prev) => {
+      const next = new Set(prev);
+      if (next.has(cardId)) {
+        next.delete(cardId);
+      } else {
+        next.add(cardId);
+      }
+      return next;
+    });
+  }, []);
+
+  // 拖曳底部拉條調節長度（支援滑鼠與觸控螢幕）
+  const startResize = useCallback(
+    (e: React.MouseEvent | React.TouchEvent, cardId: string, currentH: number) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
+      resizingRef.current = { cardId, startY: clientY, startH: currentH };
+      setExpandedCards((prev) => new Set(prev).add(cardId));
+
+      const onMove = (ev: MouseEvent | TouchEvent) => {
+        if (!resizingRef.current) return;
+        const curY = "touches" in ev ? ev.touches[0].clientY : ev.clientY;
+        const delta = curY - resizingRef.current.startY;
+        const nextH = Math.max(DEFAULT_CARD_HEIGHT, Math.round(resizingRef.current.startH + delta));
+        setHeightMap((prev) => ({ ...prev, [resizingRef.current!.cardId]: nextH }));
+      };
+
+      const onEnd = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onEnd);
+        window.removeEventListener("touchmove", onMove);
+        window.removeEventListener("touchend", onEnd);
+        if (resizingRef.current) {
+          setHeightMap((prev) => {
+            saveHeights(prev);
+            return prev;
+          });
+          resizingRef.current = null;
+        }
+      };
+
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onEnd);
+      window.addEventListener("touchmove", onMove, { passive: false });
+      window.addEventListener("touchend", onEnd);
+    },
+    [saveHeights],
+  );
 
   // 一鍵填入初始示範資料（讓首次打開 GitHub Pages 的 iPad 立即有標籤與抽屜可測）
   const loadSampleData = async () => {
@@ -185,17 +266,46 @@ export function IPadCardView({
         )}
         {cards.map((c) => {
           const isSelected = c.id === selectedCardId;
+          const isExpanded = expandedCards.has(c.id);
+          const rememberedH = heightMap[c.id] ?? DEFAULT_EXPANDED_HEIGHT;
+          const currentHeight = isExpanded ? Math.max(DEFAULT_CARD_HEIGHT, rememberedH) : DEFAULT_CARD_HEIGHT;
           const cardTags = (c.tags ?? []).map((t) => t.name);
+          const bodyContent = (c as { body?: string }).body || c.snippet || "";
+
           return (
             <div
               key={c.id}
-              className={`ipad-card-item${isSelected ? " active" : ""}`}
+              className={`ipad-card-item${isSelected ? " active" : ""}${isExpanded ? " expanded" : ""}`}
+              style={{ height: currentHeight }}
               onClick={() => onSelectCard(c.id)}
-              role="button"
-              tabIndex={0}
+              role="region"
+              aria-label={c.title || "卡片"}
             >
-              <div className="ipad-card-item-title">{c.title || "（無標題卡片）"}</div>
-              <div className="ipad-card-item-snippet">{c.snippet || "（空白內文）"}</div>
+              <div className="ipad-card-item-head">
+                <div className="ipad-card-item-title">{c.title || "（無標題卡片）"}</div>
+                <button
+                  type="button"
+                  className="ipad-card-expand-btn"
+                  onClick={(e) => toggleExpand(e, c.id)}
+                  title={isExpanded ? "收合卡片（還原固定長度）" : "展開卡片（內部滾動與自訂長度）"}
+                  aria-label={isExpanded ? "收合卡片" : "展開卡片"}
+                >
+                  {isExpanded ? "⤡ 收合" : "⤢ 展開"}
+                </button>
+              </div>
+
+              <div
+                className="ipad-card-item-body"
+                onClick={(e) => e.stopPropagation()}
+                title="滾動查看完整渲染內文"
+              >
+                {bodyContent.trim() ? (
+                  <Markdown source={bodyContent} onOpenCard={onSelectCard} />
+                ) : (
+                  <span className="muted">（空白內文）</span>
+                )}
+              </div>
+
               <div className="ipad-card-item-footer">
                 <span className="ipad-card-time">{new Date(c.updated_at).toLocaleDateString()}</span>
                 {cardTags.length > 0 && (
@@ -206,6 +316,17 @@ export function IPadCardView({
                     {cardTags.length > 2 && <span className="muted">+{cardTags.length - 2}</span>}
                   </div>
                 )}
+              </div>
+
+              {/* 底部拖曳拉條：可拖曳調節卡片長度，最小高度限制為 200px */}
+              <div
+                className="ipad-card-resizer"
+                onMouseDown={(e) => startResize(e, c.id, currentHeight)}
+                onTouchStart={(e) => startResize(e, c.id, currentHeight)}
+                title="按住拖曳可調整此卡片長度（自動記憶）"
+                aria-label="調整卡片長度"
+              >
+                <span className="ipad-card-resizer-handle" />
               </div>
             </div>
           );

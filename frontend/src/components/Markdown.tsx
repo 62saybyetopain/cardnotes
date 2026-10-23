@@ -1,5 +1,6 @@
 // @depends-on ../api.ts (api, ApiError)
 // @depends-on ../lib/markdown.ts (HIGHLIGHT_COLOR_OPTIONS, cardIdFromHref, resolveLineInContext, type HighlightColor)
+// @depends-on ../lib/liveMarkdown.ts (編輯中的即時渲染重寫了 ++／== 開合判定、顏色別名與圍欄判定；修改這裡的規則要同步改那邊)
 import {
   Children,
   cloneElement,
@@ -242,7 +243,7 @@ export function MediaEmbed({
 }
 
 // ---- 卡片引用（@ 引用）狀態快取、開啟卡片通道與改名／刪除即時通知 ----
-type CardRefResolution =
+export type CardRefResolution =
   | { status: "ok"; title: string }
   | { status: "deleted" }
   | { status: "fallback" };
@@ -296,6 +297,27 @@ export function clearCardRefCache(): void {
   cardRefCache.clear();
 }
 
+// 訂閱某張卡片的標題狀態：先查一次，之後改名／刪除會即時推送；回傳取消訂閱函式
+export function subscribeCardTitle(id: string, cb: (res: CardRefResolution) => void): () => void {
+  let alive = true;
+  resolveCardTitle(id).then((r) => {
+    if (alive) cb(r);
+  });
+  let set = cardRefListeners.get(id);
+  if (!set) {
+    set = new Set();
+    cardRefListeners.set(id, set);
+  }
+  const listener = (next: CardRefResolution) => {
+    if (alive) cb(next);
+  };
+  set.add(listener);
+  return () => {
+    alive = false;
+    set?.delete(listener);
+  };
+}
+
 const CardOpenContext = createContext<((cardId: string) => void) | undefined>(undefined);
 
 export function CardOpenProvider({
@@ -321,25 +343,7 @@ export function CardRef({
   const open = onOpenCard ?? ctxOpen;
   const [res, setRes] = useState<CardRefResolution | null>(null);
 
-  useEffect(() => {
-    let alive = true;
-    resolveCardTitle(id).then((r) => {
-      if (alive) setRes(r);
-    });
-    let set = cardRefListeners.get(id);
-    if (!set) {
-      set = new Set();
-      cardRefListeners.set(id, set);
-    }
-    const listener = (next: CardRefResolution) => {
-      if (alive) setRes(next);
-    };
-    set.add(listener);
-    return () => {
-      alive = false;
-      set?.delete(listener);
-    };
-  }, [id]);
+  useEffect(() => subscribeCardTitle(id, setRes), [id]);
 
   if (res?.status === "deleted") {
     return (
@@ -428,7 +432,7 @@ function CodeBlockView({ info, codeText }: { info: string; codeText: string }) {
         borderRadius: 6,
         margin: "8px 0",
         overflow: "hidden",
-        background: "rgba(15, 23, 42, 0.55)",
+        background: "var(--code-bg)",
       }}
       onClick={(e) => e.stopPropagation()}
     >
@@ -439,7 +443,7 @@ function CodeBlockView({ info, codeText }: { info: string; codeText: string }) {
           justifyContent: "space-between",
           padding: "4px 8px",
           fontSize: 12,
-          background: "rgba(30, 41, 59, 0.85)",
+          background: "var(--code-head-bg)",
           borderBottom: collapsed ? "none" : "1px solid var(--line, #334155)",
           gap: 8,
         }}
