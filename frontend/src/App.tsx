@@ -1,6 +1,8 @@
 // @depends-on ./components/Markdown.tsx (CardOpenProvider, notifyCardDeleted, notifyCardTitleUpdated)
 // @depends-on ./lib/device.ts (initDeviceEnvironment)
 // @depends-on ./components/IPadCardView.tsx (IPadCardView)
+// @depends-on ./components/Board.tsx (toolsSlot：App 工具列提供的容器，Board 以 createPortal 把「定位／自動對齊」渲染進去；toolsOpen 只控制容器的展開動畫)
+// @depends-on ./styles.css (.tools-dock / .tools-slide 及其內部 button 樣式)
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { Board, type BoardHandle } from "./components/Board";
@@ -25,11 +27,14 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [previewCardId, setPreviewCardId] = useState<string | null>(null);
   const [centerEditing, setCenterEditing] = useState(false);
-  const [viewMode, setViewMode] = useState<"board" | "graph">("board");
+  const [pendingSmartPaste, setPendingSmartPaste] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"board" | "graph" | "cards">("board");
   const [filter, setFilter] = useState<Filter>({});
   const [tab, setTab] = useState<TabKey>("content");
   const [ipadCardList, setIpadCardList] = useState<CardSummary[]>([]);
   const [rightOpen, setRightOpen] = useState(true);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [toolsSlot, setToolsSlot] = useState<HTMLDivElement | null>(null);
   const [rightWidth, setRightWidth] = useState<number>(() => {
     try {
       const saved = Number(localStorage.getItem("cardboard:right-width"));
@@ -186,8 +191,9 @@ export default function App() {
     setTab("search");
   }, []);
 
-  const openCardInCenter = useCallback((id: string) => {
+  const openCardInCenter = useCallback((id: string, options?: { smartPasteText?: string }) => {
     setSelected(id);
+    setPendingSmartPaste(options?.smartPasteText ?? null);
     setCenterEditing(true);
     setRightOpen(true);
     setTab("content");
@@ -322,10 +328,14 @@ export default function App() {
             setBoardId(id);
             setViewMode("board");
             setCenterEditing(false);
-            if (isStandalone) setFilter({});
+            setFilter({});
           }}
           onBoardsChanged={refreshBoards}
-          onFilter={(f) => (setFilter(f), setRightOpen(true), setTab("search"))}
+          onFilter={(f) => {
+            setFilter(f);
+            setViewMode("cards");
+            setCenterEditing(false);
+          }}
           onTagsChanged={onTagsChanged}
           report={report}
         />
@@ -353,56 +363,68 @@ export default function App() {
             </div>
           )}
 
-          {!isStandalone ? (
-            <>
-              <div className="board-toolbar">
-                {!centerEditing && (
-                  <div className="view-switch" role="group" aria-label="視圖模式切換">
-                    <button
-                      className={viewMode === "board" ? "on" : ""}
-                      onClick={() => setViewMode("board")}
-                      title="白板畫布（手動排列卡片與專題推理）"
-                    >
-                      白板畫布
-                    </button>
-                    <button
-                      className={viewMode === "graph" ? "on" : ""}
-                      onClick={() => setViewMode("graph")}
-                      title="全域概念圖譜（以概念標籤為節點，探索共現群落）"
-                    >
-                      概念圖譜
-                    </button>
-                  </div>
-                )}
-                {/* 返回按鈕只保留在中央編輯視窗的標題列 */}
-                {!centerEditing && viewMode === "board" && (
+          {!isStandalone && viewMode !== "cards" && (
+            <div className="board-toolbar">
+              {!centerEditing && (
+                <div className="view-switch" role="group" aria-label="視圖模式切換">
                   <button
-                    className="icon-btn"
-                    onClick={() => void boardRef.current?.createGroup()}
-                    aria-label="新增視覺分組框"
-                    title="新增視覺分組框（若已選取多張卡片，會自動將它們框入同一群組）"
+                    className={viewMode === "board" ? "on" : ""}
+                    onClick={() => {
+                      setViewMode("board");
+                      setFilter({});
+                    }}
+                    title="白板畫布（手動排列卡片與專題推理）"
+                  >
+                    白板畫布
+                  </button>
+                  <button
+                    className={viewMode === "graph" ? "on" : ""}
+                    onClick={() => setViewMode("graph")}
+                    title="全域概念圖譜（以概念標籤為節點，探索共現群落）"
+                  >
+                    概念圖譜
+                  </button>
+                  <button
+                    onClick={() => setViewMode("cards")}
+                    title="卡片冊模式（列表瀏覽、批次歸檔與收件夾整理）"
+                  >
+                    卡片冊
+                  </button>
+                </div>
+              )}
+              {!centerEditing && viewMode === "board" && boardId && (
+                <div className="tools-dock">
+                  <button
+                    type="button"
+                    className={`icon-btn${toolsOpen ? " on" : ""}`}
+                    onClick={() => setToolsOpen((v) => !v)}
+                    aria-label="畫布工具"
+                    aria-expanded={toolsOpen}
+                    title="畫布工具（定位、自動對齊）"
                   >
                     <svg
                       width="16"
                       height="16"
-                      viewBox="0 0 16 16"
+                      viewBox="0 0 24 24"
                       fill="none"
                       stroke="currentColor"
-                      strokeWidth="1.6"
-                      strokeDasharray="2.5 2"
+                      strokeWidth="2.2"
                       strokeLinecap="round"
                       strokeLinejoin="round"
                       aria-hidden="true"
                     >
-                      <rect x="2" y="2.5" width="12" height="11" rx="2" />
+                      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
                     </svg>
                   </button>
-                )}
+                  <div ref={setToolsSlot} className={`tools-slide${toolsOpen ? " open" : ""}`} />
+                </div>
+              )}
+              {!centerEditing && viewMode === "board" && (
                 <button
-                  className="icon-btn primary"
-                  onClick={() => void createCard()}
-                  aria-label="新增卡片"
-                  title="新增卡片"
+                  className="icon-btn"
+                  onClick={() => void boardRef.current?.createGroup()}
+                  aria-label="新增視覺分組框"
+                  title="新增視覺分組框（若已選取多張卡片，會自動將它們框入同一群組）"
                 >
                   <svg
                     width="16"
@@ -410,31 +432,57 @@ export default function App() {
                     viewBox="0 0 16 16"
                     fill="none"
                     stroke="currentColor"
-                    strokeWidth="1.8"
+                    strokeWidth="1.6"
+                    strokeDasharray="2.5 2"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     aria-hidden="true"
                   >
-                    <rect x="2.5" y="2" width="11" height="12" rx="2" />
-                    <line x1="8" y1="5.5" x2="8" y2="10.5" />
-                    <line x1="5.5" y1="8" x2="10.5" y2="8" />
+                    <rect x="2" y="2.5" width="12" height="11" rx="2" />
                   </svg>
                 </button>
-                <button
-                  className="toggle-right"
-                  onClick={() => setRightOpen((o) => !o)}
-                  aria-label={rightOpen ? "收合右側面板" : "展開右側面板"}
-                  title={rightOpen ? "收合右側面板" : "展開右側面板"}
+              )}
+              <button
+                className="icon-btn primary"
+                onClick={() => void createCard()}
+                aria-label="新增卡片"
+                title="新增卡片"
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
                 >
-                  {rightOpen ? "▶" : "◀"}
-                </button>
-              </div>
+                  <rect x="2.5" y="2" width="11" height="12" rx="2" />
+                  <line x1="8" y1="5.5" x2="8" y2="10.5" />
+                  <line x1="5.5" y1="8" x2="10.5" y2="8" />
+                </svg>
+              </button>
+              <button
+                className="toggle-right"
+                onClick={() => setRightOpen((o) => !o)}
+                aria-label={rightOpen ? "收合右側面板" : "展開右側面板"}
+                title={rightOpen ? "收合右側面板" : "展開右側面板"}
+              >
+                {rightOpen ? "▶" : "◀"}
+              </button>
+            </div>
+          )}
+
+          {!isStandalone && viewMode !== "cards" ? (
+            <>
               <Board
                 ref={boardRef}
                 boardId={boardId}
                 selectedCardId={selected}
                 active={!centerEditing && viewMode === "board"}
-                isEditing={centerEditing}
+                toolsSlot={toolsSlot}
                 onSelectCard={selectCard}
                 onOpenCard={openCardInCenter}
                 onLinksChanged={bump}
@@ -463,6 +511,10 @@ export default function App() {
               boards={boards}
               filtered={!!(filter.tagId || filter.unclassified || filter.curationStatus)}
               tags={tags}
+              onBackToBoard={() => {
+                setViewMode("board");
+                setFilter({});
+              }}
               onSelectCard={selectCard}
               onOpenCard={openCardInCenter}
               onCreateCard={() => void createCard()}
@@ -489,6 +541,8 @@ export default function App() {
                   cardId={selected}
                   tags={tags}
                   version={version}
+                  initialSmartPaste={pendingSmartPaste}
+                  onClearInitialSmartPaste={() => setPendingSmartPaste(null)}
                   onSaved={onSaved}
                   onCardDeleted={onCardDeleted}
                   onLinkAdded={onLinkAdded}

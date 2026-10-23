@@ -64,6 +64,8 @@ export function CardEditorPane(props: {
   cardId: string;
   tags: Tag[];
   version: number;
+  initialSmartPaste?: string | null;
+  onClearInitialSmartPaste?(): void;
   onSaved(card: CardDetail): void;
   onCardDeleted(id: string): void;
   onLinkAdded?(sourceId: string, targetId: string, extra?: Partial<BoardLink>): void;
@@ -72,7 +74,7 @@ export function CardEditorPane(props: {
   report(e: unknown, prefix?: string): void;
   info?(text: string): void;
 }) {
-  const { cardId, tags, version, onSaved, onCardDeleted, onLinkAdded, onSelectCard, onTagsChanged, report, info } = props;
+  const { cardId, tags, version, initialSmartPaste, onClearInitialSmartPaste, onSaved, onCardDeleted, onLinkAdded, onSelectCard, onTagsChanged, report, info } = props;
   const [card, setCard] = useState<CardDetail | null>(null);
   const [loadError, setLoadError] = useState("");
   const [nonce, setNonce] = useState(0);
@@ -111,6 +113,8 @@ export function CardEditorPane(props: {
       card={card}
       tags={tags}
       nonce={nonce}
+      initialSmartPaste={initialSmartPaste}
+      onClearInitialSmartPaste={onClearInitialSmartPaste}
       onReload={() => (setNonce((n) => n + 1), refetch())}
       onSaved={(c) => {
         // Editor 自動儲存後，載入時的快照已落後伺服器：同步版本號與內容，
@@ -256,6 +260,8 @@ function ContentTab(props: {
   card: CardDetail;
   tags: Tag[];
   nonce: number;
+  initialSmartPaste?: string | null;
+  onClearInitialSmartPaste?(): void;
   onReload(): void;
   onSaved(card: CardDetail): void;
   onCardDeleted(id: string): void;
@@ -538,6 +544,8 @@ function ContentTab(props: {
       <Editor
         key={`${card.id}:${props.nonce}`}
         card={card}
+        initialSmartPaste={props.initialSmartPaste}
+        onClearInitialSmartPaste={props.onClearInitialSmartPaste}
         onSaved={props.onSaved}
         onReload={props.onReload}
         onLinkAdded={props.onLinkAdded}
@@ -571,8 +579,47 @@ function SearchTab(p: Props) {
   const [previewCard, setPreviewCard] = useState<CardDetail | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewErr, setPreviewErr] = useState("");
+  const [boardLocations, setBoardLocations] = useState<Map<string, string[]>>(new Map());
   const seq = useRef(0);
   const { tagId, unclassified, curationStatus } = p.filter;
+
+  // 快取白板與分組框拓撲資訊，聚合每張卡片的所在白板與分組框
+  useEffect(() => {
+    let alive = true;
+    api
+      .listBoards()
+      .then(async ({ boards }) => {
+        if (!alive) return;
+        const details = await Promise.allSettled(boards.map((b) => api.getBoard(b.id)));
+        if (!alive) return;
+        const locMap = new Map<string, string[]>();
+        details.forEach((res) => {
+          if (res.status !== "fulfilled") return;
+          const b = res.value;
+          const groups = b.groups ?? [];
+          for (const c of b.cards) {
+            const cw = c.w ?? 280;
+            const ch = c.h ?? 160;
+            const cx = c.x + cw / 2;
+            const cy = c.y + ch / 2;
+            const hitGroup = groups.find(
+              (g) => cx >= g.x && cx <= g.x + g.w && cy >= g.y && cy <= g.y + g.h,
+            );
+            const loc = hitGroup ? `${b.name} | ${hitGroup.label || "未命名分組"}` : b.name;
+            const cur = locMap.get(c.card_id) ?? [];
+            cur.push(loc);
+            locMap.set(c.card_id, cur);
+          }
+        });
+        setBoardLocations(locMap);
+      })
+      .catch(() => {
+        /* 忽略載入白板拓撲失敗，不阻礙搜尋功能 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [p.version]);
 
   // 當外部點擊 @ 引用連結傳入 previewCardId 時，自動展開下方預覽區並載入該卡片
   useEffect(() => {
@@ -697,26 +744,47 @@ function SearchTab(p: Props) {
         {state === "idle" && items.length === 0 && <div className="empty">沒有符合的卡片</div>}
         <ul className="results">
           {items.map((c) => {
-            const facets = Array.from(
-              new Set((c.tags ?? []).map((t) => t.facet || t.name).filter(Boolean)),
-            ).slice(0, 3);
-            const metaParts = [
-              c.card_type && c.card_type !== "untyped" ? CARD_TYPE_LABELS[c.card_type] : "",
-              ...facets,
-            ].filter(Boolean);
             const isPreviewed = paneOpen && localPreviewId === c.id;
+            const locList = boardLocations.get(c.id);
+            const locStr = locList && locList.length > 0 ? locList.join("、") : "（未放入白板）";
+
+            // 分離收納位置（抽屜）與概念標籤
+            const locationTags = (c.tags ?? []).filter((t) => isSameAxisGroup(t.axis, "location"));
+            const conceptTags = (c.tags ?? []).filter((t) => !isSameAxisGroup(t.axis, "location"));
+
+            const tagParts = [
+              c.card_type && c.card_type !== "untyped" ? CARD_TYPE_LABELS[c.card_type] : "",
+              ...locationTags.map((t) => `📁 ${tagPath(p.tags, t.id) || t.name}`),
+              ...conceptTags.map((t) => (t.facet ? `[${t.facet}] ${t.name}` : t.name)),
+            ].filter(Boolean);
+
+            const hasTags = tagParts.length > 0;
+
             return (
               <li key={c.id} className={isPreviewed ? "previewing-row" : undefined}>
                 <button
                   className="result-main"
                   onClick={() => selectForPreview(c.id)}
-                  title="點擊在下方預覽區查看與複製內容"
+                  title={`點擊在下方預覽區查看與複製內容\n所在位置：${locStr}${hasTags ? `\n標籤/抽屜：${tagParts.join(" · ")}` : ""}`}
                 >
                   <strong>{c.title || "（無標題）"}</strong>
-                  {metaParts.length > 0 && (
-                    <span className="card-meta-line">{metaParts.join(" · ")}</span>
-                  )}
-                  <span className="snippet">{c.snippet}</span>
+                  <span
+                    className="card-meta-line"
+                    style={{
+                      display: "block",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "clip",
+                      minHeight: "1.3em",
+                      lineHeight: "1.3",
+                      visibility: hasTags ? "visible" : "hidden",
+                      maskImage: hasTags ? "linear-gradient(to right, black calc(100% - 24px), transparent 100%)" : "none",
+                      WebkitMaskImage: hasTags ? "linear-gradient(to right, black calc(100% - 24px), transparent 100%)" : "none",
+                    }}
+                  >
+                    {hasTags ? tagParts.join(" · ") : "\u00A0"}
+                  </span>
+                  <span className="snippet">{c.snippet || "\u00A0"}</span>
                 </button>
                 <button
                   onClick={() => {

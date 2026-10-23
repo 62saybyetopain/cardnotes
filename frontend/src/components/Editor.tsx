@@ -37,6 +37,8 @@ type Status = "saved" | "dirty" | "saving" | "error" | "conflict";
 interface Props {
   card: CardDetail;
   compact?: boolean;
+  initialSmartPaste?: string | null;
+  onClearInitialSmartPaste?(): void;
   onSaved(card: CardDetail): void;
   onReload(): void;
   onLinkAdded?(sourceId: string, targetId: string, extra?: Partial<BoardLink>): void;
@@ -142,7 +144,7 @@ const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
   { type: "h3", label: "標題 3" },
 ];
 
-export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, onOpenCard, report }: Props) {
+export function Editor({ card, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, report }: Props) {
   const [title, setTitle] = useState(card.title);
   const [body, setBody] = useState(() => normalizeNewlines(card.body));
   const [cursorPos, setCursorPos] = useState(0);
@@ -377,7 +379,13 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
     }
   }, [report]);
 
-  const [codePatchOpen, setCodePatchOpen] = useState(false);
+  const [codePatchOpen, setCodePatchOpen] = useState(() => Boolean(initialSmartPaste));
+
+  useEffect(() => {
+    if (initialSmartPaste) {
+      setCodePatchOpen(true);
+    }
+  }, [initialSmartPaste]);
 
   const insertCodeBlock = () => {
     const label = window.prompt("輸入代碼塊名稱或檔名（例如 Board.tsx，可留空）", "");
@@ -679,9 +687,14 @@ export function Editor({ card, compact = false, onSaved, onReload, onLinkAdded, 
         <CodeReplaceModal
           cardBody={body}
           cursorPos={cursorPos}
-          onClose={() => setCodePatchOpen(false)}
+          initialSmartPaste={initialSmartPaste}
+          onClose={() => {
+            setCodePatchOpen(false);
+            onClearInitialSmartPaste?.();
+          }}
           onApplyPatch={(patch) => {
             applyEditPatch(patch);
+            onClearInitialSmartPaste?.();
           }}
         />
       )}
@@ -1271,10 +1284,11 @@ function applyCodePatches(
 function CodeReplaceModal(props: {
   cardBody: string;
   cursorPos: number;
+  initialSmartPaste?: string | null;
   onClose(): void;
   onApplyPatch(patch: EditPatch): void;
 }) {
-  const { cardBody, cursorPos, onClose, onApplyPatch } = props;
+  const { cardBody, cursorPos, initialSmartPaste, onClose, onApplyPatch } = props;
   const blocks = extractCodeBlocks(cardBody);
 
   // 預設選中游標所在的代碼塊，否則選第 1 個，若無代碼塊則為 "__new__"
@@ -1304,6 +1318,39 @@ function CodeReplaceModal(props: {
       return next;
     });
   };
+
+  useEffect(() => {
+    if (!initialSmartPaste) return;
+    const formatted = normalizeSmartPasteInput(initialSmartPaste);
+    setSmartInput(formatted);
+    const parsed = parseAiPatchPairs(formatted);
+    if (parsed.length > 0) {
+      setPairs(parsed);
+      setActivePairIndex(0);
+      setFeedback({
+        kind: "ok",
+        msg: `✅ 已由白板定位自動載入並解析 ${parsed.length} 組【尋找／替換】指令！`,
+      });
+    } else {
+      // 若貼上的內容為純代碼/文字片段而非標準【尋找/替換】指令，自動將其載入至第 1 組定位代碼中
+      const cleanRaw = stripOuterFence(initialSmartPaste);
+      if (cleanRaw.trim()) {
+        setPairs([{ findText: cleanRaw, replaceText: "" }]);
+        setActivePairIndex(0);
+        setFeedback({
+          kind: "ok",
+          msg: "✅ 已將貼上的代碼段落載入至智慧貼上區與第 1 組【定位代碼】，請在右側輸入欲取代的新代碼。",
+        });
+      }
+    }
+    // 若內容中明確帶有代碼塊名稱，自動選中對應代碼塊
+    for (const b of blocks) {
+      if (b.label && initialSmartPaste.includes(b.label)) {
+        setTargetKey(String(b.index));
+        break;
+      }
+    }
+  }, [initialSmartPaste]);
 
   const handleSmartPasteChange = (val: string) => {
     const formatted = normalizeSmartPasteInput(val);

@@ -1,5 +1,7 @@
 // @depends-on ../lib/layout.ts (autoLayoutCards, placeCardsAvoidingCollisions, snapDimension, snapToGridValue, GRID_SIZE)
-// @depends-on ../App.tsx (selectedCardId 有兩條寫入路徑：onNodeClick→onOpenCard，與 onSelectionChange→onSelectCard；Board 以 nodes 的 selected 為準去重)
+// @depends-on ../App.tsx (toolsSlot：右上工具列的 .tools-slide 容器，null 時不渲染「定位／自動對齊」)
+// @depends-on ../styles.css (.tools-slide button / .on：這兩顆按鈕的外觀由容器樣式決定，此處不寫 inline style)
+// @depends-on ../App.tsx (selectedCardId 有兩條寫入路徑：onNodeClick→onOpenCard，與 onSelectionChange→onSelectCard；Board 以 nodes 的 selected 為準去重；onOpenCard 支援 options.smartPasteText)
 import "@xyflow/react/dist/style.css";
 import {
   applyNodeChanges,
@@ -30,6 +32,7 @@ import {
   useState,
   type Ref,
 } from "react";
+import { createPortal } from "react-dom";
 import { api } from "../api";
 import { isEditableTarget, isRemoveKey } from "../lib/keys";
 import {
@@ -59,6 +62,7 @@ import {
 } from "../types";
 import { CardNode, type CardFlowNode } from "./CardNode";
 import { FloatingEdge } from "./FloatingEdge";
+import { notifyCardTitleUpdated } from "./Markdown";
 
 export interface GroupNodeData extends Record<string, unknown> {
   groupId: string;
@@ -141,6 +145,29 @@ function GroupNode({ data, selected }: NodeProps<GroupFlowNode>) {
   );
 }
 
+function CrosshairIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{ flexShrink: 0 }}
+    >
+      <circle cx="8" cy="8" r="3.5" />
+      <line x1="8" y1="1.5" x2="8" y2="4" />
+      <line x1="8" y1="12" x2="8" y2="14.5" />
+      <line x1="1.5" y1="8" x2="4" y2="8" />
+      <line x1="12" y1="8" x2="14.5" y2="8" />
+    </svg>
+  );
+}
+
 const nodeTypes = { card: CardNode, boardGroup: GroupNode };
 const edgeTypes = { floating: FloatingEdge };
 
@@ -157,9 +184,9 @@ interface Props {
   boardId: string | null;
   selectedCardId: string | null;
   active?: boolean;
-  isEditing?: boolean;
+  toolsSlot?: HTMLElement | null;
   onSelectCard(id: string | null): void;
-  onOpenCard?(id: string): void;
+  onOpenCard?(id: string, options?: { smartPasteText?: string }): void;
   onLinksChanged(): void;
   onCountChanged(): void;
   report(e: unknown, prefix?: string): void;
@@ -311,7 +338,142 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   const [pickingCenterDrag, setPickingCenterDrag] = useState(false);
 
   // 自動排版單次復原快照
-  const [undoSnapshot, setUndoSnapshot] = useState<{ card_id: string; x: number; y: number }[] | null>(null);
+    const [undoSnapshot, setUndoSnapshot] = useState<{ card_id: string; x: number; y: number }[] | null>(null);
+
+  // 貼上內容並定位卡片狀態
+  const [showLocateModal, setShowLocateModal] = useState(false);
+  const [locateText, setLocateText] = useState("");
+
+      const handleLocateCard = () => {
+        const raw = locateText.trim();
+        if (!raw) {
+          report(new Error("請先貼上代碼段落或 AI 回覆內容"), "定位失敗");
+          return;
+        }
+        const allCards = nodesRef.current.filter((n): n is CardFlowNode => n.type === "card");
+        if (allCards.length === 0) {
+          report(new Error("目前白板內尚無任何卡片可供定位"), "定位失敗");
+          return;
+        }
+
+        const normRaw = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        const rawLines = normRaw
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l.length >= 6 && !/^[{}\]();,]+$/.test(l));
+
+        // 1. 抽取可能的檔名/標題候選
+        const titleRegex = /(?:```[a-zA-Z0-9_-]*:|^#+\s+|^[a-zA-Z0-9_./-]+\/)?([a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)/gm;
+        const extractedNames = new Set<string>();
+        let match: RegExpExecArray | null;
+        while ((match = titleRegex.exec(raw)) !== null) {
+          const fn = match[1].split("/").pop();
+          if (fn) extractedNames.add(fn.trim().toLowerCase());
+        }
+
+        // 2. 抽取【尋找這段代碼】標記區塊（若有）
+        const findMarker = "【尋找這段代碼】";
+        const replaceMarker = "【替換為以下代碼】";
+        const findSnippets: string[] = [];
+        const lines = normRaw.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].includes(findMarker)) {
+            const nextLines: string[] = [];
+            for (let j = i + 1; j < Math.min(lines.length, i + 30); j++) {
+              if (lines[j].includes(replaceMarker)) break;
+              const trimmed = lines[j].trim();
+              if (trimmed && !trimmed.startsWith("```")) {
+                nextLines.push(trimmed);
+              }
+            }
+            if (nextLines.length > 0) {
+              findSnippets.push(nextLines.join("\n"));
+            }
+          }
+        }
+
+        // 3. 多層級計分比對白板所有卡片
+        let bestCard: CardFlowNode | null = null;
+        let maxScore = 0;
+
+        for (const card of allCards) {
+          let score = 0;
+          const title = (card.data.title || "").trim();
+          const titleLower = title.toLowerCase();
+          const body = (card.data.body || "").replace(/\r\n/g, "\n");
+
+          // 層級 A: 卡片內文全文直接精確包含貼上的內容（最高權重）
+          if (body.includes(normRaw)) {
+            score += 1000;
+          }
+
+          // 層級 B: 代碼實質特徵行命中統計（支援純代碼段落檢索）
+          if (rawLines.length > 0) {
+            let hitCount = 0;
+            let continuousHit = 0;
+            let maxContinuous = 0;
+            for (const line of rawLines) {
+              if (body.includes(line)) {
+                hitCount++;
+                continuousHit++;
+                if (continuousHit > maxContinuous) maxContinuous = continuousHit;
+              } else {
+                continuousHit = 0;
+              }
+            }
+            const hitRate = hitCount / rawLines.length;
+            if (hitRate >= 0.4) {
+              score += Math.round(hitRate * 400);
+              score += maxContinuous * 25;
+            }
+          }
+
+          // 層級 C: 標題或檔名吻合
+          if (title && extractedNames.has(titleLower)) {
+            score += 250;
+          }
+          if (title && normRaw.includes(title)) {
+            score += 100;
+          }
+
+          // 層級 D: 命中【尋找這段代碼】區塊
+          for (const snip of findSnippets) {
+            if (body.includes(snip)) {
+              score += 350;
+            }
+          }
+
+          if (score > maxScore) {
+            maxScore = score;
+            bestCard = card;
+          }
+        }
+
+        if (!bestCard || maxScore < 30) {
+          report(
+            new Error("在當前白板的卡片中找不到吻合的內容或代碼，請確認貼上的段落是否屬於此白板內的卡片"),
+            "找不到目標卡片",
+          );
+          return;
+        }
+
+        setShowLocateModal(false);
+        setLocateText("");
+        info(`已成功定位至卡片「${bestCard.data.title || "（無標題）"}」`);
+        onOpenCard?.(bestCard.id, { smartPasteText: raw });
+      };
+
+  // 拖入同名檔案衝突佇列與對話框狀態
+  interface DropConflictItem {
+    file: File;
+    content: string;
+    lang: string;
+    dropX: number;
+    dropY: number;
+    matchedCard: CardFlowNode;
+    scopeLabel: string;
+  }
+  const [conflictQueue, setConflictQueue] = useState<DropConflictItem[]>([]);
 
   const saved = useRef(new Map<string, Geometry>()); // 伺服器上確認過的位置，失敗時回復用
   const groupDragRef = useRef<{ groupId: string; startX: number; startY: number; memberIds: string[] } | null>(null);
@@ -1154,7 +1316,61 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     }
   }, [info, report]);
 
-  // ---- 拖曳代碼檔案建立新卡片或覆蓋既有卡片 ----
+  // 建立新卡片並加入白板的輔助邏輯
+  const createCardFromDrop = useCallback(
+    async (fileName: string, body: string, dropX: number, dropY: number) => {
+      if (!boardId) return;
+      let initX = dropX;
+      let initY = dropY;
+      if (snapRef.current) {
+        const placed = placeCardsAvoidingCollisions(
+          [{ id: "temp", x: initX, y: initY, w: DEFAULT_CARD_W, h: DEFAULT_CARD_H }],
+          nodesRef.current.filter((n): n is CardFlowNode => n.type === "card").map(nodeBox),
+          GRID_SIZE,
+        );
+        const pos = placed.get("temp");
+        if (pos) {
+          initX = pos.x;
+          initY = pos.y;
+        }
+      }
+
+      const created = await api.createCard();
+      const updated = await api.patchCard(created.id, { title: fileName, body }, created.updated_at);
+      const added = await api.addToBoard(boardId, created.id, initX, initY);
+      saved.current.set(created.id, { x: added.x, y: added.y, w: added.w, h: added.h });
+      const node = toNode({ ...added, title: updated.title, body: updated.body, updated_at: updated.updated_at });
+      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), { ...node, selected: true }]);
+      onSelectCard(created.id);
+      onCountChanged();
+      info(`已由代碼檔案 ${fileName} 建立卡片`);
+    },
+    [boardId, info, onCountChanged, onSelectCard, toNode],
+  );
+
+  // 覆蓋既有同名卡片的輔助邏輯
+  const overwriteCardFromDrop = useCallback(
+    async (cardId: string, fileName: string, body: string) => {
+      try {
+        const cur = await api.getCard(cardId);
+        const updated = await api.patchCard(cardId, { title: fileName, body }, cur.updated_at);
+        notifyCardTitleUpdated(cardId, updated.title);
+        setNodes((ns) =>
+          ns.map((n) =>
+            n.id === cardId && n.type === "card"
+              ? { ...n, data: { ...n.data, title: updated.title, body: updated.body } }
+              : n,
+          ),
+        );
+        info(`已覆蓋卡片「${fileName}」`);
+      } catch (err) {
+        report(err, `覆蓋卡片「${fileName}」失敗`);
+      }
+    },
+    [info, report],
+  );
+
+  // ---- 拖曳代碼檔案建立新卡片（含同名覆蓋與分組框範圍保險）----
   const onBoardDrop = useCallback(
     async (e: React.DragEvent) => {
       if (!boardId || !e.dataTransfer.files.length) return;
@@ -1162,6 +1378,11 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
 
       const files = Array.from(e.dataTransfer.files);
       const flowPos = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+
+      const allCards = nodesRef.current.filter((n): n is CardFlowNode => n.type === "card");
+      const groupNodes = nodesRef.current.filter((n): n is GroupFlowNode => n.type === "boardGroup");
+
+      const conflicts: DropConflictItem[] = [];
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
@@ -1180,66 +1401,61 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           continue;
         }
 
-        const body = "```" + lang + ":" + file.name + "\n" + content + "\n```\n";
         const dropX = flowPos.x + i * 24;
         const dropY = flowPos.y + i * 24;
 
-        const allCards = nodesRef.current.filter((n): n is CardFlowNode => n.type === "card");
-        const hitCard = allCards.find((n) => {
-          const b = nodeBox(n);
-          return dropX >= b.x && dropX <= b.x + b.w && dropY >= b.y && dropY <= b.y + b.h;
+        // 偵測落點是否在任一分組框內
+        const hitGroup = groupNodes.find((g) => {
+          const gw = g.width ?? 360;
+          const gh = g.height ?? 240;
+          return dropX >= g.position.x && dropX <= g.position.x + gw && dropY >= g.position.y && dropY <= g.position.y + gh;
         });
 
-        if (hitCard) {
-          // 游標落在卡片範圍內：覆蓋該卡片內容
-          try {
-            const cur = await api.getCard(hitCard.id);
-            const updated = await api.patchCard(hitCard.id, { title: file.name, body }, cur.updated_at);
-            setNodes((ns) =>
-              ns.map((n) =>
-                n.id === hitCard.id && n.type === "card"
-                  ? { ...n, data: { ...n.data, title: updated.title, body: updated.body } }
-                  : n,
-              ),
-            );
-            info(`已覆蓋卡片「${hitCard.data.title || "（無標題）"}」內容為 ${file.name}`);
-          } catch (err) {
-            report(err, `覆蓋卡片「${hitCard.data.title || file.name}」失敗`);
-          }
-        } else {
-          // 游標落在空白處：建立新卡片並加入白板
-          try {
-            let initX = dropX;
-            let initY = dropY;
-            if (snapRef.current) {
-              const placed = placeCardsAvoidingCollisions(
-                [{ id: "temp", x: initX, y: initY, w: DEFAULT_CARD_W, h: DEFAULT_CARD_H }],
-                nodesRef.current.filter((n): n is CardFlowNode => n.type === "card").map(nodeBox),
-                GRID_SIZE,
-              );
-              const pos = placed.get("temp");
-              if (pos) {
-                initX = pos.x;
-                initY = pos.y;
-              }
-            }
+        let targetCards: CardFlowNode[] = [];
+        let scopeLabel = "白板";
 
-            const created = await api.createCard();
-            const updated = await api.patchCard(created.id, { title: file.name, body }, created.updated_at);
-            const added = await api.addToBoard(boardId, created.id, initX, initY);
-            saved.current.set(created.id, { x: added.x, y: added.y, w: added.w, h: added.h });
-            const node = toNode({ ...added, title: updated.title, body: updated.body, updated_at: updated.updated_at });
-            setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), { ...node, selected: true }]);
-            onSelectCard(created.id);
-            onCountChanged();
-            info(`已由代碼檔案 ${file.name} 建立卡片`);
-          } catch (err) {
-            report(err, `從檔案「${file.name}」建立卡片失敗`);
-          }
+        if (hitGroup) {
+          // 在分組框內：只比對屬於該分組框的卡片
+          const gx = hitGroup.position.x;
+          const gy = hitGroup.position.y;
+          const gw = hitGroup.width ?? 360;
+          const gh = hitGroup.height ?? 240;
+          targetCards = allCards.filter((c) => {
+            const b = nodeBox(c);
+            const cx = b.x + b.w / 2;
+            const cy = b.y + b.h / 2;
+            return cx >= gx && cx <= gx + gw && cy >= gy && cy <= gy + gh;
+          });
+          scopeLabel = `分組框「${hitGroup.data.label || "未命名分組"}」`;
+        } else {
+          // 在分組框外：比對該白板所有卡片
+          targetCards = allCards;
+          scopeLabel = "白板";
+        }
+
+        const matched = targetCards.find((c) => (c.data.title || "").trim() === file.name.trim());
+
+        if (matched) {
+          conflicts.push({
+            file,
+            content,
+            lang,
+            dropX,
+            dropY,
+            matchedCard: matched,
+            scopeLabel,
+          });
+        } else {
+          const body = "```" + lang + ":" + file.name + "\n" + content + "\n```\n";
+          await createCardFromDrop(file.name, body, dropX, dropY);
         }
       }
+
+      if (conflicts.length > 0) {
+        setConflictQueue(conflicts);
+      }
     },
-    [boardId, info, onCountChanged, onSelectCard, report, rf, toNode],
+    [boardId, createCardFromDrop, report, rf],
   );
 
   // ---- 拖曳「🎯 中心圖標」到目標卡片放開以指定中心 ----
@@ -1453,16 +1669,81 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       }}
       onDrop={(e) => void onBoardDrop(e)}
     >
-      {boardId && !props.isEditing && (
-        <div className="board-snap-bar">
-          <label className="snap-toggle" title="勾選時：拖曳卡片靠近其他卡片會磁吸對齊（顯示提示線）並吸到固定間距 20px；按住 Shift 拖曳則以 20px 為單位移動；放開時若重疊則自動移到最近空位">
-            <input
-              type="checkbox"
-              checked={snapToGrid}
-              onChange={(e) => toggleSnapToGrid(e.target.checked)}
+      {boardId &&
+        props.toolsSlot &&
+        createPortal(
+          <>
+            <button
+              type="button"
+              onClick={() => setShowLocateModal(true)}
+              title="貼上代碼片段或 AI 回覆，自動搜尋白板卡片並跳轉中央定位取代"
+            >
+              <CrosshairIcon />
+              定位
+            </button>
+            <button
+              type="button"
+              className={snapToGrid ? "on" : ""}
+              onClick={() => toggleSnapToGrid(!snapToGrid)}
+              title="勾選時：拖曳卡片靠近其他卡片會磁吸對齊（顯示提示線）並吸到固定間距 20px；按住 Shift 拖曳則以 20px 為單位移動；放開時若重疊則自動移到最近空位"
+            >
+              <input
+                type="checkbox"
+                checked={snapToGrid}
+                onChange={() => {}}
+                style={{ margin: 0, width: 14, height: 14, pointerEvents: "none" }}
+              />
+              自動對齊
+            </button>
+          </>,
+          props.toolsSlot,
+        )}
+
+      {showLocateModal && (
+        <div className="modal" role="dialog" aria-label="貼上 AI 回覆並定位卡片">
+          <div className="modal-card" style={{ maxWidth: 520 }}>
+            <h4 style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <CrosshairIcon size={16} />
+              貼上 AI 回覆並自動定位卡片
+            </h4>
+            <div className="muted" style={{ fontSize: 12, margin: "6px 0 10px" }}>
+              貼上 AI 輸出的修改指令或代碼段落，系統將自動比對當前白板內的所有卡片，找到後立即進入中央編輯並啟動定位取代。
+            </div>
+            <textarea
+              rows={8}
+              value={locateText}
+              onChange={(e) => setLocateText(e.target.value)}
+              placeholder="在此貼上 AI 回覆全文（包含【尋找這段代碼】或檔名）..."
+              autoFocus
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                fontFamily: "monospace",
+                fontSize: 12,
+                lineHeight: 1.45,
+                resize: "vertical",
+              }}
             />
-            自動對齊
-          </label>
+            <div className="modal-actions" style={{ marginTop: 12, justifyContent: "flex-end", gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLocateModal(false);
+                  setLocateText("");
+                }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={handleLocateCard}
+                disabled={!locateText.trim()}
+              >
+                搜尋定位並開啟取代
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1572,7 +1853,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
                       tabIndex={0}
                       aria-label="拖曳指定中心卡片"
                     >
-                      🎯 {designatedCenterNode ? `中心：${designatedCenterNode.data.title || "（無標題）"}` : "拖曳指定中心"}
+                      <CrosshairIcon size={12} />
+                      {designatedCenterNode ? `中心：${designatedCenterNode.data.title || "（無標題）"}` : "拖曳指定中心"}
                     </span>
                     {!designatedCenterNode && lastClickedInSelection && (
                       <button
@@ -1780,6 +2062,86 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           report={report}
         />
       )}
+      {conflictQueue.length > 0 && (
+        <DropConflictModal
+          item={conflictQueue[0]}
+          remainingCount={conflictQueue.length}
+          onResolve={async (decision, applyToAll) => {
+            const currentItem = conflictQueue[0];
+            const currentBody = "```" + currentItem.lang + ":" + currentItem.file.name + "\n" + currentItem.content + "\n```\n";
+
+            if (applyToAll) {
+              // 批次套用至當前及後續所有同名檔案
+              for (const it of conflictQueue) {
+                const b = "```" + it.lang + ":" + it.file.name + "\n" + it.content + "\n```\n";
+                if (decision === "overwrite") {
+                  await overwriteCardFromDrop(it.matchedCard.id, it.file.name, b);
+                } else if (decision === "create_new") {
+                  await createCardFromDrop(it.file.name, b, it.dropX, it.dropY);
+                }
+              }
+              setConflictQueue([]);
+            } else {
+              // 單筆處理
+              if (decision === "overwrite") {
+                await overwriteCardFromDrop(currentItem.matchedCard.id, currentItem.file.name, currentBody);
+              } else if (decision === "create_new") {
+                await createCardFromDrop(currentItem.file.name, currentBody, currentItem.dropX, currentItem.dropY);
+              }
+              setConflictQueue((q) => q.slice(1));
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function DropConflictModal(props: {
+  item: {
+    file: File;
+    matchedCard: CardFlowNode;
+    scopeLabel: string;
+  };
+  remainingCount: number;
+  onResolve(decision: "overwrite" | "create_new" | "skip", applyToAll: boolean): void | Promise<void>;
+}) {
+  const { item, remainingCount, onResolve } = props;
+  const [applyToAll, setApplyToAll] = useState(false);
+
+  return (
+    <div className="modal" role="dialog" aria-label="同名卡片覆蓋確認">
+      <div className="modal-card" style={{ maxWidth: 440 }}>
+        <h4>⚠️ 發現同名卡片</h4>
+        <div style={{ fontSize: 13, lineHeight: 1.6, margin: "10px 0" }}>
+          在<strong>【{item.scopeLabel}】</strong>已存在一張名為<strong>「{item.file.name}」</strong>的卡片。
+          <br />
+          您希望如何處理此檔案？
+        </div>
+
+        {remainingCount > 1 && (
+          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: "8px 0 14px", fontSize: 12 }}>
+            <input
+              type="checkbox"
+              checked={applyToAll}
+              onChange={(e) => setApplyToAll(e.target.checked)}
+            />
+            <span>套用此決定至本次其餘同名檔案（尚有 {remainingCount - 1} 個）</span>
+          </label>
+        )}
+
+        <div className="modal-actions" style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" onClick={() => void onResolve("skip", applyToAll)}>
+            略過此檔案
+          </button>
+          <button type="button" onClick={() => void onResolve("create_new", applyToAll)}>
+            另建新卡片
+          </button>
+          <button type="button" className="primary" onClick={() => void onResolve("overwrite", applyToAll)}>
+            覆蓋既有卡片
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

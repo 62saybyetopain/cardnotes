@@ -54,6 +54,38 @@ input, textarea, select { font: inherit; color: inherit; background: var(--panel
 .icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; }
 .toggle-right { height: 30px; display: inline-flex; align-items: center; justify-content: center; }
 
+/* 白板右上工具列：🛠 展開後向右滑出「定位／自動對齊」，靠右的其他圖標不動、左側被往左推。
+   @depends-on components/Board.tsx（以 createPortal 把按鈕渲染進 .tools-slide）*/
+.icon-btn.on { background: var(--accent-soft); border-color: var(--accent); }
+.tools-dock { display: inline-flex; align-items: center; }
+.tools-slide {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 0;
+  padding-left: 0;
+  overflow: hidden;
+  visibility: hidden;
+  transition: max-width 0.22s ease, padding-left 0.22s ease, visibility 0s linear 0.22s;
+}
+.tools-slide.open {
+  max-width: 260px;
+  padding-left: 6px;
+  visibility: visible;
+  transition: max-width 0.22s ease, padding-left 0.22s ease, visibility 0s;
+}
+.tools-slide button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.tools-slide button.on { background: var(--accent-soft); border-color: var(--accent); }
+
 .section-head { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
 h3, h4 { margin: 4px 0; font-size: 13px; color: var(--muted); }
 .plain { list-style: none; margin: 0; padding: 0; }
