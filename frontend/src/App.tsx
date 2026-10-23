@@ -463,7 +463,8 @@ export default function App() {
               boards={boards}
               filtered={!!(filter.tagId || filter.unclassified || filter.curationStatus)}
               tags={tags}
-              onSelectCard={openCardInCenter}
+              onSelectCard={selectCard}
+              onOpenCard={openCardInCenter}
               onCreateCard={() => void createCard()}
               onRefresh={() => {
                 void refreshTags();

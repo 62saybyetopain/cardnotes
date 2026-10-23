@@ -22,7 +22,7 @@
   --hl-pink-bg: rgba(251, 113, 133, 0.3); --hl-pink-border: rgba(190, 18, 60, 0.6);
 }
 * { box-sizing: border-box; }
-html, body, #root { height: 100%; margin: 0; }
+html, body, #root { height: 100%; margin: 0; overscroll-behavior-y: none; }
 body { font: 14px/1.5 system-ui, "Noto Sans TC", sans-serif; background: var(--bg); color: var(--text); }
 button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
 button:hover { border-color: var(--accent); }
@@ -226,6 +226,8 @@ summary .add { float: right; border: 0; background: transparent; }
   margin: 0 !important;
   transform: none !important;
   pointer-events: all !important;
+  touch-action: none !important;
+  user-select: none !important;
 }
 .react-flow__resize-control.line {
   z-index: 8 !important;
@@ -581,6 +583,8 @@ summary .add { float: right; border: 0; background: transparent; }
 .ipad-card-grid {
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
+  overflow-anchor: none;
   padding: 16px;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -601,7 +605,7 @@ summary .add { float: right; border: 0; background: transparent; }
 }
 
 .ipad-card-item:hover {
-  border-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
 }
 
 .ipad-card-item.active {
@@ -670,13 +674,15 @@ summary .add { float: right; border: 0; background: transparent; }
 }
 
 .ipad-card-resizer {
-  height: 12px;
+  height: 16px;
   margin-top: 2px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: ns-resize;
   flex-shrink: 0;
+  touch-action: none;
+  user-select: none;
 }
 .ipad-card-resizer:hover .ipad-card-resizer-handle {
   background: var(--accent);

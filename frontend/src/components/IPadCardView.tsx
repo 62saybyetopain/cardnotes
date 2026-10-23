@@ -1,5 +1,6 @@
 // @depends-on ../types.ts (BoardSummary, CardSummary, SyncPackage, Tag)
 // @depends-on ./Markdown.tsx (Markdown)
+// @depends-on ../App.tsx (onSelectCard 負責單擊切換選取與右側面板內容，onOpenCard 負責進入中央編輯模式)
 import { useCallback, useRef, useState } from "react";
 import { storage } from "../lib/storage";
 import type { BoardSummary, CardSummary, SyncPackage, Tag } from "../types";
@@ -17,6 +18,7 @@ interface Props {
   filtered?: boolean;
   tags: Tag[];
   onSelectCard(id: string): void;
+  onOpenCard?(id: string): void;
   onCreateCard(): void;
   onRefresh(): void;
   report(e: unknown, prefix?: string): void;
@@ -60,12 +62,14 @@ export function IPadCardView({
   filtered = false,
   tags: _tags,
   onSelectCard,
+  onOpenCard,
   onCreateCard,
   onRefresh,
   report,
   info,
 }: Props) {
   const activeBoard = filtered ? undefined : boards.find((b) => b.id === boardId);
+  const gridRef = useRef<HTMLDivElement>(null);
 
   // 記錄展開狀態與每張卡片的自訂高度
   const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set());
@@ -79,7 +83,13 @@ export function IPadCardView({
     return {};
   });
 
-  const resizingRef = useRef<{ cardId: string; startY: number; startH: number } | null>(null);
+  const resizingRef = useRef<{
+    cardId: string;
+    startY: number;
+    startH: number;
+    startScrollTop: number;
+    lastY: number;
+  } | null>(null);
 
   const saveHeights = useCallback((map: Record<string, number>) => {
     setHeightMap(map);
@@ -103,21 +113,42 @@ export function IPadCardView({
     });
   }, []);
 
-  // 拖曳底部拉條調節長度（支援滑鼠與觸控螢幕）
+  // 拖曳底部拉條調節長度（支援滑鼠與觸控螢幕；固定卡片上緣，僅在拉到畫面底部繼續往下拉時才捲動容器）
   const startResize = useCallback(
     (e: React.MouseEvent | React.TouchEvent, cardId: string, currentH: number) => {
-      e.preventDefault();
+      if (e.cancelable) e.preventDefault();
       e.stopPropagation();
       const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
-      resizingRef.current = { cardId, startY: clientY, startH: currentH };
+      const gridEl = gridRef.current;
+      resizingRef.current = {
+        cardId,
+        startY: clientY,
+        startH: currentH,
+        startScrollTop: gridEl ? gridEl.scrollTop : 0,
+        lastY: clientY,
+      };
       setExpandedCards((prev) => new Set(prev).add(cardId));
+      setHeightMap((prev) => (prev[cardId] === currentH ? prev : { ...prev, [cardId]: currentH }));
 
       const onMove = (ev: MouseEvent | TouchEvent) => {
         if (!resizingRef.current) return;
+        if (ev.cancelable) ev.preventDefault();
         const curY = "touches" in ev ? ev.touches[0].clientY : ev.clientY;
-        const delta = curY - resizingRef.current.startY;
+        const grid = gridRef.current;
+        if (grid) {
+          const rect = grid.getBoundingClientRect();
+          const bottomEdge = rect.bottom - 16;
+          if (curY >= bottomEdge && curY > resizingRef.current.lastY) {
+            // 拉到畫面底部且繼續往下拉時，允許容器同步向下捲動
+            grid.scrollTop += curY - Math.max(resizingRef.current.lastY, bottomEdge);
+          }
+        }
+        resizingRef.current.lastY = curY;
+        const scrollDelta = grid ? grid.scrollTop - resizingRef.current.startScrollTop : 0;
+        const delta = curY - resizingRef.current.startY + scrollDelta;
         const nextH = Math.max(DEFAULT_CARD_HEIGHT, Math.round(resizingRef.current.startH + delta));
-        setHeightMap((prev) => ({ ...prev, [resizingRef.current!.cardId]: nextH }));
+        const targetId = resizingRef.current.cardId;
+        setHeightMap((prev) => (prev[targetId] === nextH ? prev : { ...prev, [targetId]: nextH }));
       };
 
       const onEnd = () => {
@@ -125,6 +156,7 @@ export function IPadCardView({
         window.removeEventListener("mouseup", onEnd);
         window.removeEventListener("touchmove", onMove);
         window.removeEventListener("touchend", onEnd);
+        window.removeEventListener("touchcancel", onEnd);
         if (resizingRef.current) {
           setHeightMap((prev) => {
             saveHeights(prev);
@@ -138,6 +170,7 @@ export function IPadCardView({
       window.addEventListener("mouseup", onEnd);
       window.addEventListener("touchmove", onMove, { passive: false });
       window.addEventListener("touchend", onEnd);
+      window.addEventListener("touchcancel", onEnd);
     },
     [saveHeights],
   );
@@ -250,7 +283,7 @@ export function IPadCardView({
         </div>
       </div>
 
-      <div className="ipad-card-grid">
+      <div className="ipad-card-grid" ref={gridRef}>
         {cards.length === 0 && (
           <div className="empty" style={{ gridColumn: "1 / -1", textAlign: "center", padding: "40px 0" }}>
             <p>目前尚無卡片。</p>
@@ -277,27 +310,46 @@ export function IPadCardView({
               key={c.id}
               className={`ipad-card-item${isSelected ? " active" : ""}${isExpanded ? " expanded" : ""}`}
               style={{ height: currentHeight }}
-              onClick={() => onSelectCard(c.id)}
+              onClick={() => {
+                if ((window.getSelection()?.toString() ?? "").length > 0) return;
+                onSelectCard(c.id);
+              }}
+              onDoubleClick={() => onOpenCard?.(c.id)}
               role="region"
               aria-label={c.title || "卡片"}
             >
               <div className="ipad-card-item-head">
                 <div className="ipad-card-item-title">{c.title || "（無標題卡片）"}</div>
-                <button
-                  type="button"
-                  className="ipad-card-expand-btn"
-                  onClick={(e) => toggleExpand(e, c.id)}
-                  title={isExpanded ? "收合卡片（還原固定長度）" : "展開卡片（內部滾動與自訂長度）"}
-                  aria-label={isExpanded ? "收合卡片" : "展開卡片"}
-                >
-                  {isExpanded ? "⤡ 收合" : "⤢ 展開"}
-                </button>
+                <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                  {onOpenCard && (
+                    <button
+                      type="button"
+                      className="ipad-card-expand-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenCard(c.id);
+                      }}
+                      title="進入中央編輯模式"
+                      aria-label="進入中央編輯模式"
+                    >
+                      ✎ 編輯
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="ipad-card-expand-btn"
+                    onClick={(e) => toggleExpand(e, c.id)}
+                    title={isExpanded ? "收合卡片（還原固定長度）" : "展開卡片（內部滾動與自訂長度）"}
+                    aria-label={isExpanded ? "收合卡片" : "展開卡片"}
+                  >
+                    {isExpanded ? "⤡ 收合" : "⤢ 展開"}
+                  </button>
+                </div>
               </div>
 
               <div
                 className="ipad-card-item-body"
-                onClick={(e) => e.stopPropagation()}
-                title="滾動查看完整渲染內文"
+                title="點選切換卡片，雙擊進入中央編輯，亦可直接反白複製內文"
               >
                 {bodyContent.trim() ? (
                   <Markdown source={bodyContent} onOpenCard={onSelectCard} />
