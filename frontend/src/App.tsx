@@ -511,6 +511,8 @@ export default function App() {
               boards={boards}
               filtered={!!(filter.tagId || filter.unclassified || filter.curationStatus)}
               tags={tags}
+              rightOpen={rightOpen}
+              onToggleRight={() => setRightOpen((o) => !o)}
               onBackToBoard={() => {
                 setViewMode("board");
                 setFilter({});
@@ -530,11 +532,26 @@ export default function App() {
 
           {centerEditing && selected && (
             <div className="center-editor" role="region" aria-label="中央卡片編輯視窗">
-              <div className="center-editor-head">
+              <div
+                className="center-editor-head"
+                style={isStandalone || viewMode === "cards" ? { paddingRight: 16 } : undefined}
+              >
                 <button onClick={closeCenterEditor} title="返回（Esc）">
                   ← 返回{isStandalone ? "卡片冊" : viewMode === "graph" ? "概念圖譜" : "白板"}
                 </button>
                 <span className="muted">卡片編輯模式（按 Esc 返回{isStandalone ? "卡片冊" : "白板"}）</span>
+                {(isStandalone || viewMode === "cards") && (
+                  <button
+                    type="button"
+                    className="toggle-right"
+                    style={{ marginLeft: "auto", padding: "0 10px" }}
+                    onClick={() => setRightOpen((o) => !o)}
+                    aria-label={rightOpen ? "收合右側面板" : "展開右側面板"}
+                    title={rightOpen ? "收合右側面板" : "展開右側面板"}
+                  >
+                    {rightOpen ? "▶" : "◀"}
+                  </button>
+                )}
               </div>
               <div className="center-editor-body">
                 <CardEditorPane

@@ -1,8 +1,8 @@
 // @depends-on ../types.ts (RelationType)
 import type { RelationType } from "../types";
 
-export const GRID_SIZE = 20;
-export const MIN_CARD_GAP = 20;
+export const GRID_SIZE = 10;
+export const MIN_CARD_GAP = 10;
 export const DEFAULT_LAYOUT_GAP = 40;
 export const DEFAULT_CARD_W = 280;
 export const DEFAULT_CARD_H = 140;
@@ -42,6 +42,8 @@ export interface AutoLayoutOptions {
   typeSideMap?: Partial<Record<RelationType, "left" | "right">>;
   snapToGrid?: boolean;
   gridSize?: number;
+  gridCols?: number | null; // 網格模式：每排幾張（橫排）；null／未設＝自動
+  gridRows?: number | null; // 網格模式：每欄幾張（縱排）；僅在 gridCols 未設時生效
 }
 
 const RELATION_ORDER: readonly RelationType[] = [
@@ -218,6 +220,8 @@ function layoutGrid(
   gap: number,
   snapToGrid: boolean,
   gridSize: number,
+  gridCols?: number | null,
+  gridRows?: number | null,
 ): Map<string, { x: number; y: number }> {
   const result = new Map<string, { x: number; y: number }>();
   if (cards.length === 0) return result;
@@ -246,8 +250,16 @@ function layoutGrid(
     ordered.push(...r);
   }
 
-  const cols = Math.max(1, Math.round(Math.sqrt(ordered.length)));
-  const rows = Math.ceil(ordered.length / cols);
+  const n = ordered.length;
+  const wantCols = gridCols && gridCols >= 1 ? Math.floor(gridCols) : 0;
+  const wantRows = gridRows && gridRows >= 1 ? Math.floor(gridRows) : 0;
+  // 橫排張數優先；只填縱排張數時，欄數 = 張數 ÷ 每欄張數（無條件進位），列數必定 ≤ 縱排張數
+  const cols = wantCols
+    ? Math.min(n, wantCols)
+    : wantRows
+      ? Math.ceil(n / Math.min(n, wantRows))
+      : Math.max(1, Math.round(Math.sqrt(n)));
+  const rows = Math.ceil(n / cols);
   const colWidths = new Array<number>(cols).fill(0);
   const rowHeights = new Array<number>(rows).fill(0);
 
@@ -746,7 +758,7 @@ export function autoLayoutCards(
 
   if (cards.length === 0) return new Map();
   if (options.mode === "grid") {
-    return layoutGrid(cards, gap, snap, gridSize);
+    return layoutGrid(cards, gap, snap, gridSize, options.gridCols, options.gridRows);
   }
 
   // 當開啟格線對齊時，先將參與計算的卡片包圍盒無條件進位到格線倍數，確保欄列對齊後不會因取整而壓縮邊距

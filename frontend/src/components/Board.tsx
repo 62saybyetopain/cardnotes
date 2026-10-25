@@ -1,4 +1,5 @@
 // @depends-on ../lib/layout.ts (autoLayoutCards, placeCardsAvoidingCollisions, snapDimension, snapToGridValue, GRID_SIZE)
+// @depends-on ../lib/groupFit.ts (fitGroups, centerInRect：分組框貼合與推開；成員判定「中心點在框內」須與 onNodeDragStart 帶動卡片的判定保持一致)
 // @depends-on ../App.tsx (toolsSlot：右上工具列的 .tools-slide 容器，null 時不渲染「定位／自動對齊」)
 // @depends-on ../styles.css (.tools-slide button / .on：這兩顆按鈕的外觀由容器樣式決定，此處不寫 inline style)
 // @depends-on ../App.tsx (selectedCardId 有兩條寫入路徑：onNodeClick→onOpenCard，與 onSelectionChange→onSelectCard；Board 以 nodes 的 selected 為準去重；onOpenCard 支援 options.smartPasteText)
@@ -49,6 +50,7 @@ import {
   type LayoutMode,
   type SplitMode,
 } from "../lib/layout";
+import { centerInRect, fitGroups, type GroupRect } from "../lib/groupFit";
 import { computeMagnetSnap, MAGNET_THRESHOLD_PX, quantizeFromStart, type MagnetGuide } from "../lib/magnet";
 import {
   LINK_STATUS_LABELS,
@@ -326,6 +328,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   const [layoutMode, setLayoutMode] = useState<LayoutMode>("grid");
   const [layoutGap, setLayoutGap] = useState<number>(DEFAULT_LAYOUT_GAP);
   const [clusterThreshold, setClusterThreshold] = useState<number>(4);
+  const [gridCols, setGridCols] = useState<number | null>(null);
+  const [gridRows, setGridRows] = useState<number | null>(null);
   const [splitMode, setSplitMode] = useState<SplitMode>("type");
   const [typeSideMap, setTypeSideMap] = useState<Record<RelationType, "left" | "right">>(() => ({
     ...DEFAULT_TYPE_SIDE_MAP,
@@ -504,6 +508,9 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   nodesRef.current = nodes;
   const selectedRef = useRef(selectedCardId);
   selectedRef.current = selectedCardId;
+  // 上一次已同步進 nodes 的 selectedCardId。App 已改選取、[selectedCardId] effect 尚未寫進 nodes 的空窗內，
+  // React Flow 回報的選取是過期的，不能寫回 App（否則會把剛指定的卡片蓋回舊選取）
+  const syncedSelectedRef = useRef(selectedCardId);
 
   const toggleSnapToGrid = useCallback((checked: boolean) => {
     setSnapToGrid(checked);
@@ -638,6 +645,133 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   };
   const onGroupRemove = useCallback((gid: string) => void removeGroupImpl.current?.(gid), []);
 
+  // ---- 分組框自動貼合框內卡片，長大碰到其他框時推開該框與其卡片 ----
+  // before／after：被移動卡片的舊／新座標。其餘卡片與所有分組框一律取伺服器已確認的 saved，不依賴 React 何時 commit。
+  // keepOldMembers=true（自動排版／復原）：舊座標在框內的卡片仍算成員，避免排版把卡片排出舊框範圍後被誤判為「已離開」。
+  // 拖曳則為 false：拖出框外的卡片不再算成員，框才會縮小。
+  const refitGroupsImpl = useRef<
+    | ((
+        before: Map<string, { x: number; y: number }>,
+        after: Map<string, { x: number; y: number }>,
+        keepOldMembers: boolean,
+      ) => Promise<void>)
+    | undefined
+  >(undefined);
+  refitGroupsImpl.current = async (before, after, keepOldMembers) => {
+    if (!boardId) return;
+    try {
+      const boxes: LayoutBox[] = nodesRef.current
+        .filter((n): n is CardFlowNode => n.type === "card")
+        .map((n) => {
+          const b = nodeBox(n);
+          const p = after.get(n.id) ?? saved.current.get(n.id);
+          return p ? { ...b, x: p.x, y: p.y } : b;
+        });
+      const groups: GroupRect[] = nodesRef.current
+        .filter((n): n is GroupFlowNode => n.type === "boardGroup")
+        .map((n) => {
+          const g = saved.current.get(n.id);
+          return { id: n.id, x: g?.x ?? n.position.x, y: g?.y ?? n.position.y, w: g?.w ?? n.width ?? 360, h: g?.h ?? n.height ?? 240 };
+        });
+      if (groups.length === 0) return;
+
+      // 只處理「有被移動的卡片進出過」的分組框
+      const members = new Map<string, string[]>();
+      for (const g of groups) {
+        let affected = false;
+        const ids: string[] = [];
+        for (const b of boxes) {
+          const old = before.get(b.id);
+          const moved = !!old;
+          const inNow = centerInRect(b, g);
+          const inOld = !!old && centerInRect({ ...b, x: old.x, y: old.y }, g);
+          if (moved && (inNow || inOld)) affected = true;
+          if (inNow || (moved && keepOldMembers && inOld)) ids.push(b.id);
+        }
+        if (affected) members.set(g.id, ids);
+      }
+      if (members.size === 0) return;
+
+      const result = fitGroups(groups, boxes, members);
+      if (result.groups.size === 0 && result.cards.size === 0) return;
+
+      // 先更新畫面，儲存失敗再回復
+      setNodes((ns) =>
+        ns.map((n) => {
+          if (n.type === "boardGroup") {
+            const r = result.groups.get(n.id);
+            return r
+              ? { ...n, position: { x: r.x, y: r.y }, width: r.w, height: r.h, style: { width: r.w, height: r.h, zIndex: -1 } }
+              : n;
+          }
+          const p = result.cards.get(n.id);
+          return p ? { ...n, position: { x: p.x, y: p.y } } : n;
+        }),
+      );
+
+      const groupEntries = Array.from(result.groups.entries());
+      const settled = await Promise.allSettled(
+        groupEntries.map(([id, r]) =>
+          api.patchBoardGroup(boardId, id.slice("group:".length), { x: r.x, y: r.y, w: r.w, h: r.h }),
+        ),
+      );
+      let failed = false;
+      for (let i = 0; i < settled.length; i++) {
+        const [id, r] = groupEntries[i];
+        const s = settled[i];
+        if (s.status === "fulfilled") {
+          saved.current.set(id, { x: r.x, y: r.y, w: r.w, h: r.h });
+          continue;
+        }
+        failed = true;
+        const g = saved.current.get(id);
+        if (g) {
+          setNodes((ns) =>
+            ns.map((n) =>
+              n.id === id && n.type === "boardGroup"
+                ? {
+                    ...n,
+                    position: { x: g.x, y: g.y },
+                    width: g.w ?? 360,
+                    height: g.h ?? 240,
+                    style: { width: g.w ?? 360, height: g.h ?? 240, zIndex: -1 },
+                  }
+                : n,
+            ),
+          );
+        }
+        report(s.reason, "儲存分組框自動調整失敗，已回復");
+      }
+
+      const cardItems = Array.from(result.cards.entries()).map(([card_id, p]) => ({ card_id, x: p.x, y: p.y }));
+      if (cardItems.length === 0) return;
+      const revertCards = () =>
+        setNodes((ns) =>
+          ns.map((n) => {
+            const g = saved.current.get(n.id);
+            return n.type === "card" && result.cards.has(n.id) && g ? { ...n, position: { x: g.x, y: g.y } } : n;
+          }),
+        );
+      if (failed) {
+        // 有框沒存成功：被推開的卡片也不寫入，避免卡片與框的位置在伺服器上不一致
+        revertCards();
+        return;
+      }
+      try {
+        await api.patchBoardCards(boardId, cardItems);
+        cardItems.forEach((i) => {
+          const g = saved.current.get(i.card_id);
+          saved.current.set(i.card_id, { x: i.x, y: i.y, w: g?.w ?? null, h: g?.h ?? null });
+        });
+      } catch (e) {
+        revertCards();
+        report(e, "儲存被推開的卡片位置失敗，已回復");
+      }
+    } catch (e) {
+      report(e, "分組框自動調整失敗");
+    }
+  };
+
   const toNode = useCallback(
     (c: BoardCard): CardFlowNode => ({
       id: c.card_id,
@@ -736,6 +870,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
 
   // 右側面板選了別張卡片，白板上同步選取（若白板目前正在多選且已包含該卡，則不洗掉多選；有選取卡片時一併清除分組框選取）
   useEffect(() => {
+    syncedSelectedRef.current = selectedCardId;
     setNodes((ns) => {
       const selectedCards = ns.filter((n) => n.type === "card" && n.selected);
       if (selectedCards.length > 1 && selectedCardId && selectedCards.some((n) => n.id === selectedCardId)) {
@@ -906,6 +1041,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   const onSelectionChange = useCallback(
     ({ nodes: sel }: { nodes: { id: string; type?: string }[] }) => {
       const cardSel = sel.filter((n) => !n.id.startsWith("group:"));
+      // App 的選取已變、nodes 還沒同步：這次回報是舊選取，丟棄；nodes 追上後 React Flow 會再回報一次
+      if (syncedSelectedRef.current !== selectedRef.current) return;
       // React Flow 的 store 比 nodes state 晚一個 commit 才同步，回報的選取可能是上一刻的過期快照。
       // 以 nodes 為準：不一致就丟棄，等 store 追上後的下一次回報再處理；
       // 否則會與 [selectedCardId] effect 互相覆寫，形成無限迴圈（React error #185）
@@ -1048,12 +1185,26 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         });
 
       if (!items.length) return;
+      const before = new Map<string, { x: number; y: number }>(
+        items.map((i) => {
+          const g = saved.current.get(i.card_id);
+          return [i.card_id, { x: g?.x ?? i.x, y: g?.y ?? i.y }];
+        }),
+      );
       try {
         await api.patchBoardCards(boardId, items);
         items.forEach((i) => {
           const g = saved.current.get(i.card_id);
           saved.current.set(i.card_id, { x: i.x, y: i.y, w: g?.w ?? null, h: g?.h ?? null });
         });
+        // 拖的是分組框時成員跟著框走、相對位置不變，不需要貼合；只有拖卡片才會進出框
+        if (activeType === "card") {
+          await refitGroupsImpl.current?.(
+            before,
+            new Map<string, { x: number; y: number }>(items.map((i) => [i.card_id, { x: i.x, y: i.y }])),
+            false,
+          );
+        }
       } catch (e) {
         const ids = new Set(items.map((i) => i.card_id));
         setNodes((ns) =>
@@ -1203,6 +1354,11 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     [nodes],
   );
 
+  // 取消選取（少於 2 張）視為排版使用完畢：快照只對排版當下那批卡片有效，留著會讓之後的復原蓋掉新位置
+  useEffect(() => {
+    if (selectedCards.length < 2 && undoSnapshot) setUndoSnapshot(null);
+  }, [selectedCards.length, undoSnapshot]);
+
   const runAutoLayout = useCallback(
     async (overrideOpts?: {
       mode?: LayoutMode;
@@ -1211,6 +1367,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       centerCardId?: string | null;
       splitMode?: SplitMode;
       typeSideMap?: Record<RelationType, "left" | "right">;
+      gridCols?: number | null;
+      gridRows?: number | null;
     }) => {
       if (!boardId) return;
       const sel = nodesRef.current.filter((n): n is CardFlowNode => n.type === "card" && !!n.selected);
@@ -1232,6 +1390,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         centerCardId: effectiveCenterId,
         splitMode: overrideOpts?.splitMode ?? splitMode,
         typeSideMap: overrideOpts?.typeSideMap ?? typeSideMap,
+        gridCols: overrideOpts?.gridCols !== undefined ? overrideOpts.gridCols : gridCols,
+        gridRows: overrideOpts?.gridRows !== undefined ? overrideOpts.gridRows : gridRows,
         snapToGrid: snapRef.current,
         gridSize: GRID_SIZE,
       });
@@ -1259,6 +1419,11 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           saved.current.set(item.card_id, { x: item.x, y: item.y, w: g?.w ?? null, h: g?.h ?? null });
         });
         setUndoSnapshot(prevSnapshot);
+        await refitGroupsImpl.current?.(
+          new Map<string, { x: number; y: number }>(prevSnapshot.map((p) => [p.card_id, { x: p.x, y: p.y }])),
+          new Map<string, { x: number; y: number }>(patchItems.map((p) => [p.card_id, { x: p.x, y: p.y }])),
+          true,
+        );
       } catch (e) {
         const snapMap = new Map(prevSnapshot.map((p) => [p.card_id, p]));
         setNodes((ns) =>
@@ -1270,12 +1435,18 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         report(e, "自動排版儲存失敗，已回到原位");
       }
     },
-    [boardId, clusterThreshold, designatedCenterId, layoutGap, layoutMode, links, report, splitMode, typeSideMap],
+    [boardId, clusterThreshold, designatedCenterId, gridCols, gridRows, layoutGap, layoutMode, links, report, splitMode, typeSideMap],
   );
 
   const undoAutoLayout = useCallback(async () => {
     if (!boardId || !undoSnapshot || undoSnapshot.length === 0) return;
     const toRestore = undoSnapshot;
+    const layoutPos = new Map<string, { x: number; y: number }>(
+      toRestore.map((p) => {
+        const g = saved.current.get(p.card_id);
+        return [p.card_id, { x: g?.x ?? p.x, y: g?.y ?? p.y }];
+      }),
+    );
     const snapMap = new Map(toRestore.map((p) => [p.card_id, p]));
     setNodes((ns) =>
       ns.map((n) => {
@@ -1290,6 +1461,11 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         saved.current.set(item.card_id, { x: item.x, y: item.y, w: g?.w ?? null, h: g?.h ?? null });
       });
       setUndoSnapshot(null);
+      await refitGroupsImpl.current?.(
+        layoutPos,
+        new Map<string, { x: number; y: number }>(toRestore.map((p) => [p.card_id, { x: p.x, y: p.y }])),
+        true,
+      );
     } catch (e) {
       report(e, "復原排版失敗");
     }
@@ -1747,7 +1923,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         </div>
       )}
 
-      {boardId && (selectedCards.length >= 2 || undoSnapshot) && (
+      {boardId && selectedCards.length >= 2 && (
         <div className="board-multi-toolbar" role="toolbar" aria-label="多選批次與自動排列工具列">
           <span className="multi-count">已選 {selectedCards.length} 張</span>
 
@@ -1809,7 +1985,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
                 <span>間距 {layoutGap}px</span>
                 <input
                   type="range"
-                  min={20}
+                  min={10}
                   max={140}
                   step={10}
                   value={layoutGap}
@@ -1822,6 +1998,49 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
                   aria-label="排版間距"
                 />
               </label>
+
+              {layoutMode === "grid" && (
+                <>
+                  <label className="toolbar-ctrl" title="每排幾張卡片（橫排）。留空＝自動；兩者都填時以橫排為準">
+                    <span>橫排</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      placeholder="自動"
+                      value={gridCols ?? ""}
+                      onChange={(e) => {
+                        const next =
+                          e.target.value === "" ? null : Math.max(1, Math.min(50, Math.floor(Number(e.target.value)) || 1));
+                        setGridCols(next);
+                        void runAutoLayout({ gridCols: next });
+                      }}
+                      style={{ width: 56 }}
+                      aria-label="每排卡片張數"
+                    />
+                    <span>張</span>
+                  </label>
+                  <label className="toolbar-ctrl" title="每欄幾張卡片（縱排）。留空＝自動；只在橫排留空時生效">
+                    <span>縱排</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      placeholder="自動"
+                      value={gridRows ?? ""}
+                      onChange={(e) => {
+                        const next =
+                          e.target.value === "" ? null : Math.max(1, Math.min(50, Math.floor(Number(e.target.value)) || 1));
+                        setGridRows(next);
+                        void runAutoLayout({ gridRows: next });
+                      }}
+                      style={{ width: 56 }}
+                      aria-label="每欄卡片張數"
+                    />
+                    <span>張</span>
+                  </label>
+                </>
+              )}
 
               {layoutMode !== "grid" && (
                 <>

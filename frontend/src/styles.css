@@ -747,12 +747,3 @@ summary .add { float: right; border: 0; background: transparent; }
   }
 }
 
-/* 螢幕寬度小於 900px 時改為直向響應式雙欄/抽屜切換 */
-@media (max-width: 900px) {
-  .app {
-    grid-template-columns: 200px 1fr !important;
-  }
-  .app.right-open {
-    grid-template-columns: 1fr 1fr !important;
-  }
-}

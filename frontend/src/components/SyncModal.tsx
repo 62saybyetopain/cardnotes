@@ -121,6 +121,13 @@ function toDatetimeLocalValue(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+// 同步完成提示用：讓使用者一眼看出拉到的備份是否過期
+function describeBackup(pkg: SyncPackage): string {
+  const inbox = pkg.cards.filter((c) => (c.curation_status ?? "inbox") === "inbox").length;
+  const t = pkg.exported_at ? new Date(pkg.exported_at).toLocaleString() : "未知";
+  return `共 ${pkg.cards.length} 張卡片，其中 ${inbox} 張待整理；備份時間 ${t}`;
+}
+
 async function overwriteIpadLocal(pkg: SyncPackage): Promise<boolean> {
   if (typeof storage.importPackageOverwrite !== "function" || typeof storage.findLocalOnlyCards !== "function") {
     throw new Error("目前儲存驅動不是 IndexedDB（dexie），無法執行 iPad 覆蓋匯入。");
@@ -275,7 +282,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
           setCustomCutoffLocal(toDatetimeLocalValue(newBase.imported_at));
           await loadIpadCurrentPackage();
           setCloudBusy(false);
-          info(`☁️ 已從 Drive 同步電腦版備份（共 ${pcPkg.cards.length} 張卡片），並已記錄基準時間戳！`);
+          info(`☁️ 已從 Drive 同步電腦版備份（${describeBackup(pcPkg)}）。若與電腦端不符，請先在電腦版重新「上傳雲端備份」。`);
           onApplied();
           onClose();
         } catch (e) {
@@ -312,7 +319,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       setIpadBaseline(newBase);
       setCustomCutoffLocal(toDatetimeLocalValue(newBase.imported_at));
       await loadIpadCurrentPackage();
-      info(`📥 已匯入電腦備份（共 ${parsed.cards.length} 張卡片），並已記錄基準時間戳！`);
+      info(`📥 已匯入電腦備份（${describeBackup(parsed)}）。若與電腦端不符，請先在電腦版重新匯出備份。`);
       onApplied();
       onClose();
     } catch (err) {

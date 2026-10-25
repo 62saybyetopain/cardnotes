@@ -20,6 +20,8 @@ interface Props {
   filtered?: boolean;
   tags: Tag[];
   onBackToBoard?(): void;
+  rightOpen?: boolean;
+  onToggleRight?(): void;
   onSelectCard(id: string): void;
   onOpenCard?(id: string): void;
   onCreateCard(): void;
@@ -65,6 +67,8 @@ export function IPadCardView({
   filtered = false,
   tags,
   onBackToBoard,
+  rightOpen,
+  onToggleRight,
   onSelectCard,
   onOpenCard,
   onCreateCard,
@@ -403,6 +407,17 @@ export function IPadCardView({
           <button type="button" className="touch-btn primary" onClick={onCreateCard}>
             ＋ {activeBoard ? `在「${activeBoard.name.slice(0, 6)}」新增` : "新增卡片"}
           </button>
+          {onToggleRight && (
+            <button
+              type="button"
+              className="touch-btn"
+              onClick={onToggleRight}
+              aria-label={rightOpen ? "收合右側面板" : "展開右側面板"}
+              title={rightOpen ? "收合右側面板" : "展開右側面板"}
+            >
+              {rightOpen ? "▶" : "◀"}
+            </button>
+          )}
         </div>
       </div>
 
