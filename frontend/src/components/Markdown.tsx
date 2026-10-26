@@ -23,6 +23,8 @@ import {
   type HighlightColor,
 } from "../lib/markdown";
 import { mediaIdFromSrc, mediaUrl, urlTransform } from "../lib/media";
+import { openLocalMedia, type OpenedMedia } from "../lib/mediaSource";
+import { getPreferredDriverType } from "../lib/storage";
 import type { MediaInfo } from "../types";
 
 const infoCache = new Map<string, Promise<MediaInfo>>();
@@ -37,7 +39,20 @@ function getInfo(id: string): Promise<MediaInfo> {
   return p;
 }
 
-type State = { status: "loading" } | { status: "ok"; info: MediaInfo } | { status: "missing" };
+type State =
+  | { status: "loading" }
+  | { status: "ok"; info: MediaInfo; src: string }
+  | { status: "missing" }
+  | { status: "unavailable"; reason: string };
+
+// 電腦版沿用後端網址（行為不變）；iPad／網頁版讀本機 IndexedDB，沒有才從 Drive 下載。null＝確定遺失
+async function openMedia(id: string): Promise<OpenedMedia | null> {
+  if (getPreferredDriverType() === "dexie") return openLocalMedia(id);
+  return getInfo(id).then(
+    (info) => ({ info, src: mediaUrl(id), revoke: () => {} }),
+    () => null,
+  );
+}
 
 export function MediaEmbed({
   id,
@@ -55,6 +70,7 @@ export function MediaEmbed({
     () => explicitWidth || mediaWidthCache.get(id) || null,
   );
   const [zoomed, setZoomed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!zoomed) return;
@@ -80,17 +96,49 @@ export function MediaEmbed({
 
   useEffect(() => {
     let alive = true;
+    let revoke: (() => void) | null = null;
     setState({ status: "loading" });
-    getInfo(id).then(
-      (info) => alive && setState({ status: "ok", info }),
-      () => alive && setState({ status: "missing" }),
+    openMedia(id).then(
+      (m) => {
+        if (!alive) {
+          m?.revoke();
+          return;
+        }
+        if (!m) {
+          setState({ status: "missing" });
+          return;
+        }
+        revoke = m.revoke;
+        setState({ status: "ok", info: m.info, src: m.src });
+      },
+      (e) => {
+        console.error(`圖片 ${id} 載入失敗`, e);
+        if (alive) setState({ status: "unavailable", reason: e instanceof Error ? e.message : String(e) });
+      },
     );
     return () => {
       alive = false;
+      revoke?.();
     };
-  }, [id]);
+  }, [id, attempt]);
 
   if (state.status === "loading") return <span className="media-loading">載入中…</span>;
+  if (state.status === "unavailable")
+    return (
+      <span
+        className="media-missing"
+        role="button"
+        tabIndex={0}
+        aria-label="圖片尚未下載，點擊重試"
+        style={{ cursor: "pointer" }}
+        onClick={(e) => {
+          e.stopPropagation();
+          setAttempt((n) => n + 1);
+        }}
+      >
+        圖片尚未下載（點擊重試）：{state.reason.slice(0, 80)}
+      </span>
+    );
   if (state.status === "missing")
     return (
       <span className="media-missing" role="img" aria-label="圖片遺失">
@@ -106,7 +154,7 @@ export function MediaEmbed({
       <video
         className="nodrag nowheel"
         style={{ width: userWidth ?? "100%", maxWidth: "100%", borderRadius: 4 }}
-        src={mediaUrl(id)}
+        src={state.src}
         controls
         preload="metadata"
         onError={onError}
@@ -132,7 +180,7 @@ export function MediaEmbed({
           el.style.setProperty("object-fit", "unset", "important");
           el.style.setProperty("margin", "0", "important");
         }}
-        src={mediaUrl(id)}
+        src={state.src}
         alt=""
         loading="lazy"
         onError={onError}
@@ -231,7 +279,7 @@ export function MediaEmbed({
             }}
           >
             <img
-              src={mediaUrl(id)}
+              src={state.src}
               alt=""
               style={{ width: "96vw", height: "96vh", objectFit: "contain" }}
             />

@@ -216,29 +216,87 @@ interface DriveMediaFile {
   fileId: string;
   size: number;
   mime: string;
+  parents: string[];
 }
 
 // 以圖片編號精確查詢雲端圖片檔（檔名 = 前綴 + 編號）
 async function findDriveMedia(accessToken: string, id: string): Promise<DriveMediaFile | null> {
   const q = encodeURIComponent(`name = '${MEDIA_FILE_PREFIX}${id}' and trashed = false`);
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,size,mimeType)&orderBy=modifiedTime%20desc&pageSize=1`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,size,mimeType,parents)&orderBy=modifiedTime%20desc&pageSize=1`;
   const res = await fetch(url, { method: "GET", headers: { Authorization: `Bearer ${accessToken}` } });
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
     throw new Error(`查詢 Google Drive 圖片失敗 (${res.status})：${errText}`);
   }
-  const data = (await res.json()) as { files?: Array<{ id: string; size?: string; mimeType?: string }> };
+  const data = (await res.json()) as {
+    files?: Array<{ id: string; size?: string; mimeType?: string; parents?: string[] }>;
+  };
   const f = data.files?.[0];
-  return f ? { fileId: f.id, size: Number(f.size ?? 0), mime: f.mimeType ?? "" } : null;
+  return f ? { fileId: f.id, size: Number(f.size ?? 0), mime: f.mimeType ?? "", parents: f.parents ?? [] } : null;
 }
 
-async function putDriveMedia(accessToken: string, id: string, blob: Blob, existingFileId: string | null): Promise<void> {
+const MEDIA_FOLDER_NAME = "cardboard-media";
+const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder";
+
+// 圖片集中放在這個資料夾；找不到就建立。同名資料夾有多個時固定取最早建立的，避免每次落到不同資料夾
+async function ensureMediaFolder(accessToken: string): Promise<string> {
+  const q = encodeURIComponent(`name = '${MEDIA_FOLDER_NAME}' and mimeType = '${DRIVE_FOLDER_MIME}' and trashed = false`);
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id)&orderBy=createdTime&pageSize=1`,
+    { method: "GET", headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`查詢 Google Drive 圖片資料夾失敗 (${res.status})：${errText}`);
+  }
+  const data = (await res.json()) as { files?: Array<{ id: string }> };
+  if (data.files?.[0]) return data.files[0].id;
+
+  const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
+    body: JSON.stringify({ name: MEDIA_FOLDER_NAME, mimeType: DRIVE_FOLDER_MIME }),
+  });
+  if (!createRes.ok) {
+    const errText = await createRes.text().catch(() => "");
+    throw new Error(`在 Google Drive 建立圖片資料夾失敗 (${createRes.status})：${errText}`);
+  }
+  const created = (await createRes.json()) as { id?: string };
+  if (!created.id) throw new Error("Google Drive 建立圖片資料夾後未回傳 ID");
+  return created.id;
+}
+
+// 舊版上傳的圖片散在根目錄：搬進圖片資料夾。已在資料夾內就不動作，重跑安全
+async function moveIntoFolder(accessToken: string, file: DriveMediaFile, folderId: string): Promise<void> {
+  if (file.parents.includes(folderId)) return;
+  const remove = file.parents.length > 0 ? `&removeParents=${encodeURIComponent(file.parents.join(","))}` : "";
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.fileId)}?addParents=${encodeURIComponent(folderId)}${remove}`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
+      body: "{}",
+    },
+  );
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`搬移 Google Drive 圖片檔失敗 (${res.status})：${errText}`);
+  }
+}
+
+async function putDriveMedia(
+  accessToken: string,
+  id: string,
+  blob: Blob,
+  existingFileId: string | null,
+  folderId: string,
+): Promise<void> {
   let fileId = existingFileId;
   if (!fileId) {
     const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
-      body: JSON.stringify({ name: MEDIA_FILE_PREFIX + id, mimeType: blob.type }),
+      body: JSON.stringify({ name: MEDIA_FILE_PREFIX + id, mimeType: blob.type, parents: [folderId] }),
     });
     if (!createRes.ok) {
       const errText = await createRes.text().catch(() => "");
@@ -290,11 +348,13 @@ export async function uploadPcBackupToCloud(
 ): Promise<MediaBackupReport> {
   const token = await resolveAccessToken(credentialInput);
   const ids = collectMediaIds(pkg);
+  const folderId = await ensureMediaFolder(token);
   const media: SyncMediaEntry[] = [];
   const missing: string[] = [];
   let uploaded = 0;
   for (const id of ids) {
     const found = await findDriveMedia(token, id);
+    if (found) await moveIntoFolder(token, found, folderId);
     if (found && found.size > 0) {
       media.push({ id, kind: kindOfMime(found.mime), mime: found.mime, byte_size: found.size });
       continue;
@@ -307,13 +367,42 @@ export async function uploadPcBackupToCloud(
     if (!/^(image|video)\//.test(blob.type)) {
       throw new Error(`電腦端圖片 ${id} 沒有有效的媒體類型（${blob.type || "空白"}），未上傳`);
     }
-    await putDriveMedia(token, id, blob, found ? found.fileId : null);
+    await putDriveMedia(token, id, blob, found ? found.fileId : null, folderId);
     media.push({ id, kind: kindOfMime(blob.type), mime: blob.type, byte_size: blob.size });
     uploaded += 1;
   }
   // 封包最後才上傳：任何一步失敗時，雲端仍是上一版完整備份
   await uploadJsonToDrive(token, PC_BACKUP_FILENAME, { ...pkg, media });
   return { total: ids.length, uploaded, missing };
+}
+
+/**
+ * iPad 端：依圖片編號從 Google Drive 下載圖片（渲染到才下載，快取由呼叫端負責）。
+ * 回傳 null＝雲端確實沒有這個檔案（含上傳到一半的 0 byte 檔）；
+ * 其他失敗（沒金鑰、離線、HTTP 錯誤、內容被截斷）一律丟錯，呼叫端不可把它當成「圖片遺失」。
+ * @depends-on schema.sql::media（同一個 id 的檔案內容不可變；呼叫端的快取與孤兒清理都以此為前提）
+ */
+export async function downloadMediaFromCloud(id: string): Promise<Blob | null> {
+  const token = await resolveAccessToken();
+  const found = await findDriveMedia(token, id);
+  if (!found || found.size <= 0) return null;
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(found.fileId)}?alt=media`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`從 Google Drive 下載圖片失敗 (${res.status})：${errText}`);
+  }
+  const raw = await res.blob();
+  if (raw.size !== found.size) {
+    throw new Error(`圖片 ${id} 下載不完整（預期 ${found.size} bytes，實得 ${raw.size}）`);
+  }
+  const blob = raw.type ? raw : new Blob([raw], { type: found.mime });
+  if (!/^(image|video)\//.test(blob.type)) {
+    throw new Error(`雲端圖片 ${id} 沒有有效的媒體類型（${blob.type || "空白"}）`);
+  }
+  return blob;
 }
 
 /**
