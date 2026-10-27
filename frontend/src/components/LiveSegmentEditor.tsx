@@ -4,7 +4,7 @@
 import { defaultKeymap, history, historyKeymap, insertNewline } from "@codemirror/commands";
 import { Annotation, EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap, placeholder as cmPlaceholder } from "@codemirror/view";
-import { useImperativeHandle, useLayoutEffect, useRef, type Ref } from "react";
+import { useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { liveMarkdown } from "../lib/liveMarkdown";
 import { subscribeCardTitle } from "./Markdown";
 
@@ -28,6 +28,7 @@ interface Props {
   onKeyDown(e: KeyboardEvent, from: number, to: number): boolean;
   onPaste(e: ClipboardEvent, from: number, to: number): boolean;
   onDropFiles(e: DragEvent, at: number): boolean;
+  onToggleLineMenu?(rect: { lineTop: number; lineBottom: number }): void;
 }
 
 // 標記「由父層 value 同步進來的變更」，避免回頭再觸發 onDocChange 造成迴圈或誤標 dirty
@@ -38,6 +39,7 @@ export function LiveSegmentEditor(props: Props) {
   const viewRef = useRef<EditorView | null>(null);
   const propsRef = useRef(props);
   propsRef.current = props;
+  const [activeLine, setActiveLine] = useState<{ top: number; firstLineH: number; bottom: number } | null>(null);
 
   useImperativeHandle(
     props.ref,
@@ -79,6 +81,7 @@ export function LiveSegmentEditor(props: Props) {
           // 純 Enter 與 textarea 行為一致（不自動縮排）；清單 Enter 由父層 onKeyDown 先攔截
           keymap.of([{ key: "Enter", run: insertNewline }, ...defaultKeymap, ...historyKeymap]),
           EditorView.lineWrapping,
+          EditorView.theme({ ".cm-line": { paddingLeft: "0" } }),
           EditorView.contentAttributes.of({ "aria-label": p0.ariaLabel }),
           ...(p0.placeholder ? [cmPlaceholder(p0.placeholder)] : []),
           liveMarkdown(subscribeCardTitle),
@@ -129,6 +132,15 @@ export function LiveSegmentEditor(props: Props) {
               const m = u.state.selection.main;
               p.onSelectionChange(m.from, m.to);
             }
+
+            const v = viewRef.current;
+            if (v && v.hasFocus) {
+              const sel = v.state.selection.main;
+              const targetPos = Math.min(sel.from, sel.to);
+              const block = v.lineBlockAt(targetPos);
+              const singleLineH = v.defaultLineHeight || 22;
+              setActiveLine({ top: block.top, firstLineH: singleLineH, bottom: block.bottom });
+            }
           }),
         ],
       }),
@@ -158,5 +170,52 @@ export function LiveSegmentEditor(props: Props) {
     });
   }, [props.value]);
 
-  return <div ref={hostRef} className="live-segment" />;
+  return (
+    <div
+      ref={hostRef}
+      className="live-segment"
+      style={{ position: "relative" }}
+    >
+      {activeLine && (
+        <button
+          type="button"
+          className="line-gutter-btn"
+          style={{
+            position: "absolute",
+            left: -21,
+            top: activeLine.top + Math.max(0, (activeLine.firstLineH - 20) / 2),
+            width: 16,
+            height: 20,
+            lineHeight: "18px",
+            padding: 0,
+            fontSize: 11,
+            fontWeight: 700,
+            fontFamily: "monospace",
+            color: "var(--muted, #94a3b8)",
+            background: "var(--panel, rgba(30, 41, 59, 0.8))",
+            border: "1px solid var(--line, #334155)",
+            borderRadius: 4,
+            cursor: "pointer",
+            zIndex: 10,
+            userSelect: "none",
+          }}
+          onMouseDown={(e) => {
+            e.preventDefault();
+          }}
+          onClick={(e) => {
+            e.stopPropagation();
+            const segOffsetTop = hostRef.current?.offsetTop ?? 0;
+            propsRef.current.onToggleLineMenu?.({
+              lineTop: segOffsetTop + activeLine.top,
+              lineBottom: segOffsetTop + activeLine.bottom,
+            });
+          }}
+          title="點擊展開文字格式工具列"
+          aria-label="文字格式工具列"
+        >
+          ::
+        </button>
+      )}
+    </div>
+  );
 }

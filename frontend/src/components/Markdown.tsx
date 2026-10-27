@@ -1,4 +1,5 @@
 // @depends-on ../api.ts (api, ApiError)
+// @depends-on ../lib/media.ts (youtubeIdFromUrl：img 處理器遇到 ![](YouTube網址)、或 p 處理器遇到「整段只有一個 YouTube 網址」時，渲染為點擊播放的 YouTubeEmbed；這兩處是「外部網址不載入」規則僅有的例外)
 // @depends-on ../lib/markdown.ts (HIGHLIGHT_COLOR_OPTIONS, cardIdFromHref, resolveLineInContext, type HighlightColor)
 // @depends-on ../lib/liveMarkdown.ts (編輯中的即時渲染重寫了 ++／== 開合判定、顏色別名與圍欄判定；修改這裡的規則要同步改那邊)
 import {
@@ -22,7 +23,7 @@ import {
   resolveLineInContext,
   type HighlightColor,
 } from "../lib/markdown";
-import { mediaIdFromSrc, mediaUrl, urlTransform } from "../lib/media";
+import { mediaIdFromSrc, mediaUrl, urlTransform, youtubeIdFromUrl } from "../lib/media";
 import { openLocalMedia, type OpenedMedia } from "../lib/mediaSource";
 import { getPreferredDriverType } from "../lib/storage";
 import type { MediaInfo } from "../types";
@@ -290,7 +291,106 @@ export function MediaEmbed({
   );
 }
 
-// ---- 卡片引用（@ 引用）狀態快取、開啟卡片通道與改名／刪除即時通知 ----
+// ---- YouTube 嵌入：預設只顯示縮圖，點擊後才建立 iframe（不點就不連 youtube-nocookie.com）----
+function YouTubeEmbed({ id, title }: { id: string; title: string }) {
+  const [playing, setPlaying] = useState(false);
+  const [thumbFailed, setThumbFailed] = useState(false);
+  return (
+    <span
+      className="yt-embed nodrag nowheel"
+      style={{ display: "block", width: "100%", maxWidth: 560, margin: "6px 0" }}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      <span
+        style={{
+          display: "block",
+          position: "relative",
+          width: "100%",
+          aspectRatio: "16 / 9",
+          background: "#000",
+          borderRadius: 6,
+          overflow: "hidden",
+        }}
+      >
+        {playing ? (
+          <iframe
+            src={`https://www.youtube-nocookie.com/embed/${id}?autoplay=1&rel=0`}
+            title={title || "YouTube 影片"}
+            allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+            allowFullScreen
+            referrerPolicy="strict-origin-when-cross-origin"
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: 0 }}
+          />
+        ) : (
+          <button
+            type="button"
+            aria-label={title ? `播放影片：${title}` : "播放 YouTube 影片"}
+            onClick={() => setPlaying(true)}
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              padding: 0,
+              border: 0,
+              background: "transparent",
+              cursor: "pointer",
+            }}
+          >
+            {!thumbFailed && (
+              <img
+                ref={(el) => {
+                  if (!el) return;
+                  el.style.setProperty("width", "100%", "important");
+                  el.style.setProperty("height", "100%", "important");
+                  el.style.setProperty("max-width", "none", "important");
+                  el.style.setProperty("max-height", "none", "important");
+                  el.style.setProperty("object-fit", "cover", "important");
+                  el.style.setProperty("margin", "0", "important");
+                }}
+                src={`https://i.ytimg.com/vi/${id}/hqdefault.jpg`}
+                alt=""
+                loading="lazy"
+                onError={() => setThumbFailed(true)}
+                style={{ position: "absolute", inset: 0, display: "block" }}
+              />
+            )}
+            <span
+              style={{
+                position: "absolute",
+                left: "50%",
+                top: "50%",
+                transform: "translate(-50%, -50%)",
+                width: 56,
+                height: 40,
+                borderRadius: 10,
+                background: "rgba(220, 38, 38, 0.92)",
+                color: "#fff",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 20,
+              }}
+            >
+              ▶
+            </span>
+          </button>
+        )}
+      </span>
+      <a
+        href={`https://www.youtube.com/watch?v=${id}`}
+        target="_blank"
+        rel="noreferrer noopener"
+        style={{ fontSize: 11 }}
+      >
+        在 YouTube 開啟{title ? `：${title}` : ""}
+      </a>
+    </span>
+  );
+}
+
+// ---- 卡片引用（@ 引用）狀態快取、開啟卡片通道與改名／刪除即時通知 ---- ----
 export type CardRefResolution =
   | { status: "ok"; title: string }
   | { status: "deleted" }
@@ -896,7 +996,15 @@ export function Markdown({
   const components = useMemo<React.ComponentProps<typeof ReactMarkdown>["components"]>(
     () => ({
       pre: ({ children }) => <>{children}</>,
-      p: ({ children }) => <p>{renderRichChildren(children)}</p>,
+      p: ({ children }) => {
+        // 整段只有一個 YouTube 網址：渲染成嵌入（沒有 remark-gfm，裸網址此時是單一字串）
+        const only = Children.toArray(children);
+        if (only.length === 1 && typeof only[0] === "string") {
+          const ytId = youtubeIdFromUrl(only[0].trim());
+          if (ytId) return <YouTubeEmbed id={ytId} title="" />;
+        }
+        return <p>{renderRichChildren(children)}</p>;
+      },
       h1: ({ children }) => <h1>{renderRichChildren(children)}</h1>,
       h2: ({ children }) => <h2>{renderRichChildren(children)}</h2>,
       h3: ({ children }) => <h3>{renderRichChildren(children)}</h3>,
@@ -924,6 +1032,8 @@ export function Markdown({
         const id = mediaIdFromSrc(typeof src === "string" ? src : undefined);
         const explicitWidth = parseAltWidth(alt);
         if (id) return <MediaEmbed explicitWidth={explicitWidth} id={id} />;
+        const ytId = youtubeIdFromUrl(typeof src === "string" ? src : undefined);
+        if (ytId) return <YouTubeEmbed id={ytId} title={typeof alt === "string" ? alt : ""} />;
         if (typeof src === "string" && src) {
           // 外部網址的圖片不載入（避免對外連線），顯示成一般連結
           return (

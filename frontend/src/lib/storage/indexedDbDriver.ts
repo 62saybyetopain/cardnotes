@@ -205,6 +205,7 @@ export class IndexedDbDriver implements StorageDriver {
 
     return {
       ...c,
+      sources: c.sources ?? [],
       tags,
       links,
       boards,
@@ -229,7 +230,7 @@ export class IndexedDbDriver implements StorageDriver {
 
   async patchCard(
     id: string,
-    patch: { title?: string; body?: string; card_type?: CardType; curation_status?: CurationStatus },
+    patch: { title?: string; body?: string; card_type?: CardType; curation_status?: CurationStatus; sources?: string[] },
     expected_updated_at: string,
   ): Promise<CardDetail> {
     const c = await db.cards.get(id);
@@ -245,6 +246,7 @@ export class IndexedDbDriver implements StorageDriver {
       body: patch.body !== undefined ? patch.body : c.body,
       card_type: patch.card_type !== undefined ? patch.card_type : c.card_type,
       curation_status: patch.curation_status !== undefined ? patch.curation_status : c.curation_status,
+      sources: patch.sources !== undefined ? patch.sources : c.sources,
       updated_at: utcNow(),
     };
 
@@ -909,6 +911,7 @@ export class IndexedDbDriver implements StorageDriver {
             body: c.body,
             card_type: c.card_type ?? "untyped",
             curation_status: c.curation_status ?? "inbox",
+            sources: c.sources ?? [],
             created_at: c.created_at || utcNow(),
             updated_at: c.updated_at || utcNow(),
           });

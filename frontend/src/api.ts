@@ -83,7 +83,7 @@ export const httpApi = {
     request<{ titles: Record<string, string> }>("GET", `/cards/titles${qs({ ids: ids.join(",") })}`),
   patchCard: (
     id: string,
-    patch: { title?: string; body?: string; card_type?: CardType; curation_status?: CurationStatus },
+    patch: { title?: string; body?: string; card_type?: CardType; curation_status?: CurationStatus; sources?: string[] },
     expected_updated_at: string,
   ) => request<CardDetail>("PATCH", `/cards/${id}`, { ...patch, expected_updated_at }),
   cardImpact: (id: string) => request<CardImpact>("GET", `/cards/${id}/impact`),

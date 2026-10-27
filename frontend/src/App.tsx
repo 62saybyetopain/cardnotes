@@ -1,4 +1,5 @@
 // @depends-on ./components/Markdown.tsx (CardOpenProvider, notifyCardDeleted, notifyCardTitleUpdated)
+// @depends-on ./components/RightPanel.tsx (Filter：loadSavedView 逐欄位白名單還原，Filter 新增欄位時要同步改，否則重整後該欄位會被丟掉)
 // @depends-on ./lib/device.ts (initDeviceEnvironment)
 // @depends-on ./components/IPadCardView.tsx (IPadCardView)
 // @depends-on ./components/Board.tsx (toolsSlot：App 工具列提供的容器，Board 以 createPortal 把「定位／自動對齊」渲染進去；toolsOpen 只控制容器的展開動畫)
@@ -15,6 +16,29 @@ import { initDeviceEnvironment } from "./lib/device";
 import { useNotify } from "./notify";
 import type { BoardLink, BoardSummary, CardDetail, CardSummary, RelationType, Tag } from "./types";
 
+const VIEW_KEY = "cardboard:view";
+type ViewMode = "board" | "graph" | "cards";
+
+// 還原重新整理前的白板、視圖與篩選；欄位型別不符一律丟棄，退回預設
+function loadSavedView(): { boardId: string | null; viewMode: ViewMode; filter: Filter } {
+  const view = { boardId: null as string | null, viewMode: "board" as ViewMode, filter: {} as Filter };
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEW_KEY) ?? "null");
+    if (!v || typeof v !== "object") return view;
+    if (typeof v.boardId === "string") view.boardId = v.boardId;
+    if (v.viewMode === "board" || v.viewMode === "graph" || v.viewMode === "cards") view.viewMode = v.viewMode;
+    const f = v.filter;
+    if (f && typeof f === "object") {
+      if (typeof f.tagId === "string") view.filter.tagId = f.tagId;
+      if (f.unclassified === true) view.filter.unclassified = true;
+      if (f.curationStatus === "inbox" || f.curationStatus === "curated") view.filter.curationStatus = f.curationStatus;
+    }
+  } catch {
+    /* localStorage 不可用或資料損毀時忽略 */
+  }
+  return view;
+}
+
 export default function App() {
   const { report, info } = useNotify();
   const boardRef = useRef<BoardHandle>(null);
@@ -23,13 +47,14 @@ export default function App() {
   const [unclassified, setUnclassified] = useState(0);
   const [inboxCount, setInboxCount] = useState(0);
   const [boards, setBoards] = useState<BoardSummary[]>([]);
-  const [boardId, setBoardId] = useState<string | null>(null);
+  const [initialView] = useState(loadSavedView);
+  const [boardId, setBoardId] = useState<string | null>(initialView.boardId);
   const [selected, setSelected] = useState<string | null>(null);
   const [previewCardId, setPreviewCardId] = useState<string | null>(null);
   const [centerEditing, setCenterEditing] = useState(false);
   const [pendingSmartPaste, setPendingSmartPaste] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"board" | "graph" | "cards">("board");
-  const [filter, setFilter] = useState<Filter>({});
+  const [viewMode, setViewMode] = useState<ViewMode>(initialView.viewMode);
+  const [filter, setFilter] = useState<Filter>(initialView.filter);
   const [tab, setTab] = useState<TabKey>("content");
   const [ipadCardList, setIpadCardList] = useState<CardSummary[]>([]);
   const [rightOpen, setRightOpen] = useState(true);
@@ -56,6 +81,14 @@ export default function App() {
   const [version, setVersion] = useState(0);
   const [booted, setBooted] = useState(false);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(VIEW_KEY, JSON.stringify({ boardId, viewMode, filter }));
+    } catch {
+      /* localStorage 無法寫入時忽略 */
+    }
+  }, [boardId, viewMode, filter]);
 
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
@@ -120,6 +153,8 @@ export default function App() {
     try {
       const r = await api.listTags();
       setTags(r.tags);
+      // 還原的篩選指向已不存在的標籤時清掉，否則會停在一份對不上的清單
+      setFilter((f) => (f.tagId && !r.tags.some((t) => t.id === f.tagId) ? {} : f));
       setUnclassified(r.unclassified_count);
       setInboxCount(r.inbox_count ?? 0);
     } catch (e) {
@@ -176,7 +211,6 @@ export default function App() {
     (id: string | null) => {
       setSelected(id);
       if (id) {
-        setRightOpen(true);
         if (!centerEditing) {
           setTab((t) => (t === "search" ? "content" : t));
         }
@@ -195,7 +229,6 @@ export default function App() {
     setSelected(id);
     setPendingSmartPaste(options?.smartPasteText ?? null);
     setCenterEditing(true);
-    setRightOpen(true);
     setTab("content");
   }, []);
 

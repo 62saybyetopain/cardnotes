@@ -1,5 +1,6 @@
 // @depends-on ./Editor.tsx (Editor 自動儲存後，onSaved 回傳的 CardDetail 至少含 title/body/updated_at；父層 card 快照必須同步這三項，否則 ContentTab.updateMeta 以舊版本號送出會 409，onReload 重建 Editor 時也會顯示舊內文)
-// @depends-on ../api.ts (patchCard 回傳值含 title/body/updated_at)
+// @depends-on ../api.ts (patchCard 回傳值含 title/body/updated_at/sources；onSaved 合併進父層 card 快照時也要帶 sources，否則出處欄會被舊值蓋回)
+// @depends-on ./SourcesField.tsx (onSave 失敗時必須 throw，元件靠這個判斷是否已儲存)
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { isSameAxisGroup, tagPath } from "../lib/tree";
@@ -25,6 +26,7 @@ import { Editor } from "./Editor";
 import { FacetPicker } from "./FacetPicker";
 import { Markdown } from "./Markdown";
 import { RelationBox } from "./RelationBox";
+import { SourcesField } from "./SourcesField";
 
 export interface Filter {
   tagId?: string;
@@ -119,7 +121,7 @@ export function CardEditorPane(props: {
       onSaved={(c) => {
         // Editor 自動儲存後，載入時的快照已落後伺服器：同步版本號與內容，
         // updateMeta 才不會以舊版本送出而 409，onReload 重建 Editor 時也會顯示已儲存的內容
-        setCard((cur) => (cur && cur.id === c.id ? { ...cur, title: c.title, body: c.body, updated_at: c.updated_at } : cur));
+        setCard((cur) => (cur && cur.id === c.id ? { ...cur, title: c.title, body: c.body, sources: c.sources, updated_at: c.updated_at } : cur));
         onSaved(c);
       }}
       onCardDeleted={onCardDeleted}
@@ -218,10 +220,11 @@ export function RightPanel(p: Props) {
             card={card}
             tags={p.tags}
             nonce={nonce}
+            hideTopToolbar={true}
             onReload={() => (setNonce((n) => n + 1), refetch())}
             onSaved={(c) => {
               // 同 CardEditorPane：快照要跟上 Editor 自動儲存後的版本與內容
-              setCard((cur) => (cur && cur.id === c.id ? { ...cur, title: c.title, body: c.body, updated_at: c.updated_at } : cur));
+              setCard((cur) => (cur && cur.id === c.id ? { ...cur, title: c.title, body: c.body, sources: c.sources, updated_at: c.updated_at } : cur));
               p.onSaved(c);
             }}
             onCardDeleted={p.onCardDeleted}
@@ -260,6 +263,7 @@ function ContentTab(props: {
   card: CardDetail;
   tags: Tag[];
   nonce: number;
+  hideTopToolbar?: boolean;
   initialSmartPaste?: string | null;
   onClearInitialSmartPaste?(): void;
   onReload(): void;
@@ -289,6 +293,18 @@ function ContentTab(props: {
       props.onReload();
     } catch (e) {
       report(e, "更新卡片狀態失敗");
+    }
+  };
+
+  // 失敗時回報後仍 throw，SourcesField 靠它判斷有沒有存成功；成功後比照 updateMeta 重建編輯器以同步版本號
+  const updateSources = async (next: string[]) => {
+    try {
+      const updated = await api.patchCard(card.id, { sources: next }, card.updated_at);
+      props.onSaved(updated);
+      props.onReload();
+    } catch (e) {
+      report(e, "儲存出處失敗");
+      throw e;
     }
   };
 
@@ -375,175 +391,242 @@ function ContentTab(props: {
     }
   };
 
+  const [metaCollapsed, setMetaCollapsed] = useState(true);
+
   return (
     <>
-      <div className="curation-bar">
-        <label className="curation-item" title="STEP 2：這張卡片本身屬於什麼知識型態？">
-          <span className="muted">型態：</span>
-          <select
-            value={card.card_type ?? "untyped"}
-            onChange={(e) => void updateMeta({ card_type: e.target.value as CardType })}
-            aria-label="卡片型態"
-          >
-            {(Object.entries(CARD_TYPE_LABELS) as [CardType, string][]).map(([k, label]) => (
-              <option key={k} value={k}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          padding: "4px 8px",
+          marginBottom: 6,
+          background: "var(--panel-sub, rgba(255, 255, 255, 0.03))",
+          borderRadius: 6,
+          border: "1px solid var(--line, #334155)",
+        }}
+      >
         <button
-          className={`curation-btn ${card.curation_status === "curated" ? "curated" : "inbox"}`}
-          onClick={() =>
-            void updateMeta({
-              curation_status: card.curation_status === "curated" ? "inbox" : "curated",
-            })
-          }
-          title="區分「尚未整理（收件夾）」與「已審視整理完成（即使目前不需額外標籤或連結）」"
-        >
-          {card.curation_status === "curated" ? "✓ 已整理" : "📥 待整理（點擊完成整理）"}
-        </button>
-      </div>
-
-      <div className="tag-section">
-        <div className="chips">
-          <span className="muted">收納位置：</span>
-          {locationTags.length === 0 && <span className="muted">未歸檔</span>}
-          {locationTags.map((t) => (
-            <span key={t.id} className="chip location">
-              📁 {tagPath(tags, t.id) || t.name}
-              <button aria-label={`移除位置 ${t.name}`} onClick={() => void unassign(t.id)}>
-                ✕
-              </button>
-            </span>
-          ))}
-          {allLocations.length > 0 && (
-            <select
-              className="loc-select"
-              value=""
-              onChange={(e) => e.target.value && void assignTagById(e.target.value)}
-              aria-label="選擇收納位置"
-            >
-              <option value="">＋歸入抽屜…</option>
-              {allLocations.map((loc) => (
-                <option key={loc.id} value={loc.id}>
-                  {tagPath(tags, loc.id)}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-
-        <div className="chips">
-          <span className="muted">概念標籤：</span>
-          {conceptTags.length === 0 && <span className="muted">無概念標籤</span>}
-          {conceptTags.map((t) => (
-            <span
-              key={t.id}
-              className="chip concept"
-              title={[t.facet ? `維度：${t.facet}` : "", t.definition ? `定義：${t.definition}` : ""].filter(Boolean).join("\n")}
-            >
-              {t.facet && <span className="facet-badge">{t.facet}</span>}
-              {t.name}
-              <button aria-label={`移除標籤 ${t.name}`} onClick={() => void unassign(t.id)}>
-                ✕
-              </button>
-            </span>
-          ))}
-        </div>
-      </div>
-
-      <div className="tag-pick">
-        <input
-          list="all-tags"
-          value={pick}
-          placeholder="輸入概念或別名（自動解析同義詞、提示相似概念）"
-          onChange={(e) => {
-            setPick(e.target.value);
-            if (resolution) setResolution(null);
-            if (creatingNew) setCreatingNew(false);
+          type="button"
+          onClick={() => setMetaCollapsed((v) => !v)}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            padding: 0,
+            fontSize: 12,
+            fontWeight: 600,
+            color: "var(--text)",
           }}
-          onKeyDown={(e) => e.key === "Enter" && void resolveAndAssign()}
-          aria-label="加入標籤"
-        />
-        <datalist id="all-tags">
-          {tags.map((t) => (
-            <option
-              key={t.id}
-              value={isSameAxisGroup(t.axis, "location") ? tagPath(tags, t.id) : t.name}
-              label={
-                [t.facet ? `[${t.facet}]` : "", t.aliases?.length ? `別名: ${t.aliases.join(",")}` : ""]
-                  .filter(Boolean)
-                  .join(" ")
-              }
-            />
-          ))}
-        </datalist>
-        <button onClick={() => void resolveAndAssign()}>加入</button>
+          title={metaCollapsed ? "展開卡片型態、抽屜、標籤與刪除設定" : "收合卡片型態、抽屜、標籤與刪除設定"}
+        >
+          <span>{metaCollapsed ? "▸ 展開型態與收納位置" : "▾ 收合型態與收納位置"}</span>
+        </button>
+        {metaCollapsed && (
+          <span
+            className="muted"
+            style={{
+              fontSize: 11,
+              maxWidth: 240,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {CARD_TYPE_LABELS[card.card_type ?? "untyped"]} · {locationTags.map((t) => tagPath(tags, t.id) || t.name).join(", ") || "未歸檔"}
+          </span>
+        )}
       </div>
 
-      {resolution && (resolution.status === "ambiguous" || resolution.status === "similar") && (
-        <div className="resolve-box">
-          <div className="resolve-title">
-            {resolution.status === "ambiguous"
-              ? `發現同名但不同維度的概念「${pick.trim()}」，請選擇正確語意：`
-              : `找到與「${pick.trim()}」相似的既有概念（優先重用既有標籤）：`}
-          </div>
-          <ul className="plain resolve-list">
-            {resolution.candidates.map((cand) => (
-              <li key={cand.id} className="resolve-item">
-                <button className="resolve-pick" onClick={() => void assignTagById(cand.id)}>
-                  {cand.facet && <span className="facet-badge">{cand.facet}</span>}
-                  <strong>{cand.name}</strong>
-                  {cand.aliases && cand.aliases.length > 0 && (
-                    <span className="muted">（別名：{cand.aliases.join("、")}）</span>
-                  )}
-                  {cand.definition && <div className="resolve-def">{cand.definition}</div>}
-                </button>
-              </li>
-            ))}
-          </ul>
-          <div className="resolve-actions">
-            <button onClick={() => setCreatingNew(true)}>都不是，建立新概念「{pick.trim()}」</button>
-            <button onClick={() => setResolution(null)}>取消</button>
-          </div>
-        </div>
-      )}
-
-      {creatingNew && pick.trim() && (
-        <div className="resolve-box">
-          <div className="resolve-title">建立新概念標籤：「{pick.trim()}」</div>
-          <FacetPicker value={newFacet} onChange={setNewFacet} />
-          <div className="field-row">
-            <span className="muted">簡短定義（選填）：</span>
-            <input
-              value={newDef}
-              onChange={(e) => setNewDef(e.target.value)}
-              placeholder="一句話定義此概念，避免未來與其他標籤混淆"
-            />
-          </div>
-          <div className="resolve-actions">
-            <button className="primary" onClick={() => void createAndAssignConcept()}>
-              建立並套用
+      {!metaCollapsed && (
+        <div className="card-meta-collapsible" style={{ marginBottom: 10 }}>
+          <div className="curation-bar">
+            <label className="curation-item" title="STEP 2：這張卡片本身屬於什麼知識型態？">
+              <span className="muted">型態：</span>
+              <select
+                value={card.card_type ?? "untyped"}
+                onChange={(e) => void updateMeta({ card_type: e.target.value as CardType })}
+                aria-label="卡片型態"
+              >
+                {(Object.entries(CARD_TYPE_LABELS) as [CardType, string][]).map(([k, label]) => (
+                  <option key={k} value={k}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              className={`curation-btn ${card.curation_status === "curated" ? "curated" : "inbox"}`}
+              onClick={() =>
+                void updateMeta({
+                  curation_status: card.curation_status === "curated" ? "inbox" : "curated",
+                })
+              }
+              title="區分「尚未整理（收件夾）」與「已審視整理完成（即使目前不需額外標籤或連結）」"
+            >
+              {card.curation_status === "curated" ? "✓ 已整理" : "📥 待整理（點擊完成整理）"}
             </button>
-            <button onClick={() => (setCreatingNew(false), setResolution(null))}>暫不建立</button>
+          </div>
+
+          <div className="tag-section">
+            <div className="chips">
+              <span className="muted">收納位置：</span>
+              {locationTags.length === 0 && <span className="muted">未歸檔</span>}
+              {locationTags.map((t) => (
+                <span key={t.id} className="chip location">
+                  📁 {tagPath(tags, t.id) || t.name}
+                  <button aria-label={`移除位置 ${t.name}`} onClick={() => void unassign(t.id)}>
+                    ✕
+                  </button>
+                </span>
+              ))}
+              {allLocations.length > 0 && (
+                <select
+                  className="loc-select"
+                  value=""
+                  onChange={(e) => e.target.value && void assignTagById(e.target.value)}
+                  aria-label="選擇收納位置"
+                >
+                  <option value="">＋歸入抽屜…</option>
+                  {allLocations.map((loc) => (
+                    <option key={loc.id} value={loc.id}>
+                      {tagPath(tags, loc.id)}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            <div className="chips">
+              <span className="muted">概念標籤：</span>
+              {conceptTags.length === 0 && <span className="muted">無概念標籤</span>}
+              {conceptTags.map((t) => (
+                <span
+                  key={t.id}
+                  className="chip concept"
+                  title={[t.facet ? `維度：${t.facet}` : "", t.definition ? `定義：${t.definition}` : ""].filter(Boolean).join("\n")}
+                >
+                  {t.facet && <span className="facet-badge">{t.facet}</span>}
+                  {t.name}
+                  <button aria-label={`移除標籤 ${t.name}`} onClick={() => void unassign(t.id)}>
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="tag-pick">
+            <input
+              list="all-tags"
+              value={pick}
+              placeholder="輸入概念或別名（自動解析同義詞、提示相似概念）"
+              onChange={(e) => {
+                setPick(e.target.value);
+                if (resolution) setResolution(null);
+                if (creatingNew) setCreatingNew(false);
+              }}
+              onKeyDown={(e) => e.key === "Enter" && void resolveAndAssign()}
+              aria-label="加入標籤"
+            />
+            <datalist id="all-tags">
+              {tags.map((t) => (
+                <option
+                  key={t.id}
+                  value={isSameAxisGroup(t.axis, "location") ? tagPath(tags, t.id) : t.name}
+                  label={
+                    [t.facet ? `[${t.facet}]` : "", t.aliases?.length ? `別名: ${t.aliases.join(",")}` : ""]
+                      .filter(Boolean)
+                      .join(" ")
+                  }
+                />
+              ))}
+            </datalist>
+            <button onClick={() => void resolveAndAssign()}>加入</button>
+          </div>
+
+          {resolution && (resolution.status === "ambiguous" || resolution.status === "similar") && (
+            <div className="resolve-box">
+              <div className="resolve-title">
+                {resolution.status === "ambiguous"
+                  ? `發現同名但不同維度的概念「${pick.trim()}」，請選擇正確語意：`
+                  : `找到與「${pick.trim()}」相似的既有概念（優先重用既有標籤）：`}
+              </div>
+              <ul className="plain resolve-list">
+                {resolution.candidates.map((cand) => (
+                  <li key={cand.id} className="resolve-item">
+                    <button className="resolve-pick" onClick={() => void assignTagById(cand.id)}>
+                      {cand.facet && <span className="facet-badge">{cand.facet}</span>}
+                      <strong>{cand.name}</strong>
+                      {cand.aliases && cand.aliases.length > 0 && (
+                        <span className="muted">（別名：{cand.aliases.join("、")}）</span>
+                      )}
+                      {cand.definition && <div className="resolve-def">{cand.definition}</div>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <div className="resolve-actions">
+                <button onClick={() => setCreatingNew(true)}>都不是，建立新概念「{pick.trim()}」</button>
+                <button onClick={() => setResolution(null)}>取消</button>
+              </div>
+            </div>
+          )}
+
+          {creatingNew && pick.trim() && (
+            <div className="resolve-box">
+              <div className="resolve-title">建立新概念標籤：「{pick.trim()}」</div>
+              <FacetPicker value={newFacet} onChange={setNewFacet} />
+              <div className="field-row">
+                <span className="muted">簡短定義（選填）：</span>
+                <input
+                  value={newDef}
+                  onChange={(e) => setNewDef(e.target.value)}
+                  placeholder="一句話定義此概念，避免未來與其他標籤混淆"
+                />
+              </div>
+              <div className="resolve-actions">
+                <button className="primary" onClick={() => void createAndAssignConcept()}>
+                  建立並套用
+                </button>
+                <button onClick={() => (setCreatingNew(false), setResolution(null))}>暫不建立</button>
+              </div>
+            </div>
+          )}
+
+          <SourcesField key={card.id} sources={card.sources ?? []} onSave={updateSources} />
+
+          <RelationBox
+            key={card.id}
+            card={card}
+            tags={tags}
+            onAssignBridgeTag={assignTagById}
+            onSelectCard={props.onSelectCard}
+            report={report}
+            info={info}
+          />
+
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+            <button
+              className="danger"
+              style={{ fontSize: 12, padding: "3px 10px", marginTop: 0 }}
+              onClick={() => void remove()}
+              title="永久刪除此卡片本體"
+            >
+              🗑️ 刪除卡片…
+            </button>
           </div>
         </div>
       )}
-
-      <RelationBox
-        key={card.id}
-        card={card}
-        tags={tags}
-        onAssignBridgeTag={assignTagById}
-        onSelectCard={props.onSelectCard}
-        report={report}
-        info={info}
-      />
 
       <Editor
         key={`${card.id}:${props.nonce}`}
         card={card}
+        hideTopToolbar={props.hideTopToolbar}
         initialSmartPaste={props.initialSmartPaste}
         onClearInitialSmartPaste={props.onClearInitialSmartPaste}
         onSaved={props.onSaved}
@@ -552,9 +635,6 @@ function ContentTab(props: {
         onOpenCard={props.onSelectCard}
         report={report}
       />
-      <button className="danger" onClick={() => void remove()}>
-        刪除卡片…
-      </button>
     </>
   );
 }

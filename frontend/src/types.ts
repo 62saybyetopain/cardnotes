@@ -204,6 +204,7 @@ export interface CardDetail {
   curation_status?: CurationStatus;
   updated_at: string;
   created_at: string;
+  sources?: string[]; // 出處（多筆）；舊資料沒有此欄時視為 []
   tags: Tag[];
   links: CardLink[];
   boards: { id: string; name: string }[];

@@ -37,6 +37,7 @@ type Status = "saved" | "dirty" | "saving" | "error" | "conflict";
 interface Props {
   card: CardDetail;
   compact?: boolean;
+  hideTopToolbar?: boolean;
   initialSmartPaste?: string | null;
   onClearInitialSmartPaste?(): void;
   onSaved(card: CardDetail): void;
@@ -144,7 +145,7 @@ const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
   { type: "h3", label: "標題 3" },
 ];
 
-export function Editor({ card, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, report }: Props) {
+export function Editor({ card, compact = false, hideTopToolbar = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, report }: Props) {
   const [title, setTitle] = useState(card.title);
   const [body, setBody] = useState(() => normalizeNewlines(card.body));
   const [cursorPos, setCursorPos] = useState(0);
@@ -158,6 +159,45 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
     replaceTo: number;
     initialQuery: string;
   } | null>(null);
+
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const [lineMenu, setLineMenu] = useState<{ segStart: number; lineTop: number; lineBottom: number } | null>(null);
+
+  const checkScrollBottom = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const diff = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowScrollBottom(diff > 80);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, []);
+
+  useEffect(() => {
+    checkScrollBottom();
+  }, [body, checkScrollBottom]);
+
+  useEffect(() => {
+    if (!lineMenu) return;
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest(".floating-line-toolbar") || target?.closest(".line-gutter-btn")) return;
+      setLineMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setLineMenu(null);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [lineMenu]);
 
   const versionRef = useRef(card.updated_at);
   const latest = useRef({ title: card.title, body: normalizeNewlines(card.body) });
@@ -427,6 +467,186 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
     .filter((w) => w.code === "MISSING_CARD")
     .reduce((n, w) => n + w.ids.length, 0);
 
+  const renderFormatControls = () => (
+    <>
+      {LINE_TYPE_BUTTONS.map((btn) => (
+        <button
+          key={btn.type}
+          type="button"
+          className={currentLineType === btn.type ? "on" : ""}
+          aria-pressed={currentLineType === btn.type}
+          onClick={() => handleToolbarLineType(btn.type)}
+        >
+          {btn.label}
+        </button>
+      ))}
+
+      {/* 項目符號（主按鈕＋5 種樣式選單） */}
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
+        <button
+          type="button"
+          className={currentLineType === "ul" ? "on" : ""}
+          aria-pressed={currentLineType === "ul"}
+          onClick={() => handleToolbarLineType("ul", { bulletStyle: activeBulletStyle })}
+          title="套用或取消項目符號"
+        >
+          項目符號
+        </button>
+        <select
+          value={activeBulletStyle}
+          aria-label="選擇項目符號樣式"
+          title="切換項目符號樣式（• / ◦ / ▪ / ▸ / ✓）"
+          style={{ padding: "2px 2px", fontSize: 12, maxWidth: 54 }}
+          onChange={(e) => {
+            const next = e.target.value as BulletStyle;
+            setBulletStyle(next);
+            handleToolbarLineType("ul", { bulletStyle: next });
+          }}
+        >
+          {BULLET_STYLE_OPTIONS.map((o) => (
+            <option key={o.style} value={o.style}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </span>
+
+      {/* 編號清單（主按鈕＋5 種樣式選單） */}
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
+        <button
+          type="button"
+          className={currentLineType === "ol" ? "on" : ""}
+          aria-pressed={currentLineType === "ol"}
+          onClick={() => handleToolbarLineType("ol", { orderedStyle: activeOrderedStyle })}
+          title="套用或取消編號清單"
+        >
+          編號
+        </button>
+        <select
+          value={activeOrderedStyle}
+          aria-label="選擇編號清單樣式"
+          title="切換編號樣式（1. / (1) / a. / A. / i.）"
+          style={{ padding: "2px 2px", fontSize: 12, maxWidth: 58 }}
+          onChange={(e) => {
+            const next = e.target.value as OrderedStyle;
+            setOrderedStyle(next);
+            handleToolbarLineType("ol", { orderedStyle: next });
+          }}
+        >
+          {ORDERED_STYLE_OPTIONS.map((o) => (
+            <option key={o.style} value={o.style}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </span>
+
+      <button
+        type="button"
+        onClick={() => handleToolbarIndent(1)}
+        disabled={currentLineType !== "ul" && currentLineType !== "ol"}
+      >
+        縮排
+      </button>
+      <button
+        type="button"
+        onClick={() => handleToolbarIndent(-1)}
+        disabled={currentLineType !== "ul" && currentLineType !== "ol"}
+      >
+        取消縮排
+      </button>
+
+      {/* 粗體與底線 */}
+      <button
+        type="button"
+        onClick={() => handleToolbarInlineWrap("**", "粗體文字")}
+        title="粗體 (**文字**，快捷鍵 Ctrl+B)"
+        style={{ fontWeight: 700 }}
+      >
+        B 粗體
+      </button>
+      <button
+        type="button"
+        onClick={() => handleToolbarInlineWrap("++", "底線文字")}
+        title="底線 (++文字++，快捷鍵 Ctrl+U)"
+        style={{ textDecoration: "underline" }}
+      >
+        U 底線
+      </button>
+
+      {/* 螢光筆重點（主按鈕＋5 種深色主題色點＋清除） */}
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          padding: "1px 6px",
+          borderRadius: 6,
+          border: "1px solid var(--line, #334155)",
+          background: "var(--bg)",
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => handleToolbarHighlight(highlightColor)}
+          title={`套用或取消螢光筆（目前顏色：${activeHighlightMeta.label}）`}
+          style={{
+            border: "none",
+            background: "transparent",
+            padding: "1px 4px",
+            borderBottom: `3px solid ${activeHighlightMeta.dotColor}`,
+            cursor: "pointer",
+          }}
+        >
+          🖍 螢光筆
+        </button>
+        {HIGHLIGHT_COLOR_OPTIONS.map((c) => (
+          <button
+            key={c.color}
+            type="button"
+            aria-label={`螢光筆：${c.label}`}
+            title={`螢光筆：${c.label}（選取文字後點擊直接套用或換色）`}
+            onClick={() => handleToolbarHighlight(c.color)}
+            style={{
+              width: 14,
+              height: 14,
+              padding: 0,
+              borderRadius: "50%",
+              background: c.dotColor,
+              border:
+                highlightColor === c.color
+                  ? "2px solid var(--text)"
+                  : "1px solid var(--line)",
+              cursor: "pointer",
+            }}
+          />
+        ))}
+        <button
+          type="button"
+          onClick={() => handleToolbarHighlight(null)}
+          title="移除選取文字的螢光筆標記"
+          style={{ fontSize: 11, padding: "0 4px", cursor: "pointer" }}
+        >
+          ✕
+        </button>
+      </span>
+
+      <button type="button" onClick={openMentionFromToolbar}>
+        @ 引用
+      </button>
+      <button type="button" onClick={insertCodeBlock} title="在卡片中插入可命名的代碼區塊">
+        ＋ 代碼塊
+      </button>
+      <button
+        type="button"
+        onClick={() => setCodePatchOpen(true)}
+        title="對卡片內的代碼塊或外部代碼執行精確定位與自動取代"
+      >
+        定位取代
+      </button>
+    </>
+  );
+
   return (
     <div className="editor">
       <div className="editor-head">
@@ -440,6 +660,25 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
         <span className={`status ${status}`} data-testid="save-status">
           {uploading > 0 ? `上傳中（${uploading}）…` : STATUS_TEXT[status]}
         </span>
+        {hideTopToolbar && (
+          <button
+            type="button"
+            className={`preview-toggle-btn${previewing ? " on" : ""}`}
+            style={{ fontSize: 11, padding: "2px 8px", marginLeft: 6 }}
+            onClick={() => {
+              setPreviewing((p) => {
+                const next = !p;
+                if (next) {
+                  setMentionState(null);
+                  setLineMenu(null);
+                }
+                return next;
+              });
+            }}
+          >
+            {previewing ? "✎ 返回編輯" : "👁 預覽"}
+          </button>
+        )}
       </div>
       {status === "conflict" && (
         <div className="banner danger" role="alert">
@@ -465,210 +704,37 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
         </div>
       )}
 
-      <div
-        className="editor-toolbar"
-        role="toolbar"
-        aria-label="格式與引用工具列"
-        onMouseDown={(e) => {
-          // 防止點擊工具列導致輸入框失去焦點與選取範圍
-          if ((e.target as HTMLElement).tagName !== "SELECT" && (e.target as HTMLElement).tagName !== "INPUT") {
-            e.preventDefault();
-          }
-        }}
-      >
-        {!previewing && (
-          <>
-            {LINE_TYPE_BUTTONS.map((btn) => (
-              <button
-                key={btn.type}
-                type="button"
-                className={currentLineType === btn.type ? "on" : ""}
-                aria-pressed={currentLineType === btn.type}
-                onClick={() => handleToolbarLineType(btn.type)}
-              >
-                {btn.label}
-              </button>
-            ))}
-
-            {/* 項目符號（主按鈕＋5 種樣式選單） */}
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
-              <button
-                type="button"
-                className={currentLineType === "ul" ? "on" : ""}
-                aria-pressed={currentLineType === "ul"}
-                onClick={() => handleToolbarLineType("ul", { bulletStyle: activeBulletStyle })}
-                title="套用或取消項目符號"
-              >
-                項目符號
-              </button>
-              <select
-                value={activeBulletStyle}
-                aria-label="選擇項目符號樣式"
-                title="切換項目符號樣式（• / ◦ / ▪ / ▸ / ✓）"
-                style={{ padding: "2px 2px", fontSize: 12, maxWidth: 54 }}
-                onChange={(e) => {
-                  const next = e.target.value as BulletStyle;
-                  setBulletStyle(next);
-                  handleToolbarLineType("ul", { bulletStyle: next });
-                }}
-              >
-                {BULLET_STYLE_OPTIONS.map((o) => (
-                  <option key={o.style} value={o.style}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </span>
-
-            {/* 編號清單（主按鈕＋5 種樣式選單） */}
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
-              <button
-                type="button"
-                className={currentLineType === "ol" ? "on" : ""}
-                aria-pressed={currentLineType === "ol"}
-                onClick={() => handleToolbarLineType("ol", { orderedStyle: activeOrderedStyle })}
-                title="套用或取消編號清單"
-              >
-                編號
-              </button>
-              <select
-                value={activeOrderedStyle}
-                aria-label="選擇編號清單樣式"
-                title="切換編號樣式（1. / (1) / a. / A. / i.）"
-                style={{ padding: "2px 2px", fontSize: 12, maxWidth: 58 }}
-                onChange={(e) => {
-                  const next = e.target.value as OrderedStyle;
-                  setOrderedStyle(next);
-                  handleToolbarLineType("ol", { orderedStyle: next });
-                }}
-              >
-                {ORDERED_STYLE_OPTIONS.map((o) => (
-                  <option key={o.style} value={o.style}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </span>
-
-            <button
-              type="button"
-              onClick={() => handleToolbarIndent(1)}
-              disabled={currentLineType !== "ul" && currentLineType !== "ol"}
-            >
-              縮排
-            </button>
-            <button
-              type="button"
-              onClick={() => handleToolbarIndent(-1)}
-              disabled={currentLineType !== "ul" && currentLineType !== "ol"}
-            >
-              取消縮排
-            </button>
-
-            {/* 粗體與底線 */}
-            <button
-              type="button"
-              onClick={() => handleToolbarInlineWrap("**", "粗體文字")}
-              title="粗體 (**文字**，快捷鍵 Ctrl+B)"
-              style={{ fontWeight: 700 }}
-            >
-              B 粗體
-            </button>
-            <button
-              type="button"
-              onClick={() => handleToolbarInlineWrap("++", "底線文字")}
-              title="底線 (++文字++，快捷鍵 Ctrl+U)"
-              style={{ textDecoration: "underline" }}
-            >
-              U 底線
-            </button>
-
-            {/* 螢光筆重點（主按鈕＋5 種深色主題色點＋清除） */}
-            <span
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-                padding: "1px 6px",
-                borderRadius: 6,
-                border: "1px solid var(--line, #334155)",
-                background: "var(--bg)",
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => handleToolbarHighlight(highlightColor)}
-                title={`套用或取消螢光筆（目前顏色：${activeHighlightMeta.label}）`}
-                style={{
-                  border: "none",
-                  background: "transparent",
-                  padding: "1px 4px",
-                  borderBottom: `3px solid ${activeHighlightMeta.dotColor}`,
-                  cursor: "pointer",
-                }}
-              >
-                🖍 螢光筆
-              </button>
-              {HIGHLIGHT_COLOR_OPTIONS.map((c) => (
-                <button
-                  key={c.color}
-                  type="button"
-                  aria-label={`螢光筆：${c.label}`}
-                  title={`螢光筆：${c.label}（選取文字後點擊直接套用或換色）`}
-                  onClick={() => handleToolbarHighlight(c.color)}
-                  style={{
-                    width: 14,
-                    height: 14,
-                    padding: 0,
-                    borderRadius: "50%",
-                    background: c.dotColor,
-                    border:
-                      highlightColor === c.color
-                        ? "2px solid var(--text)"
-                        : "1px solid var(--line)",
-                    cursor: "pointer",
-                  }}
-                />
-              ))}
-              <button
-                type="button"
-                onClick={() => handleToolbarHighlight(null)}
-                title="移除選取文字的螢光筆標記"
-                style={{ fontSize: 11, padding: "0 4px", cursor: "pointer" }}
-              >
-                ✕
-              </button>
-            </span>
-
-            <button type="button" onClick={openMentionFromToolbar}>
-              @ 引用
-            </button>
-            <button type="button" onClick={insertCodeBlock} title="在卡片中插入可命名的代碼區塊">
-              ＋ 代碼塊
-            </button>
-            <button
-              type="button"
-              onClick={() => setCodePatchOpen(true)}
-              title="對卡片內的代碼塊或外部代碼執行精確定位與自動取代"
-            >
-              定位取代
-            </button>
-          </>
-        )}
-        <button
-          type="button"
-          className={`preview-toggle-btn${previewing ? " on" : ""}`}
-          onClick={() => {
-            setPreviewing((p) => {
-              const next = !p;
-              if (next) setMentionState(null);
-              return next;
-            });
+      {!hideTopToolbar && (
+        <div
+          className="editor-toolbar"
+          role="toolbar"
+          aria-label="格式與引用工具列"
+          onMouseDown={(e) => {
+            // 防止點擊工具列導致輸入框失去焦點與選取範圍
+            if ((e.target as HTMLElement).tagName !== "SELECT" && (e.target as HTMLElement).tagName !== "INPUT") {
+              e.preventDefault();
+            }
           }}
         >
-          {previewing ? "✎ 返回編輯" : "👁 預覽"}
-        </button>
-      </div>
+          {!previewing && renderFormatControls()}
+          <button
+            type="button"
+            className={`preview-toggle-btn${previewing ? " on" : ""}`}
+            onClick={() => {
+              setPreviewing((p) => {
+                const next = !p;
+                if (next) {
+                  setMentionState(null);
+                  setLineMenu(null);
+                }
+                return next;
+              });
+            }}
+          >
+            {previewing ? "✎ 返回編輯" : "👁 預覽"}
+          </button>
+        </div>
+      )}
 
       {!previewing && mentionState && (
         <MentionPopup
@@ -699,156 +765,312 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
         />
       )}
 
-      {!previewing ? (
-        (() => {
-          const segments = splitBodySegments(body);
-          return (
-            <div className="live-editor" style={compact ? { minHeight: 120 } : undefined}>
-              {segments.map((seg, idx) => {
-                if (seg.kind === "media") {
+      <div
+        ref={scrollContainerRef}
+        className="editor-content-scroll"
+        onScroll={checkScrollBottom}
+        style={{
+          position: "relative",
+          maxHeight: compact ? 260 : "calc(100vh - 280px)",
+          minHeight: compact ? 120 : 320,
+          overflowY: "auto",
+          overflowX: "hidden",
+        }}
+      >
+        {!previewing ? (
+          (() => {
+            const segments = splitBodySegments(body);
+            return (
+            <div
+              className="live-editor"
+              style={{
+                minHeight: compact ? 120 : 320,
+                paddingLeft: 26,
+                cursor: "text",
+                display: "flex",
+                flexDirection: "column",
+                position: "relative",
+              }}
+                onClick={(e) => {
+                  if (e.target === e.currentTarget) {
+                    const allTextSegs = segments.filter((s): s is Extract<BodySegment, { kind: "text" }> => s.kind === "text");
+                    const lastText = allTextSegs[allTextSegs.length - 1];
+                    if (lastText) {
+                      const h = segRefs.current.get(lastText.start);
+                      if (h) {
+                        textRef.current = h;
+                        h.focus();
+                        h.setSelection(lastText.text.length, lastText.text.length);
+                      }
+                    }
+                  }
+                }}
+                onDragOver={(e) => {
+                  if (e.dataTransfer.types.includes("Files")) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "copy";
+                  }
+                }}
+                onDrop={(e) => {
+                  const dt = e.dataTransfer;
+                  if (!dt || !dt.files.length) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const files = takeFiles(dt.files);
+                  if (files.length) {
+                    void uploadFiles(files, latest.current.body.length);
+                  }
+                }}
+              >
+                {lineMenu && (() => {
+                  const isAbove = lineMenu.lineTop >= 75;
                   return (
                     <div
-                      key={`media-${seg.mediaId}-${seg.rawStart}`}
+                      className="editor-toolbar floating-line-toolbar"
+                      role="toolbar"
+                      aria-label="行內浮動格式工具列"
                       style={{
-                        padding: "4px 6px",
-                        borderRadius: 6,
-                        background: "var(--bg)",
-                        border: "1px solid var(--line, #334155)",
-                      }}
+                        position: "absolute",
+                        left: 26,
+                        right: 10,
+                        top: isAbove ? lineMenu.lineTop - 6 : lineMenu.lineBottom + 6,
+                        transform: isAbove ? "translateY(-100%)" : undefined,
+                        zIndex: 30,
+                      display: "flex",
+                      flexWrap: "wrap",
+                      alignItems: "center",
+                      gap: 4,
+                      padding: "6px 8px",
+                      background: "var(--panel, #1e293b)",
+                      border: "1px solid var(--line, #475569)",
+                      borderRadius: 6,
+                      boxShadow: "0 4px 14px rgba(0, 0, 0, 0.28)",
+                    }}
+                    onMouseDown={(e) => {
+                      if ((e.target as HTMLElement).tagName !== "SELECT" && (e.target as HTMLElement).tagName !== "INPUT") {
+                        e.preventDefault();
+                      }
+                    }}
+                  >
+                    {renderFormatControls()}
+                    <button
+                      type="button"
+                      style={{ marginLeft: "auto", padding: "2px 6px", color: "var(--muted)" }}
+                      onClick={() => setLineMenu(null)}
+                      title="關閉浮動工具列"
                     >
-                      <MediaEmbed
-                        id={seg.mediaId}
-                        explicitWidth={seg.explicitWidth}
-                        onChangeWidth={(w) => {
-                          const { baseAlt } = extractWidthFromAlt(seg.alt);
-                          const nextToken = `![${baseAlt}|${w}](media:${seg.mediaId})`;
-                          const cur = latest.current.body;
-                          onBody(cur.slice(0, seg.rawStart) + nextToken + cur.slice(seg.rawEnd));
-                        }}
-                        onRemove={() => {
-                          const cur = latest.current.body;
-                          onBody(cur.slice(0, seg.removeStart) + cur.slice(seg.removeEnd));
-                        }}
-                      />
-                    </div>
+                      ✕
+                    </button>
+                  </div>
                   );
-                }
+                })()}
 
-                return (
-                  <LiveSegmentEditor
-                    key={`text-${idx}`}
-                    ref={(h) => {
-                      if (h) {
-                        segRefs.current.set(seg.start, h);
-                        if (idx === 0 && !textRef.current) textRef.current = h;
-                      } else {
-                        segRefs.current.delete(seg.start);
-                      }
-                    }}
-                    value={seg.text}
-                    start={seg.start}
-                    placeholder={
-                      idx === 0
-                        ? "內文（Markdown）。可直接貼上或拖入圖片、影片，或輸入 @ 引用其他卡片。"
-                        : "繼續輸入段落內容（支援 Markdown 語法）…"
-                    }
-                    ariaLabel={idx === 0 ? "卡片內文" : `卡片內文段落 ${idx + 1}`}
-                    onFocus={() => {
-                      const h = segRefs.current.get(seg.start);
-                      if (h) textRef.current = h;
-                    }}
-                    onSelectionChange={(from) => setCursorPos(seg.start + from)}
-                    onDocChange={(val, prevLen, cursor) => {
-                      // prevLen 是變動前的段落長度：不依賴渲染時的 seg.end，連續兩次變動也不會用到過期範圍
-                      const cur = latest.current.body;
-                      const prevBodyLen = cur.length;
-                      const nextBody = cur.slice(0, seg.start) + val + cur.slice(seg.start + prevLen);
-                      const globalPos = seg.start + cursor;
-                      onBody(nextBody);
-                      setCursorPos(globalPos);
-                      if (nextBody.length >= prevBodyLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
-                        const trig = detectAtTrigger(nextBody, globalPos);
-                        if (trig && trig.query === "") {
-                          setMentionState({
-                            replaceFrom: trig.atIndex,
-                            replaceTo: globalPos,
-                            initialQuery: "",
-                          });
+                {segments.map((seg, idx) => {
+                  if (seg.kind === "media") {
+                    return (
+                      <div
+                        key={`media-${seg.mediaId}-${seg.rawStart}`}
+                        style={{
+                          margin: "6px 0",
+                          padding: "4px 6px",
+                          borderRadius: 6,
+                          background: "var(--bg)",
+                          border: "1px solid var(--line, #334155)",
+                        }}
+                      >
+                        <MediaEmbed
+                          id={seg.mediaId}
+                          explicitWidth={seg.explicitWidth}
+                          onChangeWidth={(w) => {
+                            const { baseAlt } = extractWidthFromAlt(seg.alt);
+                            const nextToken = `![${baseAlt}|${w}](media:${seg.mediaId})`;
+                            const cur = latest.current.body;
+                            onBody(cur.slice(0, seg.rawStart) + nextToken + cur.slice(seg.rawEnd));
+                          }}
+                          onRemove={() => {
+                            const cur = latest.current.body;
+                            onBody(cur.slice(0, seg.removeStart) + cur.slice(seg.removeEnd));
+                          }}
+                        />
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <LiveSegmentEditor
+                      key={`text-${idx}`}
+                      ref={(h) => {
+                        if (h) {
+                          segRefs.current.set(seg.start, h);
+                          if (idx === 0 && !textRef.current) textRef.current = h;
+                        } else {
+                          segRefs.current.delete(seg.start);
                         }
+                      }}
+                      value={seg.text}
+                      start={seg.start}
+                      placeholder={
+                        idx === 0
+                          ? "內文（Markdown）。可直接貼上或拖入圖片、影片，或輸入 @ 引用其他卡片。"
+                          : "繼續輸入段落內容（支援 Markdown 語法）…"
                       }
-                    }}
-                    onKeyDown={(e, from, to) => {
-                      if (e.isComposing || e.keyCode === 229) return false;
-                      const gStart = seg.start + from;
-                      const gEnd = seg.start + to;
-                      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
-                        const k = e.key.toLowerCase();
-                        if (k === "b") {
-                          applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "**", "粗體文字"));
+                      ariaLabel={idx === 0 ? "卡片內文" : `卡片內文段落 ${idx + 1}`}
+                      onFocus={() => {
+                        const h = segRefs.current.get(seg.start);
+                        if (h) textRef.current = h;
+                      }}
+                      onSelectionChange={(from) => setCursorPos(seg.start + from)}
+                      onToggleLineMenu={(rect) => {
+                        setLineMenu((cur) =>
+                          cur && cur.segStart === seg.start && Math.abs(cur.lineTop - rect.lineTop) < 4
+                            ? null
+                            : { segStart: seg.start, lineTop: rect.lineTop, lineBottom: rect.lineBottom },
+                        );
+                      }}
+                      onDocChange={(val, prevLen, cursor) => {
+                        setLineMenu(null);
+                        // prevLen 是變動前的段落長度：不依賴渲染時的 seg.end，連續兩次變動也不會用到過期範圍
+                        const cur = latest.current.body;
+                        const prevBodyLen = cur.length;
+                        const nextBody = cur.slice(0, seg.start) + val + cur.slice(seg.start + prevLen);
+                        const globalPos = seg.start + cursor;
+                        onBody(nextBody);
+                        setCursorPos(globalPos);
+                        if (nextBody.length >= prevBodyLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
+                          const trig = detectAtTrigger(nextBody, globalPos);
+                          if (trig && trig.query === "") {
+                            setMentionState({
+                              replaceFrom: trig.atIndex,
+                              replaceTo: globalPos,
+                              initialQuery: "",
+                            });
+                          }
+                        }
+                      }}
+                      onKeyDown={(e, from, to) => {
+                        if (e.isComposing || e.keyCode === 229) return false;
+                        const gStart = seg.start + from;
+                        const gEnd = seg.start + to;
+                        if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+                          const k = e.key.toLowerCase();
+                          if (k === "b") {
+                            applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "**", "粗體文字"));
+                            return true;
+                          }
+                          if (k === "u") {
+                            applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "++", "底線文字"));
+                            return true;
+                          }
+                        }
+                        if (e.key === "Tab") {
+                          const patch = indentListLines(latest.current.body, gStart, gEnd, e.shiftKey ? -1 : 1);
+                          if (!patch) return false;
+                          applyEditPatch(patch);
                           return true;
                         }
-                        if (k === "u") {
-                          applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "++", "底線文字"));
+                        if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                          const patch = handleListEnter(latest.current.body, gStart, gEnd);
+                          if (!patch) return false;
+                          applyEditPatch(patch);
                           return true;
                         }
-                      }
-                      if (e.key === "Tab") {
-                        const patch = indentListLines(latest.current.body, gStart, gEnd, e.shiftKey ? -1 : 1);
-                        if (!patch) return false;
-                        applyEditPatch(patch);
+                        return false;
+                      }}
+                      onPaste={(e, from, to) => {
+                        const cd = e.clipboardData;
+                        if (!cd) return false;
+                        const gFrom = seg.start + from;
+                        const gTo = seg.start + to;
+                        if (cd.files.length) {
+                          const files = takeFiles(cd.files);
+                          if (files.length) void uploadFiles(files, gFrom);
+                          return true;
+                        }
+                        const transformed = transformPasteContent(cd.getData("text/plain"), cd.getData("text/html"));
+                        if (transformed === null) return false;
+                        const cur = latest.current.body;
+                        const nextText = cur.slice(0, gFrom) + transformed + cur.slice(gTo);
+                        const nextCursor = gFrom + transformed.length;
+                        applyEditPatch({
+                          text: nextText,
+                          selectionStart: nextCursor,
+                          selectionEnd: nextCursor,
+                          replaceFrom: gFrom,
+                          replaceTo: gTo,
+                          insertText: transformed,
+                        });
                         return true;
-                      }
-                      if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-                        const patch = handleListEnter(latest.current.body, gStart, gEnd);
-                        if (!patch) return false;
-                        applyEditPatch(patch);
+                      }}
+                      onDropFiles={(e, at) => {
+                        const dt = e.dataTransfer;
+                        if (!dt || !dt.files.length) return false;
+                        const files = takeFiles(dt.files);
+                        if (files.length) void uploadFiles(files, seg.start + at);
                         return true;
-                      }
-                      return false;
-                    }}
-                    onPaste={(e, from, to) => {
-                      const cd = e.clipboardData;
-                      if (!cd) return false;
-                      const gFrom = seg.start + from;
-                      const gTo = seg.start + to;
-                      if (cd.files.length) {
-                        const files = takeFiles(cd.files);
-                        if (files.length) void uploadFiles(files, gFrom);
-                        return true;
-                      }
-                      const transformed = transformPasteContent(cd.getData("text/plain"), cd.getData("text/html"));
-                      if (transformed === null) return false;
-                      const cur = latest.current.body;
-                      const nextText = cur.slice(0, gFrom) + transformed + cur.slice(gTo);
-                      const nextCursor = gFrom + transformed.length;
-                      applyEditPatch({
-                        text: nextText,
-                        selectionStart: nextCursor,
-                        selectionEnd: nextCursor,
-                        replaceFrom: gFrom,
-                        replaceTo: gTo,
-                        insertText: transformed,
-                      });
-                      return true;
-                    }}
-                    onDropFiles={(e, at) => {
-                      const dt = e.dataTransfer;
-                      if (!dt || !dt.files.length) return false;
-                      const files = takeFiles(dt.files);
-                      if (files.length) void uploadFiles(files, seg.start + at);
-                      return true;
-                    }}
-                  />
-                );
-              })}
-            </div>
-          );
-        })()
-      ) : (
-        <div className="preview" data-testid="editor-preview">
-          <Markdown source={body} onOpenCard={onOpenCard} />
-        </div>
-      )}
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            );
+          })()
+        ) : (
+          <div
+            className="preview"
+            data-testid="editor-preview"
+            style={{ minHeight: compact ? 120 : 320 }}
+          >
+            <Markdown source={body} onOpenCard={onOpenCard} />
+          </div>
+        )}
+
+        {showScrollBottom && (
+          <button
+            type="button"
+            className="scroll-to-bottom-btn"
+            onClick={scrollToBottom}
+            onMouseDown={(e) => e.preventDefault()}
+            title="滾動至最底部"
+            aria-label="滾動至最底部"
+            style={{
+              position: "sticky",
+              bottom: 10,
+              float: "right",
+              marginRight: 10,
+              zIndex: 40,
+              width: 28,
+              height: 28,
+              padding: 0,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: 6,
+              background: "var(--panel, #1e293b)",
+              color: "var(--muted, #64748b)",
+              border: "1px solid var(--line, #334155)",
+              boxShadow: "0 1px 4px rgba(0, 0, 0, 0.12)",
+              opacity: 0.85,
+              cursor: "pointer",
+            }}
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <line x1="8" y1="2.5" x2="8" y2="11.5" />
+              <polyline points="4.5 8.5 8 12 11.5 8.5" />
+              <line x1="4" y1="14" x2="12" y2="14" />
+            </svg>
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -1304,7 +1526,7 @@ function CodeReplaceModal(props: {
   const [smartInput, setSmartInput] = useState("");
   const [pairs, setPairs] = useState<PatchPair[]>([{ findText: "", replaceText: "" }]);
   const [activePairIndex, setActivePairIndex] = useState(0);
-  const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string; details?: string[] } | null>(null);
+  const [feedback, setFeedback] = useState<{ kind: "ok" | "err" | "warn"; msg: string; details?: string[] } | null>(null);
 
   const selectedBlock = targetKey === "__new__" ? null : blocks.find((b) => String(b.index) === targetKey) ?? null;
   const activeSourceCode = selectedBlock ? selectedBlock.content : manualSource;
@@ -1324,12 +1546,16 @@ function CodeReplaceModal(props: {
     const formatted = normalizeSmartPasteInput(initialSmartPaste);
     setSmartInput(formatted);
     const parsed = parseAiPatchPairs(formatted);
+    const hasDoubleArrow = initialSmartPaste.includes(">>");
+    const arrowNote = hasDoubleArrow
+      ? "⚠️ 提示：貼上內容偵測到「>>」，請確認是否誤含引用標記或未清理字元。\n"
+      : "";
     if (parsed.length > 0) {
       setPairs(parsed);
       setActivePairIndex(0);
       setFeedback({
-        kind: "ok",
-        msg: `✅ 已由白板定位自動載入並解析 ${parsed.length} 組【尋找／替換】指令！`,
+        kind: hasDoubleArrow ? "warn" : "ok",
+        msg: `${arrowNote}✅ 已由白板定位自動載入並解析 ${parsed.length} 組【尋找／替換】指令！`,
       });
     } else {
       // 若貼上的內容為純代碼/文字片段而非標準【尋找/替換】指令，自動將其載入至第 1 組定位代碼中
@@ -1338,8 +1564,8 @@ function CodeReplaceModal(props: {
         setPairs([{ findText: cleanRaw, replaceText: "" }]);
         setActivePairIndex(0);
         setFeedback({
-          kind: "ok",
-          msg: "✅ 已將貼上的代碼段落載入至智慧貼上區與第 1 組【定位代碼】，請在右側輸入欲取代的新代碼。",
+          kind: hasDoubleArrow ? "warn" : "ok",
+          msg: `${arrowNote}✅ 已將貼上的代碼段落載入至智慧貼上區與第 1 組【定位代碼】，請在右側輸入欲取代的新代碼。`,
         });
       }
     }
@@ -1356,13 +1582,22 @@ function CodeReplaceModal(props: {
     const formatted = normalizeSmartPasteInput(val);
     setSmartInput(formatted);
     setFeedback(null);
+    const hasDoubleArrow = val.includes(">>");
+    const arrowNote = hasDoubleArrow
+      ? "⚠️ 提示：貼上內容偵測到「>>」，請確認是否誤含引用標記或標籤。\n"
+      : "";
     const parsed = parseAiPatchPairs(formatted);
     if (parsed.length > 0) {
       setPairs(parsed);
       setActivePairIndex(0);
       setFeedback({
-        kind: "ok",
-        msg: `✅ 已成功解析 ${parsed.length} 組【尋找／替換】指令並淨化格式！可切換上方組別標籤查看每一組細節。`,
+        kind: hasDoubleArrow ? "warn" : "ok",
+        msg: `${arrowNote}✅ 已成功解析 ${parsed.length} 組【尋找／替換】指令並淨化格式！可切換上方組別標籤查看每一組細節。`,
+      });
+    } else if (hasDoubleArrow) {
+      setFeedback({
+        kind: "warn",
+        msg: "⚠️ 提示：貼上內容偵測到「>>」，請確認是否為誤貼入的引用符號或標記。",
       });
     }
   };

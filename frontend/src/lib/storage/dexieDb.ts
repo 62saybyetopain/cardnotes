@@ -15,6 +15,7 @@ export interface DbCard {
   curation_status: CurationStatus;
   created_at: string;
   updated_at: string;
+  sources?: string[]; // 非索引欄位，Dexie 不需要升版；舊資料沒有此欄
 }
 
 export interface DbTag {
