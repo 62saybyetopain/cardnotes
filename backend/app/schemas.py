@@ -7,6 +7,7 @@ Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max
 Id = Annotated[str, StringConstraints(min_length=1, max_length=64)]
 Coord = Annotated[float, Field(allow_inf_nan=False)]
 Size = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+Sources = Annotated[list[Annotated[str, StringConstraints(max_length=2000)]], Field(max_length=20)]
 
 
 class Axis(str, Enum):
@@ -51,6 +52,7 @@ class CardPatch(BaseModel):
     body: Optional[str] = None
     card_type: Optional[CardType] = None
     curation_status: Optional[CurationStatus] = None
+    sources: Optional[Sources] = None  # None＝不變更；[] 代表清空
     expected_updated_at: str
 
 
@@ -167,6 +169,7 @@ class SyncCardItem(BaseModel):
     curation_status: CurationStatus = CurationStatus.INBOX
     created_at: str
     updated_at: str
+    sources: Optional[Sources] = None  # 舊版封包沒有此欄：None＝套用更新時不動現有出處
 
 
 class SyncTagItem(BaseModel):
@@ -227,3 +230,36 @@ class SyncApplyRequest(BaseModel):
     links_to_add: list[SyncLinkItem] = []
     board_cards_to_add: list[SyncBoardCardItem] = []
     package: SyncPackage
+
+
+class PatternFamily(str, Enum):
+    """關係句型的導引分類。值必須與前端 types.ts 的 PatternFamily、種子腳本一致；資料庫不設 CHECK，只由此列舉把關。"""
+
+    FAILURE = "failure"  # 失效與承載
+    CONSTRAINT = "constraint"  # 卡住與限制
+    FEEDBACK = "feedback"  # 回饋與調節
+    CHANGE = "change"  # 變化的形狀
+    EVIDENCE = "evidence"  # 判讀與證據
+
+
+class RelationPatternCreate(BaseModel):
+    label: Name
+    template: str = Field(max_length=1000)
+    bridge_tag_id: Id
+    note: str = Field("", max_length=1000)
+    family: Optional[PatternFamily] = None
+
+
+class RelationPatternPatch(BaseModel):
+    label: Optional[Name] = None
+    template: Optional[str] = Field(None, max_length=1000)
+    note: Optional[str] = Field(None, max_length=1000)
+    family: Optional[PatternFamily] = None  # None＝不變更；目前不支援清回未分類
+
+
+class CardRelationPut(BaseModel):
+    pattern_id: Optional[Id] = None
+    role_a: str = Field("", max_length=1000)
+    role_b: str = Field("", max_length=1000)
+    result: str = Field("", max_length=1000)
+    free_sentence: str = Field("", max_length=1000)

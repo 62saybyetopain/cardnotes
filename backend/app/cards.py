@@ -1,3 +1,5 @@
+import json
+import math
 import re
 import sqlite3
 from typing import Any, Optional
@@ -17,10 +19,18 @@ from .schemas import (
 
 router = APIRouter(prefix="/api")
 DEFAULT_CARD_WIDTH = 280.0
+# assumption: 卡片為自動高度（h 為 NULL）時用此值估算占用範圍；估太小會讓新方陣壓到上方既有卡片
+FALLBACK_CARD_HEIGHT = 220.0
+GRID_GAP = 32.0
+BOARD_ORIGIN = 100.0
 
 MEDIA_REF = re.compile(r"!\[[^\]]*\]\(media:([0-9a-fA-F-]{36})\)")
 CARD_REF = re.compile(r"(?<!!)\[(?:\\.|[^\[\]\\])*\]\(card:([0-9a-fA-F-]{36})\)")
 
+
+def parse_sources(raw: Optional[str]) -> list[str]:
+    """cards.sources 存 JSON 陣列字串；空值視為沒有出處。內容損壞時讓 json 例外往上拋，不默默當成空。"""
+    return json.loads(raw) if raw else []
 
 def media_refs(body: str) -> list[str]:
     return list(dict.fromkeys(m.lower() for m in MEDIA_REF.findall(body)))
@@ -112,6 +122,7 @@ def card_detail(conn: sqlite3.Connection, card_id: str) -> dict[str, Any]:
         warnings.append({"code": "MISSING_CARD", "ids": missing_c})
     return {
         **dict(row),
+        "sources": parse_sources(row["sources"]),
         "tags": tags,
         "links": links,
         "boards": [dict(r) for r in boards],
@@ -200,6 +211,7 @@ def patch_card(card_id: str, payload: CardPatch, request: Request):
         and payload.body is None
         and payload.card_type is None
         and payload.curation_status is None
+        and payload.sources is None
     ):
         raise AppError(ErrorCode.VALIDATION_ERROR, "至少要提供一個更新欄位")
     with session(request, write=True) as conn:
@@ -218,10 +230,11 @@ def patch_card(card_id: str, payload: CardPatch, request: Request):
         curation_status = (
             payload.curation_status.value if payload.curation_status is not None else row["curation_status"]
         )
+        sources = json.dumps(payload.sources, ensure_ascii=False) if payload.sources is not None else row["sources"]
         conn.execute(
-            """UPDATE cards SET title = ?, body = ?, card_type = ?, curation_status = ?, updated_at = ?
+            """UPDATE cards SET title = ?, body = ?, card_type = ?, curation_status = ?, sources = ?, updated_at = ?
                WHERE id = ?""",
-            (title, body, card_type, curation_status, utc_now(), card_id),
+            (title, body, card_type, curation_status, sources, utc_now(), card_id),
         )
         return card_detail(conn, card_id)
 
@@ -310,6 +323,7 @@ def list_cards(
                 {
                     "id": r["id"],
                     "title": r["title"],
+                    "body": r["body"],
                     "snippet": _snippet(r["body"], q),
                     "card_type": r["card_type"],
                     "curation_status": r["curation_status"],
@@ -340,7 +354,7 @@ def sync_export(request: Request):
             "version": 1,
             "exported_at": utc_now(),
             "source_device": "pc",
-            "cards": [dict(c) for c in cards],
+            "cards": [{**dict(c), "sources": parse_sources(c["sources"])} for c in cards],
             "tags": [{**dict(t), "aliases": by_tag.get(t["id"], [])} for t in tags],
             "card_tags": [dict(ct) for ct in card_tags],
             "links": [dict(l) for l in links],
@@ -434,6 +448,7 @@ def sync_apply(payload: SyncApplyRequest, request: Request):
     pkg = payload.package
     card_map = {c.id: c for c in pkg.cards}
     tag_map = {t.id: t for t in pkg.tags}
+    board_map = {b.id: b for b in pkg.boards}
 
     applied = {
         "cards_added": 0,
@@ -443,49 +458,95 @@ def sync_apply(payload: SyncApplyRequest, request: Request):
         "card_tags_added": 0,
         "links_added": 0,
         "board_cards_added": 0,
+        "tags_merged": 0,
+        "board_cards_skipped": 0,
+        "boards_created": 0,
     }
 
     with session(request, write=True) as conn:
-        for tid in payload.tag_ids_to_add:
-            t = tag_map.get(tid)
-            if not t:
-                continue
-            axis_val = t.axis.normalized()
-            conn.execute(
-                """INSERT OR IGNORE INTO tags (id, name, axis, facet, definition, parent_id, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (t.id, t.name, axis_val, t.facet, t.definition, t.parent_id, utc_now()),
-            )
-            for a in t.aliases:
-                conn.execute(
-                    "INSERT OR IGNORE INTO tag_aliases (alias, tag_id, created_at) VALUES (?, ?, ?)",
-                    (a, t.id, utc_now()),
+        # @depends-on schema.sql::tags.parent_id（即時外鍵，父標籤必須先於子標籤存在）
+        # @depends-on schema.sql::uq_tags_sibling / uq_tags_root（同層同名唯一）
+        # assumption: 封包內 tags 的順序不保證父先於子（iPad 端依 Dexie 主鍵順序匯出）
+        # assumption: 同層（同父；最上層則同 axis+facet）同名＝同一個標籤，電腦端索引與 iPad createTag 皆以此為契約
+        # if broken: 父標籤找不到→明確 422；同名→併入電腦端既有標籤（不覆蓋其定義）並計入 tags_merged；
+        #            其他約束違反（CHECK 等）→明確 422，不再被 OR IGNORE 吞掉
+        tag_remap: dict[str, str] = {}  # iPad 標籤 id → 電腦端既有標籤 id，card_tags 要照此改指
+        known_tag_ids = {r["id"] for r in conn.execute("SELECT id FROM tags").fetchall()}
+        pending_tags = [tag_map[tid] for tid in payload.tag_ids_to_add if tid in tag_map]
+        while pending_tags:
+            ready = [t for t in pending_tags if t.parent_id is None or t.parent_id in known_tag_ids]
+            if not ready:
+                raise AppError(
+                    ErrorCode.VALIDATION_ERROR,
+                    "封包中有標籤的父標籤在電腦端與封包中都找不到，無法套用",
+                    {"tags": [{"id": t.id, "name": t.name, "parent_id": t.parent_id} for t in pending_tags]},
                 )
-            applied["tags_added"] += 1
+            for t in ready:
+                axis_val = t.axis.normalized()
+                parent_id = tag_remap.get(t.parent_id, t.parent_id) if t.parent_id else None
+                if parent_id is not None:
+                    dup = conn.execute(
+                        "SELECT id FROM tags WHERE parent_id = ? AND name = ?", (parent_id, t.name)
+                    ).fetchone()
+                else:
+                    dup = conn.execute(
+                        """SELECT id FROM tags
+                           WHERE parent_id IS NULL AND axis = ? AND COALESCE(facet, '') = ? AND name = ?""",
+                        (axis_val, t.facet or "", t.name),
+                    ).fetchone()
+                if dup is not None:
+                    if dup["id"] != t.id:  # id 相同代表這包已套用過，重送時不重複計數
+                        tag_remap[t.id] = dup["id"]
+                        applied["tags_merged"] += 1
+                else:
+                    cur = conn.execute(
+                        """INSERT OR IGNORE INTO tags (id, name, axis, facet, definition, parent_id, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (t.id, t.name, axis_val, t.facet, t.definition, parent_id, utc_now()),
+                    )
+                    if cur.rowcount == 0:
+                        raise AppError(
+                            ErrorCode.VALIDATION_ERROR,
+                            "標籤無法寫入（違反資料表約束）",
+                            {"tag": {"id": t.id, "name": t.name, "axis": axis_val, "parent_id": parent_id}},
+                        )
+                    applied["tags_added"] += 1
+                for a in t.aliases:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO tag_aliases (alias, tag_id, created_at) VALUES (?, ?, ?)",
+                        (a, tag_remap.get(t.id, t.id), utc_now()),
+                    )
+                known_tag_ids.add(t.id)
+            ready_ids = {t.id for t in ready}
+            pending_tags = [t for t in pending_tags if t.id not in ready_ids]
 
-        for tid in payload.tag_ids_to_update:
-            t = tag_map.get(tid)
-            if not t:
-                continue
-            conn.execute(
-                "UPDATE tags SET name = ?, facet = ?, definition = ?, parent_id = ? WHERE id = ?",
-                (t.name, t.facet, t.definition, t.parent_id, t.id),
+                # @depends-on SyncModal.tsx::applyChanges（前端固定送 tag_ids_to_update=[]）
+        # assumption: 標籤沒有 updated_at，無法判斷 iPad 與電腦端誰較新，套用會讓舊值回退新改動
+        # if broken: 有呼叫端送了非空清單→明確 422，不默默改標籤，也不讓環／UNIQUE 變成 500
+        if payload.tag_ids_to_update:
+            raise AppError(
+                ErrorCode.VALIDATION_ERROR,
+                "目前不支援套用標籤更新（標籤沒有修改時間，無法判斷哪邊較新）",
+                {"tag_ids": payload.tag_ids_to_update},
             )
-            for a in t.aliases:
-                conn.execute(
-                    "INSERT OR IGNORE INTO tag_aliases (alias, tag_id, created_at) VALUES (?, ?, ?)",
-                    (a, t.id, utc_now()),
-                )
-            applied["tags_updated"] += 1
 
         for cid in payload.card_ids_to_add:
             c = card_map.get(cid)
             if not c:
                 continue
             conn.execute(
-                """INSERT OR IGNORE INTO cards (id, title, body, card_type, curation_status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (c.id, c.title, c.body, c.card_type.value, c.curation_status.value, c.created_at, c.updated_at),
+                """INSERT OR IGNORE INTO cards (id, title, body, card_type, curation_status, sources, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    c.id,
+                    c.title,
+                    c.body,
+                    c.card_type.value,
+                    c.curation_status.value,
+                    json.dumps(c.sources or [], ensure_ascii=False),
+                    c.created_at,
+                    c.updated_at,
+                ),
             )
             applied["cards_added"] += 1
 
@@ -494,19 +555,29 @@ def sync_apply(payload: SyncApplyRequest, request: Request):
             if not c:
                 continue
             conn.execute(
-                """UPDATE cards SET title = ?, body = ?, card_type = ?, curation_status = ?, updated_at = ?
+                """UPDATE cards SET title = ?, body = ?, card_type = ?, curation_status = ?,
+                   sources = COALESCE(?, sources), updated_at = ?
                    WHERE id = ?""",
-                (c.title, c.body, c.card_type.value, c.curation_status.value, c.updated_at, c.id),
+                (
+                    c.title,
+                    c.body,
+                    c.card_type.value,
+                    c.curation_status.value,
+                    json.dumps(c.sources, ensure_ascii=False) if c.sources is not None else None,
+                    c.updated_at,
+                    c.id,
+                ),
             )
             applied["cards_updated"] += 1
 
         for ct in payload.card_tags_to_add:
+            tag_id = tag_remap.get(ct.tag_id, ct.tag_id)
             if conn.execute("SELECT 1 FROM cards WHERE id = ?", (ct.card_id,)).fetchone() and conn.execute(
-                "SELECT 1 FROM tags WHERE id = ?", (ct.tag_id,)
+                "SELECT 1 FROM tags WHERE id = ?", (tag_id,)
             ).fetchone():
                 conn.execute(
                     "INSERT OR IGNORE INTO card_tags (card_id, tag_id) VALUES (?, ?)",
-                    (ct.card_id, ct.tag_id),
+                    (ct.card_id, tag_id),
                 )
                 applied["card_tags_added"] += 1
 
@@ -515,28 +586,63 @@ def sync_apply(payload: SyncApplyRequest, request: Request):
                 "SELECT 1 FROM cards WHERE id = ?", (l.target_id,)
             ).fetchone():
                 conn.execute(
-                    """INSERT OR REPLACE INTO links (source_id, target_id, relation_type, status, reason)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (l.source_id, l.target_id, l.relation_type.value, l.status.value, l.reason),
+                    """INSERT OR REPLACE INTO links (source_id, target_id, relation_type, status, reason, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (l.source_id, l.target_id, l.relation_type.value, l.status.value, l.reason, utc_now()),
                 )
                 applied["links_added"] += 1
 
+        # 原因：iPad 新開的白板電腦端沒有，歸屬被丟掉；且舊寫法逐張疊放，不會避開既有卡片。
+        # 做法：缺的白板用封包內的 id／名稱建立；同一塊白板的新卡片擺成方陣，放在現有卡片範圍正下方。
+        # @depends-on schema.sql::boards（id, name, created_at, updated_at 皆 NOT NULL）
+        placements: dict[str, list[Any]] = {}
         for bc in payload.board_cards_to_add:
-            if conn.execute("SELECT 1 FROM boards WHERE id = ?", (bc.board_id,)).fetchone() and conn.execute(
-                "SELECT 1 FROM cards WHERE id = ?", (bc.card_id,)
+            if conn.execute("SELECT 1 FROM cards WHERE id = ?", (bc.card_id,)).fetchone() is None:
+                continue  # 卡片未被勾選套用，歸屬跟著略過：這是使用者的選擇，不是異常
+            if conn.execute(
+                "SELECT 1 FROM board_cards WHERE board_id = ? AND card_id = ?", (bc.board_id, bc.card_id)
             ).fetchone():
-                if bc.x is None or bc.y is None:
-                    count = conn.execute(
-                        "SELECT COUNT(*) AS n FROM board_cards WHERE board_id = ?", (bc.board_id,)
-                    ).fetchone()["n"]
-                    x = (count % 6) * 28.0 + 100.0
-                    y = (count % 6) * 28.0 + 100.0
-                else:
-                    x, y = bc.x, bc.y
+                continue  # 已在白板上（重送封包），不重排、不重複計數
+            placements.setdefault(bc.board_id, []).append(bc)
+
+        for board_id, items in placements.items():
+            if conn.execute("SELECT 1 FROM boards WHERE id = ?", (board_id,)).fetchone() is None:
+                src = board_map.get(board_id)
+                if src is None:  # 封包自己都沒有這塊白板，無從建立：回報而非默默略過
+                    applied["board_cards_skipped"] += len(items)
+                    continue
+                # 原因：boards 的 created_at、updated_at 都是 NOT NULL（schema.sql:124），少一個會直接 500
+                now = utc_now()
+                conn.execute(
+                    "INSERT INTO boards (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    (board_id, src.name, now, now),
+                )
+                applied["boards_created"] += 1
+
+            box = conn.execute(
+                "SELECT MIN(x) AS min_x, MAX(y + COALESCE(h, ?)) AS max_bottom FROM board_cards WHERE board_id = ?",
+                (FALLBACK_CARD_HEIGHT, board_id),
+            ).fetchone()
+            if box["min_x"] is None:
+                x0, y0 = BOARD_ORIGIN, BOARD_ORIGIN
+            else:
+                x0, y0 = box["min_x"], box["max_bottom"] + GRID_GAP
+
+            cols = math.ceil(math.sqrt(len(items)))
+            cell_w = max((bc.w or DEFAULT_CARD_WIDTH) for bc in items) + GRID_GAP
+            cell_h = max((bc.h or FALLBACK_CARD_HEIGHT) for bc in items) + GRID_GAP
+            for i, bc in enumerate(items):
                 conn.execute(
                     """INSERT OR IGNORE INTO board_cards (board_id, card_id, x, y, w, h, z)
                        VALUES (?, ?, ?, ?, ?, ?, 0)""",
-                    (bc.board_id, bc.card_id, x, y, bc.w or DEFAULT_CARD_WIDTH, bc.h),
+                    (
+                        board_id,
+                        bc.card_id,
+                        x0 + (i % cols) * cell_w,
+                        y0 + (i // cols) * cell_h,
+                        bc.w or DEFAULT_CARD_WIDTH,
+                        bc.h,
+                    ),
                 )
                 applied["board_cards_added"] += 1
 

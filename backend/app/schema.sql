@@ -155,6 +155,42 @@ CREATE TABLE board_groups (
 CREATE INDEX idx_board_groups_board ON board_groups (board_id);
 
 -- ============================================================
+-- 橋樑詞關係句型（第一版僅存在於電腦端 SQLite，不納入同步封包；iPad 與雲端備份都不含這兩張表）
+-- relation_patterns：關係句型表，每列對應一個橋樑詞（bridge_tag_id 指向 concept 軸標籤）
+--   template 以 {A}、{B}、{結果} 為佔位符；多個句型可指向同一個橋樑詞
+--   family：導引分類（failure／constraint／feedback／change／evidence），NULL＝未分類；值只由後端 PatternFamily 列舉把關，不設 CHECK
+--   既有資料庫的 relation_patterns 沒有此欄位，由 db.py 的 _ensure_relation_tables 以 ALTER TABLE 補上
+--   bridge_tag_id 用 RESTRICT：刪除或合併標籤必須走應用程式的明確檢查／改指流程
+-- card_relations：每張卡片至多一筆關係句紀錄（角色 A、B、結果）
+--   pattern_id 與 free_sentence 二選一：選了句型就沒有自由句；沒有句型就必須有自由句（候選池）
+--   橋樑詞只在使用者確認時才寫入 card_tags，這張表與 card_tags 之後各自獨立，僅供稽核與評估
+-- 這段 DDL 與 db.py 的 RELATION_TABLES_DDL 必須同文，修改時兩處一起改
+-- ============================================================
+CREATE TABLE IF NOT EXISTS relation_patterns (
+    id            TEXT PRIMARY KEY,
+    label         TEXT NOT NULL,
+    template      TEXT NOT NULL,
+    bridge_tag_id TEXT NOT NULL REFERENCES tags (id) ON DELETE RESTRICT,
+    note          TEXT NOT NULL DEFAULT '',
+    family        TEXT,
+    created_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_relation_patterns_label ON relation_patterns (label);
+CREATE INDEX IF NOT EXISTS idx_relation_patterns_tag ON relation_patterns (bridge_tag_id);
+
+CREATE TABLE IF NOT EXISTS card_relations (
+    card_id       TEXT PRIMARY KEY REFERENCES cards (id) ON DELETE CASCADE,
+    pattern_id    TEXT REFERENCES relation_patterns (id) ON DELETE RESTRICT,
+    role_a        TEXT NOT NULL DEFAULT '',
+    role_b        TEXT NOT NULL DEFAULT '',
+    result        TEXT NOT NULL DEFAULT '',
+    free_sentence TEXT NOT NULL DEFAULT '',
+    updated_at    TEXT NOT NULL,
+    CHECK ((pattern_id IS NULL) <> (free_sentence = ''))
+);
+CREATE INDEX IF NOT EXISTS idx_card_relations_pattern ON card_relations (pattern_id);
+
+-- ============================================================
 -- 刪除標籤程序（應用程式，必須在同一個交易內完成）
 --   1. 若有同名衝突（子節點上移後會與新父節點底下既有節點同名）→ 中止並要求先改名
 --   2. 子節點：UPDATE tags SET parent_id = <被刪節點的 parent_id> WHERE parent_id = <被刪節點>

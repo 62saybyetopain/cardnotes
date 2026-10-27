@@ -11,15 +11,19 @@ if not exist "backend\.venv\Scripts\python.exe" (
     if errorlevel 1 goto :error
 )
 
-if not exist "frontend\dist\index.html" (
-    echo [2/3] 正在建置前端靜態檔案...
+if not exist "frontend\node_modules" (
+    echo [2/3] 正在安裝前端依賴套件...
     pushd frontend
     call npm install
     if errorlevel 1 ( popd & goto :error )
-    call npm run build
-    if errorlevel 1 ( popd & goto :error )
     popd
 )
+
+echo [2/3] 正在編譯最新前端靜態檔案...
+pushd frontend
+call npm run build
+if errorlevel 1 ( popd & goto :error )
+popd
 
 echo [3/3] 正在啟動 Cardboard 服務 (http://127.0.0.1:8000)...
 echo 請保持此視窗開啟；欲關閉服務請直接關閉此視窗或按 Ctrl+C。

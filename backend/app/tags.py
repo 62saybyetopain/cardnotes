@@ -307,6 +307,8 @@ def merge_tag(source_id: str, payload: TagMergeRequest, request: Request):
         )
         conn.execute("DELETE FROM card_tags WHERE tag_id = ?", (source_id,))
         conn.execute("UPDATE tag_aliases SET tag_id = ? WHERE tag_id = ?", (target_id, source_id))
+        # @depends-on relations.py (relation_patterns.bridge_tag_id)：句型改指向合併後的標籤，否則刪除來源標籤會被外鍵擋下
+        conn.execute("UPDATE relation_patterns SET bridge_tag_id = ? WHERE bridge_tag_id = ?", (target_id, source_id))
         if source["name"].lower() != target["name"].lower():
             conn.execute(
                 "INSERT OR IGNORE INTO tag_aliases (alias, tag_id, created_at) VALUES (?, ?, ?)",
@@ -326,6 +328,16 @@ def delete_preview(tag_id: str, request: Request):
 def delete_tag(tag_id: str, request: Request):
     with session(request, write=True) as conn:
         tag = _tag(conn, tag_id)
+        # @depends-on relations.py (relation_patterns.bridge_tag_id)：被關係句型引用的橋樑詞不能直接刪除
+        in_use = conn.execute(
+            "SELECT COUNT(*) AS n FROM relation_patterns WHERE bridge_tag_id = ?", (tag_id,)
+        ).fetchone()["n"]
+        if in_use:
+            raise AppError(
+                ErrorCode.IN_USE,
+                f"標籤「{tag['name']}」被 {in_use} 個關係句型引用，請先刪除這些句型，或改用合併功能",
+                {"pattern_count": in_use},
+            )
         plan = _delete_plan(conn, tag)
         if plan["conflicts"]:
             raise AppError(
@@ -382,7 +394,8 @@ def get_concept_graph(
         tag_rows = conn.execute(
             f"""
             SELECT t.id, t.name, t.axis, t.facet, t.definition, t.parent_id,
-                   COUNT(DISTINCT ct.card_id) AS card_count
+                   COUNT(DISTINCT ct.card_id) AS card_count,
+                   EXISTS (SELECT 1 FROM relation_patterns rp WHERE rp.bridge_tag_id = t.id) AS is_bridge
             FROM tags t
             LEFT JOIN card_tags ct ON ct.tag_id = t.id
             WHERE t.axis IN ({marks})
@@ -407,6 +420,7 @@ def get_concept_graph(
                 "parent_id": r["parent_id"],
                 "aliases": by_tag.get(r["id"], []),
                 "card_count": r["card_count"],
+                "is_bridge": bool(r["is_bridge"]),
             }
             for r in tag_rows
         ]

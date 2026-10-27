@@ -172,6 +172,50 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys = ON")
 
 
+# 橋樑詞關係句型表（第一版僅電腦端、不納入同步）。與 schema.sql 同文，修改時兩處一起改；
+# 全部使用 IF NOT EXISTS 且每次啟動都執行：既有資料庫靠這裡補表，不升 SCHEMA_VERSION
+RELATION_TABLES_DDL = """
+CREATE TABLE IF NOT EXISTS relation_patterns (
+    id            TEXT PRIMARY KEY,
+    label         TEXT NOT NULL,
+    template      TEXT NOT NULL,
+    bridge_tag_id TEXT NOT NULL REFERENCES tags (id) ON DELETE RESTRICT,
+    note          TEXT NOT NULL DEFAULT '',
+    family        TEXT,
+    created_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_relation_patterns_label ON relation_patterns (label);
+CREATE INDEX IF NOT EXISTS idx_relation_patterns_tag ON relation_patterns (bridge_tag_id);
+
+CREATE TABLE IF NOT EXISTS card_relations (
+    card_id       TEXT PRIMARY KEY REFERENCES cards (id) ON DELETE CASCADE,
+    pattern_id    TEXT REFERENCES relation_patterns (id) ON DELETE RESTRICT,
+    role_a        TEXT NOT NULL DEFAULT '',
+    role_b        TEXT NOT NULL DEFAULT '',
+    result        TEXT NOT NULL DEFAULT '',
+    free_sentence TEXT NOT NULL DEFAULT '',
+    updated_at    TEXT NOT NULL,
+    CHECK ((pattern_id IS NULL) <> (free_sentence = ''))
+);
+CREATE INDEX IF NOT EXISTS idx_card_relations_pattern ON card_relations (pattern_id);
+"""
+
+
+def _ensure_relation_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(RELATION_TABLES_DDL)
+    # CREATE TABLE IF NOT EXISTS 不會替既有的舊資料表補欄位：舊版 relation_patterns 沒有 family，這裡檢查後補上
+    pattern_cols = {r["name"] for r in conn.execute("PRAGMA table_info(relation_patterns)")}
+    if "family" not in pattern_cols:
+        conn.execute("ALTER TABLE relation_patterns ADD COLUMN family TEXT")
+
+
+def _ensure_card_sources(conn: sqlite3.Connection) -> None:
+    """cards.sources：出處清單，JSON 陣列字串。比照 relation_patterns.family，每次啟動檢查並補欄位，不升 SCHEMA_VERSION。"""
+    card_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cards)")}
+    if "sources" not in card_cols:
+        conn.execute("ALTER TABLE cards ADD COLUMN sources TEXT NOT NULL DEFAULT '[]'")
+
+
 def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = open_conn(db_path)
@@ -198,6 +242,8 @@ def init_db(db_path: Path) -> None:
         ):
             _migrate_v1_to_v2(conn)
             version = conn.execute("PRAGMA user_version").fetchone()[0]
+        _ensure_relation_tables(conn)
+        _ensure_card_sources(conn)
         if version != SCHEMA_VERSION:
             raise RuntimeError(
                 f"資料庫 schema 版本為 {version}，程式預期 {SCHEMA_VERSION}；請先處理遷移，不要直接使用"
@@ -244,3 +290,4 @@ def descendant_ids(conn: sqlite3.Connection, tag_id: str) -> list[str]:
 
 def is_unique_violation(exc: sqlite3.IntegrityError) -> bool:
     return "UNIQUE constraint failed" in str(exc)
+

@@ -6,7 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import boards, cards, links, media, tags
+from . import boards, cards, links, media, relations, tags
 from .config import Settings
 from .db import init_db
 from .errors import AppError, ErrorCode
@@ -42,7 +42,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         err = AppError(ErrorCode.INTERNAL_ERROR, "伺服器內部錯誤")
         return JSONResponse(err.to_body(), status_code=err.status)
 
-    for module in (cards, tags, links, boards, media):
+    for module in (cards, tags, links, boards, media, relations):
         app.include_router(module.router)
 
     if settings.frontend_dist is not None:
