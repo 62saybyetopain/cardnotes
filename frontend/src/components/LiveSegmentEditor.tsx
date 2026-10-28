@@ -29,6 +29,8 @@ interface Props {
   onPaste(e: ClipboardEvent, from: number, to: number): boolean;
   onDropFiles(e: DragEvent, at: number): boolean;
   onToggleLineMenu?(rect: { lineTop: number; lineBottom: number }): void;
+  // 反白範圍末端的位置（以 live-editor 為原點）；沒有反白或失去焦點時回報 null
+  onSelectionRect?(rect: { left: number; bottom: number } | null): void;
 }
 
 // 標記「由父層 value 同步進來的變更」，避免回頭再觸發 onDocChange 造成迴圈或誤標 dirty
@@ -140,6 +142,25 @@ export function LiveSegmentEditor(props: Props) {
               const block = v.lineBlockAt(targetPos);
               const singleLineH = v.defaultLineHeight || 22;
               setActiveLine({ top: block.top, firstLineH: singleLineH, bottom: block.bottom });
+            }
+
+            if (u.selectionSet || u.docChanged || u.focusChanged) {
+              // 讀取版面座標必須走 requestMeasure，不能直接在 update 期間量
+              u.view.requestMeasure({
+                read: (view) => {
+                  const sel = view.state.selection.main;
+                  const hostEl = hostRef.current;
+                  if (!view.hasFocus || sel.empty || !hostEl) return null;
+                  const c = view.coordsAtPos(sel.to);
+                  if (!c) return null;
+                  const hr = hostEl.getBoundingClientRect();
+                  return {
+                    left: hostEl.offsetLeft + (c.left - hr.left),
+                    bottom: hostEl.offsetTop + (c.bottom - hr.top),
+                  };
+                },
+                write: (rect) => propsRef.current.onSelectionRect?.(rect),
+              });
             }
           }),
         ],

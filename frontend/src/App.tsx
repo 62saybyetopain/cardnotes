@@ -207,6 +207,70 @@ export default function App() {
     void Promise.all([refreshTags(), refreshBoards(), refreshIpadCards()]).finally(() => setBooted(true));
   }, [refreshTags, refreshBoards, refreshIpadCards]);
 
+  // ---- 電腦版：定時自動備份至本機固定檔案（含開機錯時補償 Catch-up）----
+  useEffect(() => {
+    if (!booted || isStandalone) return;
+
+    const runBackupCheck = async () => {
+      try {
+        const rawCfg = localStorage.getItem("cardboard:auto-backup-config");
+        if (!rawCfg) return;
+        const cfg = JSON.parse(rawCfg);
+        if (!cfg.enabled || !cfg.targetPath?.trim()) return;
+
+        const lastIso = localStorage.getItem("cardboard:last-auto-backup-time");
+        const now = new Date();
+        let needBackup = false;
+
+        if (cfg.scheduleType === "daily") {
+          const [targetHour, targetMin] = (cfg.dailyTime || "22:00").split(":").map(Number);
+          const scheduledToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), targetHour, targetMin, 0);
+
+          if (!lastIso) {
+            // 從未備份過且已過今日指定時間：立即備份
+            if (now >= scheduledToday) needBackup = true;
+          } else {
+            const lastDate = new Date(lastIso);
+            const isDifferentDay =
+              lastDate.getFullYear() !== now.getFullYear() ||
+              lastDate.getMonth() !== now.getMonth() ||
+              lastDate.getDate() !== now.getDate();
+
+            // 錯時補償：若跨日且今天已過排程時間，或者上次備份已是前天（昨日未開機錯過備份）：立即執行
+            if (isDifferentDay && now >= scheduledToday) {
+              needBackup = true;
+            } else if (now.getTime() - lastDate.getTime() > 24 * 3600 * 1000) {
+              needBackup = true;
+            }
+          }
+        } else if (cfg.scheduleType === "interval") {
+          const intervalMs = Math.max(0.1, Number(cfg.intervalHours) || 4) * 3600 * 1000;
+          if (!lastIso) {
+            needBackup = true;
+          } else {
+            const lastDate = new Date(lastIso);
+            if (now.getTime() - lastDate.getTime() >= intervalMs) {
+              needBackup = true;
+            }
+          }
+        }
+
+        if (needBackup) {
+          const res = await api.syncSaveToFile(cfg.targetPath.trim());
+          localStorage.setItem("cardboard:last-auto-backup-time", res.exported_at);
+        }
+      } catch {
+        /* 靜默守護背景備份，不中斷前端使用 */
+      }
+    };
+
+    // 1. 開機立即檢查一次（執行錯時補償）
+    void runBackupCheck();
+    // 2. 每 60 秒定期輪詢一次時間
+    const timer = setInterval(() => void runBackupCheck(), 60000);
+    return () => clearInterval(timer);
+  }, [booted, isStandalone]);
+
   const selectCard = useCallback(
     (id: string | null) => {
       setSelected(id);

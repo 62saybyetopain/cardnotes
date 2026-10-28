@@ -167,7 +167,7 @@ summary .add { float: right; border: 0; background: transparent; }
 .cm-inline-code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.92em; }
 .cm-codeblock { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; background: var(--code-bg); }
 .cm-syntax { color: var(--muted); }
-.cm-list-marker { color: var(--accent); font-weight: 600; }
+.cm-list-marker { color: var(--text); font-weight: 600; }
 .md-highlight { font-weight: 500; }
 [data-theme="light"] .md-highlight { color: var(--text) !important; }
 [data-theme="light"] ::selection { background: rgba(29, 78, 216, 0.2); }

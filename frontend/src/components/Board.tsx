@@ -378,23 +378,53 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         // 2. 抽取【尋找這段代碼】標記區塊（若有）
         const findMarker = "【尋找這段代碼】";
         const replaceMarker = "【替換為以下代碼】";
-        const findSnippets: string[] = [];
-        const lines = normRaw.split("\n");
+        const FENCE = "`".repeat(3);
+        const langHeaderRe =
+          /^(typescript|javascript|ts|tsx|js|jsx|python|py|sql|sqlite|json|html|css|scss|bash|sh|shell|yaml|yml|toml|markdown|md|diff|plaintext|text|c|cpp|csharp|java|go|rust|ruby|php|swift|kotlin)(\s+(copy(\s+code)?|複製(\s*代碼|\s*程式碼)?))?$/i;
+        const fileInLineRe = /([a-zA-Z0-9_.-]+\.(?:tsx|ts|jsx|js|py|sql|css|html|json|md|yaml|yml|toml|rs|go))/i;
+        const primaryNames = new Set<string>();
+        const findSnippets: string[][] = [];
+        const lines = normRaw.replace(/\u00A0/g, " ").split("\n");
         for (let i = 0; i < lines.length; i++) {
-          if (lines[i].includes(findMarker)) {
-            const nextLines: string[] = [];
-            for (let j = i + 1; j < Math.min(lines.length, i + 30); j++) {
-              if (lines[j].includes(replaceMarker)) break;
-              const trimmed = lines[j].trim();
-              if (trimmed && !trimmed.startsWith("```")) {
-                nextLines.push(trimmed);
+          const lineTrim = lines[i].trim();
+          if (lineTrim.includes(findMarker) && !/^(const|let|var)\s+/.test(lineTrim)) {
+            for (let k = i - 1; k >= Math.max(0, i - 12); k--) {
+              if (lines[k].includes(replaceMarker)) break;
+              const m = fileInLineRe.exec(lines[k]);
+              if (m) {
+                primaryNames.add(m[1].toLowerCase());
+                break;
               }
             }
+            const nextLines: string[] = [];
+            for (let j = i + 1; j < lines.length; j++) {
+              if (lines[j].includes(replaceMarker) || lines[j].includes(findMarker)) break;
+              const t = lines[j].trim();
+              if (!t || t.startsWith(FENCE)) continue;
+              if (nextLines.length === 0 && langHeaderRe.test(t)) continue;
+              nextLines.push(t);
+            }
             if (nextLines.length > 0) {
-              findSnippets.push(nextLines.join("\n"));
+              findSnippets.push(nextLines);
             }
           }
         }
+        const matchesFullSnippet = (src: string, snipLines: string[]): boolean => {
+          const normSrcLines = src.replace(/\u00A0/g, " ").split("\n");
+          const nonEmptySrc = normSrcLines.map((l) => l.trim()).filter((l) => l.length > 0);
+          if (snipLines.length === 0 || snipLines.length > nonEmptySrc.length) return false;
+          for (let i = 0; i <= nonEmptySrc.length - snipLines.length; i++) {
+            let ok = true;
+            for (let j = 0; j < snipLines.length; j++) {
+              if (nonEmptySrc[i + j] !== snipLines[j]) {
+                ok = false;
+                break;
+              }
+            }
+            if (ok) return true;
+          }
+          return false;
+        };
 
         // 3. 多層級計分比對白板所有卡片
         let bestCard: CardFlowNode | null = null;
@@ -441,9 +471,20 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           }
 
           // 層級 D: 命中【尋找這段代碼】區塊
-          for (const snip of findSnippets) {
-            if (body.includes(snip)) {
-              score += 350;
+          if (findSnippets.length > 0) {
+            let matchedSnippets = 0;
+            for (const snip of findSnippets) {
+              if (matchesFullSnippet(body, snip)) {
+                matchedSnippets++;
+              }
+            }
+            if (matchedSnippets === 0) {
+              score = 0;
+            } else {
+              score += matchedSnippets * 2000;
+              if (title && primaryNames.has(titleLower)) {
+                score += 500;
+              }
             }
           }
 
@@ -455,7 +496,11 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
 
         if (!bestCard || maxScore < 30) {
           report(
-            new Error("在當前白板的卡片中找不到吻合的內容或代碼，請確認貼上的段落是否屬於此白板內的卡片"),
+            new Error(
+              findSnippets.length > 0
+                ? "當前白板內沒有任何卡片完整包含所貼上的定位代碼段落，請確認目標卡片是否已放入此白板"
+                : "在當前白板的卡片中找不到吻合的內容或代碼，請確認貼上的段落是否屬於此白板內的卡片",
+            ),
             "找不到目標卡片",
           );
           return;

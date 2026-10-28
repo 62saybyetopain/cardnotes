@@ -181,6 +181,8 @@ export const httpApi = {
   syncExport: () => request<SyncPackage>("GET", "/sync/export"),
   syncDiff: (pkg: SyncPackage) => request<SyncDiffReport>("POST", "/sync/diff", pkg),
   syncApply: (payload: SyncApplyRequest) => request<SyncApplyResult>("POST", "/sync/apply", payload),
+  syncOverwrite: (pkg: SyncPackage) => request<{ restored: boolean; cards_count: number }>("POST", "/sync/overwrite", pkg),
+  syncSaveToFile: (target_path: string) => request<{ saved: boolean; path: string; exported_at: string }>("POST", "/sync/save-file", { target_path }),
   // relations
   listRelationPatterns: () => request<{ patterns: RelationPattern[] }>("GET", "/relation-patterns"),
   createRelationPattern: (body: RelationPatternCreate) =>

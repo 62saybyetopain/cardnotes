@@ -65,6 +65,33 @@ interface Props {
   info(text: string): void;
 }
 
+export const AUTO_BACKUP_CONFIG_KEY = "cardboard:auto-backup-config";
+export const LAST_BACKUP_TIME_KEY = "cardboard:last-auto-backup-time";
+
+export interface AutoBackupConfig {
+  enabled: boolean;
+  targetPath: string;
+  scheduleType: "daily" | "interval";
+  dailyTime: string; // "HH:mm"
+  intervalHours: number; // 例如 4 小時
+}
+
+export function loadAutoBackupConfig(): AutoBackupConfig {
+  try {
+    const raw = localStorage.getItem(AUTO_BACKUP_CONFIG_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    /* 忽略損毀設定 */
+  }
+  return {
+    enabled: false,
+    targetPath: "",
+    scheduleType: "daily",
+    dailyTime: "22:00",
+    intervalHours: 4,
+  };
+}
+
 const IPAD_BASELINE_KEY = "cardboard:ipad-sync-baseline";
 
 interface IpadSyncBaseline {
@@ -161,6 +188,71 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
   const [cloudCredential, setCloudCredential] = useState(() => getSavedCloudCredential());
   const [showKeyInput, setShowKeyInput] = useState(() => !getSavedCloudCredential());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const overwriteInputRef = useRef<HTMLInputElement>(null);
+
+  // 定時自動備份設定
+  const [autoBackupCfg, setAutoBackupCfg] = useState<AutoBackupConfig>(loadAutoBackupConfig);
+  const [lastBackupTime, setLastBackupTime] = useState<string>(() => localStorage.getItem(LAST_BACKUP_TIME_KEY) || "");
+  const [savingBackupNow, setSavingBackupNow] = useState(false);
+
+  const saveBackupSettings = (patch: Partial<AutoBackupConfig>) => {
+    setAutoBackupCfg((prev) => {
+      const next = { ...prev, ...patch };
+      localStorage.setItem(AUTO_BACKUP_CONFIG_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const handleManualBackupNow = async () => {
+    if (!autoBackupCfg.targetPath.trim()) {
+      report(new Error("請先填寫本機固定備份檔案的完整路徑"), "固定路徑備份");
+      return;
+    }
+    setSavingBackupNow(true);
+    try {
+      const res = await api.syncSaveToFile(autoBackupCfg.targetPath.trim());
+      localStorage.setItem(LAST_BACKUP_TIME_KEY, res.exported_at);
+      setLastBackupTime(res.exported_at);
+      info(`💾 已成功覆寫備份至本機固定檔案：${res.path}`);
+    } catch (err) {
+      report(err, "手動覆寫備份失敗");
+    } finally {
+      setSavingBackupNow(false);
+    }
+  };
+
+  const handlePcOverwriteImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (
+      !window.confirm(
+        "⚠️ 【警告：完整覆蓋還原】\n" +
+          "此動作將會【完全清空】目前電腦端的資料庫，並以選取的備份檔案 100% 取代！\n" +
+          "包含卡片、標籤、白板、分組框與關係句型皆會被此檔案完全覆寫。\n\n" +
+          "確定要繼續覆蓋還原嗎？",
+      )
+    ) {
+      if (overwriteInputRef.current) overwriteInputRef.current.value = "";
+      return;
+    }
+    setApplying(true);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as SyncPackage;
+      if (!parsed || !Array.isArray(parsed.cards)) {
+        throw new Error("無效的備份檔案格式（缺少 cards 陣列）");
+      }
+      const res = await api.syncOverwrite(parsed);
+      info(`🎉 完整還原成功！已由備份檔重組 ${res.cards_count} 張卡片與資料庫結構。`);
+      onApplied();
+      onClose();
+    } catch (err) {
+      report(err, "本機完整覆蓋還原失敗");
+    } finally {
+      setApplying(false);
+      if (overwriteInputRef.current) overwriteInputRef.current.value = "";
+    }
+  };
 
   // ---- 電腦版專用狀態 ----
   const [pkg, setPkg] = useState<SyncPackage | null>(null);
@@ -736,9 +828,26 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
         ) : (
           /* ==================== 電腦版專屬介面 ==================== */
           <>
-            <div className="sync-top-actions">
+            <div className="sync-top-actions" style={{ flexWrap: "wrap", gap: 6 }}>
               <button type="button" onClick={() => void exportBackup()}>
-                1. 📥 匯出 JSON 備份
+                📥 匯出 JSON 備份
+              </button>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={cloudBusy}
+                title="選取本機 JSON 檔案比對差異並合併入目前資料庫"
+              >
+                📥 本機合併匯入…
+              </button>
+              <button
+                type="button"
+                style={{ color: "#ef4444", borderColor: "#ef4444" }}
+                onClick={() => overwriteInputRef.current?.click()}
+                disabled={cloudBusy}
+                title="【危險】選取本機 JSON 備份檔，完全清空並 100% 覆蓋還原目前資料庫"
+              >
+                ⚠️ 本機完整覆蓋還原…
               </button>
               <button
                 type="button"
@@ -748,7 +857,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                 disabled={cloudBusy}
                 title="將電腦完整資料庫上傳至 Google Drive，供 iPad 隨時下載覆蓋"
               >
-                {cloudBusy ? "雲端處理中…" : "2. ☁️ 上傳雲端備份 (供 iPad 下載)"}
+                {cloudBusy ? "雲端處理中…" : "☁️ 上傳雲端備份 (供 iPad)"}
               </button>
               <button
                 type="button"
@@ -756,17 +865,9 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                 style={{ background: "#10b981", borderColor: "transparent" }}
                 onClick={() => void handlePullIpadFromCloud()}
                 disabled={cloudBusy}
-                title="從 Google Drive 讀取 iPad 發送的資料並進行差異比對（卡片、白板、標籤、連結）"
+                title="從 Google Drive 讀取 iPad 發送的資料並進行差異比對"
               >
-                {cloudBusy ? "雲端處理中…" : "3. ☁️ 拉取 iPad 資料 (Drive)"}
-              </button>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={cloudBusy}
-                title="選取 iPad 匯出的 JSON 檔案進行差異比對與合併"
-              >
-                📂 選取 iPad JSON 檔比對…
+                {cloudBusy ? "雲端處理中…" : "☁️ 拉取 iPad 資料 (Drive)"}
               </button>
               <input
                 ref={fileInputRef}
@@ -775,6 +876,95 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                 style={{ display: "none" }}
                 onChange={(e) => void handleFileSelect(e)}
               />
+              <input
+                ref={overwriteInputRef}
+                type="file"
+                accept=".json,application/json"
+                style={{ display: "none" }}
+                onChange={(e) => void handlePcOverwriteImport(e)}
+              />
+            </div>
+
+            {/* 定時自動備份設定面板（選項 2-A） */}
+            <div className="resolve-box" style={{ padding: 10, marginTop: 8, fontSize: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontWeight: 600 }}>
+                  <input
+                    type="checkbox"
+                    checked={autoBackupCfg.enabled}
+                    onChange={(e) => saveBackupSettings({ enabled: e.target.checked })}
+                  />
+                  <span>⏱️ 啟用本機固定檔案定時自動備份（支援開機錯時補償）</span>
+                </label>
+                {lastBackupTime && (
+                  <span className="muted" style={{ fontSize: 11 }}>
+                    上次自動備份：{new Date(lastBackupTime).toLocaleString()}
+                  </span>
+                )}
+              </div>
+
+              {autoBackupCfg.enabled && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
+                  <label className="field-row" style={{ margin: 0 }}>
+                    <span className="muted" style={{ minWidth: 140 }}>本機固定檔案完整路徑：</span>
+                    <input
+                      value={autoBackupCfg.targetPath}
+                      onChange={(e) => saveBackupSettings({ targetPath: e.target.value })}
+                      placeholder="例如 D:\Backups\cardboard_auto_backup.json（自動覆寫此檔案）"
+                      style={{ flex: 1, fontFamily: "monospace", fontSize: 12, padding: "4px 8px" }}
+                    />
+                  </label>
+
+                  <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                    <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      <input
+                        type="radio"
+                        name="scheduleType"
+                        checked={autoBackupCfg.scheduleType === "daily"}
+                        onChange={() => saveBackupSettings({ scheduleType: "daily" })}
+                      />
+                      <span>每天固定時間：</span>
+                      <input
+                        type="time"
+                        value={autoBackupCfg.dailyTime}
+                        onChange={(e) => saveBackupSettings({ dailyTime: e.target.value })}
+                        disabled={autoBackupCfg.scheduleType !== "daily"}
+                        style={{ padding: "2px 4px", fontSize: 12 }}
+                      />
+                    </label>
+
+                    <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      <input
+                        type="radio"
+                        name="scheduleType"
+                        checked={autoBackupCfg.scheduleType === "interval"}
+                        onChange={() => saveBackupSettings({ scheduleType: "interval" })}
+                      />
+                      <span>每隔：</span>
+                      <input
+                        type="number"
+                        min={0.5}
+                        max={48}
+                        step={0.5}
+                        value={autoBackupCfg.intervalHours}
+                        onChange={(e) => saveBackupSettings({ intervalHours: Number(e.target.value) || 1 })}
+                        disabled={autoBackupCfg.scheduleType !== "interval"}
+                        style={{ width: 52, padding: "2px 4px", fontSize: 12 }}
+                      />
+                      <span>小時</span>
+                    </label>
+
+                    <button
+                      type="button"
+                      onClick={() => void handleManualBackupNow()}
+                      disabled={savingBackupNow || !autoBackupCfg.targetPath.trim()}
+                      style={{ marginLeft: "auto", fontSize: 11, padding: "3px 8px" }}
+                    >
+                      {savingBackupNow ? "覆寫備份中…" : "立即覆寫備份一次"}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {comparing && <div className="muted pad">正在比對資料庫差異…</div>}

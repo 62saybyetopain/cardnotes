@@ -1,6 +1,6 @@
 // @depends-on ./SyncModal.tsx (SyncModal)
 // @depends-on ../lib/storage/index.ts (getPreferredDriverType)
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { getPreferredDriverType } from "../lib/storage";
 import { buildTree, descendantIds, isSameAxisGroup, tagPath, type TreeNode } from "../lib/tree";
@@ -43,6 +43,156 @@ export function LeftPanel(p: Props) {
   const [cleanup, setCleanup] = useState<CleanupResult | null>(null);
   const [cleaning, setCleaning] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
+  const [tagQuery, setTagQuery] = useState("");
+  const [tagSearchOpen, setTagSearchOpen] = useState(false);
+  const [showEmptyTags, setShowEmptyTags] = useState(false);
+  const [fallbackCounts, setFallbackCounts] = useState<Map<string, number>>(new Map());
+  const [countsReady, setCountsReady] = useState(false);
+  const searchWrapRef = useRef<HTMLDivElement>(null);
+
+  const hasNativeCount = useMemo(
+    () => p.tags.some((t) => typeof (t as Tag & { card_count?: unknown }).card_count === "number"),
+    [p.tags],
+  );
+
+  useEffect(() => {
+    if (hasNativeCount) {
+      setCountsReady(true);
+      return;
+    }
+    let alive = true;
+    api
+      .listCards({ limit: 200 })
+      .then((r) => {
+        if (!alive) return;
+        const map = new Map<string, number>();
+        for (const c of r.items) {
+          for (const t of c.tags ?? []) {
+            map.set(t.id, (map.get(t.id) ?? 0) + 1);
+          }
+        }
+        setFallbackCounts(map);
+        setCountsReady(true);
+      })
+      .catch(() => {
+        if (alive) {
+          setCountsReady(false);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [p.tags, hasNativeCount]);
+
+  useEffect(() => {
+    if (!tagSearchOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (searchWrapRef.current && !searchWrapRef.current.contains(e.target as Node)) {
+        setTagSearchOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setTagSearchOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [tagSearchOpen]);
+
+  const getDirectCardCount = useCallback(
+    (t: Tag): number => {
+      const native = (t as Tag & { card_count?: unknown }).card_count;
+      if (typeof native === "number") return native;
+      return fallbackCounts.get(t.id) ?? 0;
+    },
+    [fallbackCounts],
+  );
+
+  const getSubtreeCardCount = useCallback(
+    (node: TreeNode): number => {
+      let sum = getDirectCardCount(node.tag);
+      for (const child of node.children) {
+        sum += getSubtreeCardCount(child);
+      }
+      return sum;
+    },
+    [getDirectCardCount],
+  );
+
+  const filterTreeByCount = useCallback(
+    (nodes: TreeNode[]): TreeNode[] => {
+      if (showEmptyTags || !countsReady || (!hasNativeCount && fallbackCounts.size === 0)) return nodes;
+      const out: TreeNode[] = [];
+      for (const n of nodes) {
+        const filteredChildren = filterTreeByCount(n.children);
+        const total = getSubtreeCardCount(n);
+        if (total > 0 || p.filter.tagId === n.tag.id || filteredChildren.length > 0) {
+          out.push({ ...n, children: filteredChildren });
+        }
+      }
+      return out;
+    },
+    [countsReady, getSubtreeCardCount, p.filter.tagId, showEmptyTags],
+  );
+
+  const locationTreeNodes = useMemo(
+    () => filterTreeByCount(buildTree(p.tags, "location")),
+    [filterTreeByCount, p.tags],
+  );
+
+  const conceptFacetGroups = useMemo(() => {
+    const rawNodes = filterTreeByCount(buildTree(p.tags, "concept"));
+    const groups = new Map<string, { facet: string; nodes: TreeNode[]; totalCards: number }>();
+    for (const n of rawNodes) {
+      const facetName = n.tag.facet?.trim() || "未指定維度";
+      let g = groups.get(facetName);
+      if (!g) {
+        g = { facet: facetName, nodes: [], totalCards: 0 };
+        groups.set(facetName, g);
+      }
+      g.nodes.push(n);
+      g.totalCards += getDirectCardCount(n.tag);
+    }
+    return Array.from(groups.values()).sort((a, b) => {
+      if (a.facet === "未指定維度") return 1;
+      if (b.facet === "未指定維度") return -1;
+      return b.totalCards - a.totalCards || a.facet.localeCompare(b.facet);
+    });
+  }, [filterTreeByCount, getDirectCardCount, p.tags]);
+
+  const dropdownTags = useMemo(() => {
+    const q = tagQuery.trim().toLowerCase();
+    if (!q) {
+      const nonEmpty = p.tags.filter((t) => getDirectCardCount(t) > 0);
+      const base = nonEmpty.length > 0 ? nonEmpty : p.tags;
+      return [...base]
+        .sort((a, b) => getDirectCardCount(b) - getDirectCardCount(a) || a.name.localeCompare(b.name))
+        .slice(0, 30)
+        .map((t) => ({ tag: t, matchedAlias: null as string | null, count: getDirectCardCount(t) }));
+    }
+    const matches: { tag: Tag; matchedAlias: string | null; count: number; rank: number }[] = [];
+    for (const t of p.tags) {
+      const nameLower = t.name.toLowerCase();
+      const pathLower = tagPath(p.tags, t.id).toLowerCase();
+      const facetLower = (t.facet ?? "").toLowerCase();
+      const hitAlias = (t.aliases ?? []).find((a) => a.toLowerCase().includes(q)) ?? null;
+      let rank = 0;
+      if (nameLower === q || (hitAlias && hitAlias.toLowerCase() === q)) rank = 4;
+      else if (nameLower.startsWith(q) || (hitAlias && hitAlias.toLowerCase().startsWith(q))) rank = 3;
+      else if (nameLower.includes(q) || hitAlias) rank = 2;
+      else if (pathLower.includes(q) || facetLower.includes(q)) rank = 1;
+      if (rank > 0) {
+        matches.push({ tag: t, matchedAlias: hitAlias, count: getDirectCardCount(t), rank });
+      }
+    }
+    return matches
+      .sort((a, b) => b.rank - a.rank || b.count - a.count || a.tag.name.localeCompare(b.tag.name))
+      .slice(0, 30);
+  }, [getDirectCardCount, p.tags, tagQuery]);
+
   const run = async (fn: () => Promise<unknown>, prefix: string) => {
     try {
       await fn();
@@ -243,9 +393,142 @@ export function LeftPanel(p: Props) {
         </div>
       </section>
 
-      <section>
-        <div
-          className="section-head"
+      <section style={{ paddingBottom: 4 }}>
+        <div ref={searchWrapRef} style={{ position: "relative", padding: "4px 8px" }}>
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <input
+              value={tagQuery}
+              onFocus={() => setTagSearchOpen(true)}
+              onClick={() => setTagSearchOpen(true)}
+              onChange={(e) => {
+                setTagQuery(e.target.value);
+                setTagSearchOpen(true);
+              }}
+              placeholder="🔍 搜尋標籤或別名…"
+              aria-label="搜尋標籤或別名"
+              style={{
+                flex: 1,
+                fontSize: 12,
+                padding: "4px 8px",
+                borderRadius: 6,
+                border: "1px solid var(--line, #334155)",
+                background: "var(--bg)",
+                color: "var(--text)",
+              }}
+            />
+            {tagQuery && (
+              <button
+                type="button"
+                onClick={() => setTagQuery("")}
+                title="清除搜尋"
+                style={{ fontSize: 11, padding: "2px 5px" }}
+              >
+                ✕
+              </button>
+            )}
+            <button
+              type="button"
+              className={showEmptyTags ? "on" : ""}
+              onClick={() => setShowEmptyTags((v) => !v)}
+              title={showEmptyTags ? "目前已顯示 0 張卡片的空標籤（點擊隱藏）" : "目前已隱藏 0 張卡片的空標籤（點擊顯示全部）"}
+              style={{ fontSize: 11, padding: "3px 6px", flexShrink: 0 }}
+            >
+              {showEmptyTags ? "含空" : "非空"}
+            </button>
+          </div>
+
+          {tagSearchOpen && (
+            <div
+              role="listbox"
+              aria-label="標籤檢索選單"
+              style={{
+                position: "absolute",
+                left: 8,
+                right: 8,
+                top: "calc(100% + 2px)",
+                maxHeight: 280,
+                overflowY: "auto",
+                background: "var(--panel, #1e293b)",
+                border: "1px solid var(--line, #475569)",
+                borderRadius: 6,
+                boxShadow: "0 6px 16px rgba(0, 0, 0, 0.38)",
+                zIndex: 60,
+                padding: "4px 0",
+              }}
+            >
+              <div
+                className="muted"
+                style={{
+                  fontSize: 11,
+                  padding: "4px 10px",
+                  borderBottom: "1px solid var(--line, #334155)",
+                  display: "flex",
+                  justifyContent: "space-between",
+                }}
+              >
+                <span>{tagQuery.trim() ? "相關標籤（含別名比對）" : "常用標籤（依卡片數排序）"}</span>
+                <span>卡片數</span>
+              </div>
+              {dropdownTags.length === 0 ? (
+                <div className="muted" style={{ fontSize: 12, padding: "8px 10px" }}>
+                  找不到符合「{tagQuery.trim()}」的標籤或別名
+                </div>
+              ) : (
+                <ul className="plain" style={{ margin: 0 }}>
+                  {dropdownTags.map(({ tag: t, matchedAlias, count }) => {
+                    const isLoc = isSameAxisGroup(t.axis, "location");
+                    return (
+                      <li key={t.id}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            p.onFilter({ tagId: t.id });
+                            setTagSearchOpen(false);
+                          }}
+                          style={{
+                            width: "100%",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 6,
+                            padding: "5px 10px",
+                            border: "none",
+                            background: p.filter.tagId === t.id ? "var(--row-hover, rgba(59,130,246,0.15))" : "transparent",
+                            color: "var(--text)",
+                            fontSize: 12,
+                            textAlign: "left",
+                            cursor: "pointer",
+                          }}
+                        >
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {isLoc ? (
+                              <span className="facet-badge">📁 抽屜</span>
+                            ) : (
+                              t.facet && <span className="facet-badge">{t.facet}</span>
+                            )}
+                            <span>{isLoc ? tagPath(p.tags, t.id) : t.name}</span>
+                            {matchedAlias && (
+                              <span className="muted" style={{ fontSize: 11, marginLeft: 4 }}>
+                                （別名：{matchedAlias}）
+                              </span>
+                            )}
+                          </span>
+                          <span className="count" style={{ flexShrink: 0 }}>
+                            {count}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <details open>
+        <summary
           onDragOver={(e) => {
             if (canDropOn(dragging, null, "location")) {
               e.preventDefault();
@@ -256,31 +539,42 @@ export function LeftPanel(p: Props) {
             e.preventDefault();
             handleDrop(null, "location", e.dataTransfer.getData("text/plain"));
           }}
-          title="將子抽屜拖曳至此處可移回最上層"
+          title="點擊展開／收合收納位置；將子抽屜拖曳至此處可移回最上層"
         >
-          <h3>收納位置（櫃子／抽屜）</h3>
-          <button onClick={() => void createTag("location", null)} aria-label="新增櫃子">
+          {AXIS_LABEL.location}
+          <button
+            className="add"
+            onClick={(e) => (e.preventDefault(), void createTag("location", null))}
+            aria-label="新增櫃子"
+          >
             ＋櫃子
           </button>
-        </div>
-        <Tree
-          nodes={buildTree(p.tags, "location")}
-          axis="location"
-          filter={p.filter}
-          dragging={dragging}
-          canDropOn={canDropOn}
-          onDragStartTag={setDragging}
-          onDragEndTag={() => setDragging(null)}
-          onDropTag={handleDrop}
-          onFilter={p.onFilter}
-          onAdd={(t) => void createTag(t.axis, t)}
-          onRename={(t) => void renameTag(t)}
-          onEditMeta={setEditingTag}
-          onMerge={setMergingTag}
-          onMove={setMoving}
-          onDelete={(t) => void deleteTag(t)}
-        />
-      </section>
+        </summary>
+        {locationTreeNodes.length === 0 ? (
+          <div className="muted pad" style={{ fontSize: 12 }}>
+            尚無含卡片的收納位置
+          </div>
+        ) : (
+          <Tree
+            nodes={locationTreeNodes}
+            axis="location"
+            filter={p.filter}
+            dragging={dragging}
+            canDropOn={canDropOn}
+            onDragStartTag={setDragging}
+            onDragEndTag={() => setDragging(null)}
+            onDropTag={handleDrop}
+            onFilter={p.onFilter}
+            onAdd={(t) => void createTag(t.axis, t)}
+            onRename={(t) => void renameTag(t)}
+            onEditMeta={setEditingTag}
+            onMerge={setMergingTag}
+            onMove={setMoving}
+            onDelete={(t) => void deleteTag(t)}
+            getCardCount={getSubtreeCardCount}
+          />
+        )}
+      </details>
 
       <details open>
         <summary>
@@ -293,24 +587,52 @@ export function LeftPanel(p: Props) {
             ＋
           </button>
         </summary>
-        <Tree
-          nodes={buildTree(p.tags, "concept")}
-          axis="concept"
-          filter={p.filter}
-          dragging={dragging}
-          canDropOn={canDropOn}
-          onDragStartTag={setDragging}
-          onDragEndTag={() => setDragging(null)}
-          onDropTag={handleDrop}
-          onFilter={p.onFilter}
-          onAdd={(t) => void createTag(t.axis, t)}
-          onRename={(t) => void renameTag(t)}
-          onEditMeta={setEditingTag}
-          onMerge={setMergingTag}
-          onMove={setMoving}
-          onDelete={(t) => void deleteTag(t)}
-          canNest={false}
-        />
+        {conceptFacetGroups.length === 0 ? (
+          <div className="muted pad" style={{ fontSize: 12 }}>
+            尚無含卡片的概念標籤
+          </div>
+        ) : (
+          conceptFacetGroups.map((group) => (
+            <details key={group.facet} open style={{ marginLeft: 6, marginBottom: 2 }}>
+              <summary
+                style={{
+                  fontSize: 12,
+                  padding: "3px 8px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  cursor: "pointer",
+                  userSelect: "none",
+                }}
+              >
+                <span className="facet-badge">{group.facet}</span>
+                <span className="count" style={{ marginLeft: "auto" }}>
+                  {group.nodes.length} 標籤 · {group.totalCards} 卡
+                </span>
+              </summary>
+              <Tree
+                nodes={group.nodes}
+                axis="concept"
+                filter={p.filter}
+                dragging={dragging}
+                canDropOn={canDropOn}
+                onDragStartTag={setDragging}
+                onDragEndTag={() => setDragging(null)}
+                onDropTag={handleDrop}
+                onFilter={p.onFilter}
+                onAdd={(t) => void createTag(t.axis, t)}
+                onRename={(t) => void renameTag(t)}
+                onEditMeta={setEditingTag}
+                onMerge={setMergingTag}
+                onMove={setMoving}
+                onDelete={(t) => void deleteTag(t)}
+                canNest={false}
+                getCardCount={(n) => getDirectCardCount(n.tag)}
+                hideFacetBadge={true}
+              />
+            </details>
+          ))
+        )}
       </details>
 
       <section>
@@ -392,6 +714,8 @@ function Tree(props: {
   onMove(t: Tag): void;
   onDelete(t: Tag): void;
   canNest?: boolean;
+  getCardCount?(n: TreeNode): number;
+  hideFacetBadge?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const toggle = (id: string) =>
@@ -451,11 +775,11 @@ function Tree(props: {
                   .join("\n") || undefined
               }
             >
-              {n.tag.facet && <span className="facet-badge">{n.tag.facet}</span>}
+              {!props.hideFacetBadge && n.tag.facet && <span className="facet-badge">{n.tag.facet}</span>}
               {n.tag.name}
-              {n.tag.aliases && n.tag.aliases.length > 0 && (
-                <span className="count" title={`別名：${n.tag.aliases.join("、")}`}>
-                  +{n.tag.aliases.length}
+              {props.getCardCount && (
+                <span className="count" title="卡片數量">
+                  {props.getCardCount(n)}
                 </span>
               )}
             </button>

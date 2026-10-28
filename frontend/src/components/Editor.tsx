@@ -130,6 +130,72 @@ function splitBodySegments(body: string): BodySegment[] {
   return segments;
 }
 
+// 分割按鈕：左側主按鈕直接套用，右側 ▾ 展開樣式選單；兩者貼合成同一個控制項，避免被誤認為兩個獨立功能
+function SplitMenuButton(props: {
+  open: boolean;
+  onToggle(): void;
+  main: React.ReactNode;
+  mainTitle: string;
+  mainActive?: boolean;
+  menuLabel: string;
+  onMain(): void;
+  children: React.ReactNode;
+}) {
+  const { open, onToggle, main, mainTitle, mainActive, menuLabel, onMain, children } = props;
+  return (
+    <span data-split style={{ position: "relative", display: "inline-flex" }}>
+      <button
+        type="button"
+        className={mainActive ? "on" : ""}
+        aria-pressed={mainActive}
+        title={mainTitle}
+        onClick={onMain}
+        style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}
+      >
+        {main}
+      </button>
+      <button
+        type="button"
+        aria-label={menuLabel}
+        aria-expanded={open}
+        title={menuLabel}
+        onClick={onToggle}
+        style={{
+          borderTopLeftRadius: 0,
+          borderBottomLeftRadius: 0,
+          marginLeft: -1,
+          padding: "0 5px",
+          fontSize: 10,
+        }}
+      >
+        ▾
+      </button>
+      {open && (
+        <div
+          role="menu"
+          style={{
+            position: "absolute",
+            top: "100%",
+            left: 0,
+            marginTop: 4,
+            zIndex: 5,
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            padding: 6,
+            background: "var(--panel, #1e293b)",
+            border: "1px solid var(--line, #475569)",
+            borderRadius: 6,
+            boxShadow: "0 4px 14px rgba(0, 0, 0, 0.28)",
+          }}
+        >
+          {children}
+        </div>
+      )}
+    </span>
+  );
+}
+
 const STATUS_TEXT: Record<Status, string> = {
   saved: "已儲存",
   dirty: "未儲存",
@@ -145,7 +211,7 @@ const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
   { type: "h3", label: "標題 3" },
 ];
 
-export function Editor({ card, compact = false, hideTopToolbar = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, report }: Props) {
+export function Editor({ card, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, report }: Props) {
   const [title, setTitle] = useState(card.title);
   const [body, setBody] = useState(() => normalizeNewlines(card.body));
   const [cursorPos, setCursorPos] = useState(0);
@@ -164,11 +230,35 @@ export function Editor({ card, compact = false, hideTopToolbar = false, initialS
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [lineMenu, setLineMenu] = useState<{ segStart: number; lineTop: number; lineBottom: number } | null>(null);
 
+  // 非 compact 時內文底部留出 35vh 空白：否則捲到底後，游標也無法被抬到視線中段
+  const bottomPadVh = compact ? 0 : 35;
+
   const checkScrollBottom = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
-    const diff = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const diff = el.scrollHeight - el.scrollTop - el.clientHeight - (bottomPadVh * window.innerHeight) / 100;
     setShowScrollBottom(diff > 80);
+  }, [bottomPadVh]);
+
+  // @depends-on ./LiveSegmentEditor.tsx（CodeMirror 的 contenteditable；以瀏覽器 Selection 取得游標位置，不依賴 SegmentHandle）
+  // 只在「打字造成的變動」呼叫：游標掉到捲動區 55% 以下時拉回 40% 高度；只往下捲，不把游標往上推
+  const keepCaretComfortable = useCallback(() => {
+    const box = scrollContainerRef.current;
+    const sel = window.getSelection();
+    if (!box || !sel || sel.rangeCount === 0 || !sel.isCollapsed) return;
+    const range = sel.getRangeAt(0);
+    if (!box.contains(range.startContainer)) return;
+    const rects = range.getClientRects();
+    const host =
+      range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+    const rect = rects.length > 0 ? rects[0] : host?.getBoundingClientRect();
+    // 拿不到可信座標（全 0 或高度異常大＝量到整個容器）就不動，不猜
+    if (!rect || (rect.top === 0 && rect.height === 0) || rect.height > 80) return;
+    const b = box.getBoundingClientRect();
+    const caretY = rect.top + rect.height / 2 - b.top;
+    if (caretY > b.height * 0.55) {
+      box.scrollTop += caretY - b.height * 0.4;
+    }
   }, []);
 
   const scrollToBottom = useCallback(() => {
@@ -458,8 +548,7 @@ export function Editor({ card, compact = false, hideTopToolbar = false, initialS
   const currentListStyle = detectListStyleAtCursor(body, cursorPos);
   const activeBulletStyle = currentListStyle.bulletStyle ?? bulletStyle;
   const activeOrderedStyle = currentListStyle.orderedStyle ?? orderedStyle;
-  const activeHighlightMeta =
-    HIGHLIGHT_COLOR_OPTIONS.find((c) => c.color === highlightColor) ?? HIGHLIGHT_COLOR_OPTIONS[0];
+
   const missingMediaCount = warnings
     .filter((w) => w.code === "MISSING_MEDIA")
     .reduce((n, w) => n + w.ids.length, 0);
@@ -467,183 +556,239 @@ export function Editor({ card, compact = false, hideTopToolbar = false, initialS
     .filter((w) => w.code === "MISSING_CARD")
     .reduce((n, w) => n + w.ids.length, 0);
 
+  const [openMenu, setOpenMenu] = useState<"bullet" | "ordered" | null>(null);
+
+  // 反白圖標列：位置由 LiveSegmentEditor 回報；停頓 150ms 才顯示（拖曳選取時不閃爍），收合或失焦立即隱藏
+  const [selBubble, setSelBubble] = useState<{ segStart: number; left: number; top: number } | null>(null);
+  const selTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const selPendingSegRef = useRef<number | null>(null);
+
+  const reportSelectionRect = useCallback((segStart: number, rect: { left: number; bottom: number } | null) => {
+    if (!rect) {
+      // 只清掉「自己段落」的待顯示與已顯示；別的段落剛接手時，舊段落的失焦回報不能蓋掉它
+      if (selPendingSegRef.current === segStart && selTimerRef.current) {
+        clearTimeout(selTimerRef.current);
+        selTimerRef.current = null;
+        selPendingSegRef.current = null;
+      }
+      setSelBubble((cur) => (cur && cur.segStart === segStart ? null : cur));
+      return;
+    }
+    if (selTimerRef.current) clearTimeout(selTimerRef.current);
+    selPendingSegRef.current = segStart;
+    selTimerRef.current = setTimeout(() => {
+      selTimerRef.current = null;
+      selPendingSegRef.current = null;
+      setSelBubble({ segStart, left: rect.left, top: rect.bottom });
+    }, 150);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (selTimerRef.current) clearTimeout(selTimerRef.current);
+    },
+    [],
+  );
+
+  // 切換預覽會銷毀所有 view（不會回報 null），回到編輯時不可殘留舊位置
+  useEffect(() => {
+    setSelBubble(null);
+  }, [previewing]);
+
+  const bubbleBtnStyle: React.CSSProperties = {
+    width: 26,
+    height: 26,
+    padding: 0,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: 14,
+  };
+
+  // 浮動工具列開關時，子選單一律回到收合
+  useEffect(() => {
+    setOpenMenu(null);
+  }, [lineMenu]);
+
+  // 點到分割按鈕以外的地方就收起子選單（工具列本身的關閉邏輯仍由 lineMenu 的 effect 負責）
+  useEffect(() => {
+    if (!openMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement | null)?.closest("[data-split]")) setOpenMenu(null);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [openMenu]);
+
+  const activeBulletMeta = BULLET_STYLE_OPTIONS.find((o) => o.style === activeBulletStyle);
+  const activeOrderedMeta = ORDERED_STYLE_OPTIONS.find((o) => o.style === activeOrderedStyle);
+
+
+  // 反白圖標列一消失就收起子選單，下次出現不會殘留展開狀態
+  useEffect(() => {
+    if (!selBubble) setOpenMenu(null);
+  }, [selBubble]);
+
+  // 行首 `::` 面板與反白圖標列共用：改這一份，兩邊同步
+  const renderListSplits = () => (
+    <>
+      <SplitMenuButton
+        open={openMenu === "bullet"}
+        onToggle={() => setOpenMenu((m) => (m === "bullet" ? null : "bullet"))}
+        main={<>{activeBulletMeta?.label ?? "•"} 項目</>}
+        mainTitle="套用或取消項目符號"
+        mainActive={currentLineType === "ul"}
+        menuLabel="選擇項目符號樣式"
+        onMain={() => handleToolbarLineType("ul", { bulletStyle: activeBulletStyle })}
+      >
+        {BULLET_STYLE_OPTIONS.map((o) => (
+          <button
+            key={o.style}
+            type="button"
+            role="menuitemradio"
+            aria-checked={activeBulletStyle === o.style}
+            className={activeBulletStyle === o.style ? "on" : ""}
+            onClick={() => {
+              setBulletStyle(o.style);
+              setOpenMenu(null);
+              handleToolbarLineType("ul", { bulletStyle: o.style });
+            }}
+          >
+            {o.label}
+          </button>
+        ))}
+      </SplitMenuButton>
+
+      <SplitMenuButton
+        open={openMenu === "ordered"}
+        onToggle={() => setOpenMenu((m) => (m === "ordered" ? null : "ordered"))}
+        main={<>{activeOrderedMeta?.label ?? "1."} 編號</>}
+        mainTitle="套用或取消編號清單"
+        mainActive={currentLineType === "ol"}
+        menuLabel="選擇編號清單樣式"
+        onMain={() => handleToolbarLineType("ol", { orderedStyle: activeOrderedStyle })}
+      >
+        {ORDERED_STYLE_OPTIONS.map((o) => (
+          <button
+            key={o.style}
+            type="button"
+            role="menuitemradio"
+            aria-checked={activeOrderedStyle === o.style}
+            className={activeOrderedStyle === o.style ? "on" : ""}
+            onClick={() => {
+              setOrderedStyle(o.style);
+              setOpenMenu(null);
+              handleToolbarLineType("ol", { orderedStyle: o.style });
+            }}
+          >
+            {o.label}
+          </button>
+        ))}
+      </SplitMenuButton>
+    </>
+  );
+
+  // 螢光筆色點＋移除；沒有反白時整排變灰不能點，不假裝成功
+  const renderHighlightDots = (enabled: boolean) => (
+    <>
+      {HIGHLIGHT_COLOR_OPTIONS.map((c) => (
+        <button
+          key={c.color}
+          type="button"
+          disabled={!enabled}
+          aria-label={`螢光筆：${c.label}`}
+          title={enabled ? `螢光筆：${c.label}` : "先反白要上色的文字"}
+          onClick={() => handleToolbarHighlight(c.color)}
+          style={{
+            width: 20,
+            height: 20,
+            padding: 0,
+            borderRadius: "50%",
+            background: c.dotColor,
+            border: highlightColor === c.color ? "2px solid var(--text)" : "1px solid var(--line)",
+            cursor: enabled ? "pointer" : "not-allowed",
+            opacity: enabled ? 1 : 0.35,
+          }}
+        />
+      ))}
+      <button
+        type="button"
+        disabled={!enabled}
+        aria-label="移除螢光筆"
+        title={enabled ? "移除螢光筆" : "先反白要上色的文字"}
+        style={{ ...bubbleBtnStyle, opacity: enabled ? 1 : 0.35 }}
+        onClick={() => handleToolbarHighlight(null)}
+      >
+        ⊘
+      </button>
+    </>
+  );
+
+  const lineMenuHasSelection =
+    lineMenu !== null &&
+    (() => {
+      const s = getGlobalSelection();
+      return s.end > s.start;
+    })();
+
   const renderFormatControls = () => (
     <>
-      {LINE_TYPE_BUTTONS.map((btn) => (
-        <button
-          key={btn.type}
-          type="button"
-          className={currentLineType === btn.type ? "on" : ""}
-          aria-pressed={currentLineType === btn.type}
-          onClick={() => handleToolbarLineType(btn.type)}
-        >
-          {btn.label}
-        </button>
-      ))}
-
-      {/* 項目符號（主按鈕＋5 種樣式選單） */}
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
-        <button
-          type="button"
-          className={currentLineType === "ul" ? "on" : ""}
-          aria-pressed={currentLineType === "ul"}
-          onClick={() => handleToolbarLineType("ul", { bulletStyle: activeBulletStyle })}
-          title="套用或取消項目符號"
-        >
-          項目符號
-        </button>
-        <select
-          value={activeBulletStyle}
-          aria-label="選擇項目符號樣式"
-          title="切換項目符號樣式（• / ◦ / ▪ / ▸ / ✓）"
-          style={{ padding: "2px 2px", fontSize: 12, maxWidth: 54 }}
-          onChange={(e) => {
-            const next = e.target.value as BulletStyle;
-            setBulletStyle(next);
-            handleToolbarLineType("ul", { bulletStyle: next });
-          }}
-        >
-          {BULLET_STYLE_OPTIONS.map((o) => (
-            <option key={o.style} value={o.style}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-      </span>
-
-      {/* 編號清單（主按鈕＋5 種樣式選單） */}
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
-        <button
-          type="button"
-          className={currentLineType === "ol" ? "on" : ""}
-          aria-pressed={currentLineType === "ol"}
-          onClick={() => handleToolbarLineType("ol", { orderedStyle: activeOrderedStyle })}
-          title="套用或取消編號清單"
-        >
-          編號
-        </button>
-        <select
-          value={activeOrderedStyle}
-          aria-label="選擇編號清單樣式"
-          title="切換編號樣式（1. / (1) / a. / A. / i.）"
-          style={{ padding: "2px 2px", fontSize: 12, maxWidth: 58 }}
-          onChange={(e) => {
-            const next = e.target.value as OrderedStyle;
-            setOrderedStyle(next);
-            handleToolbarLineType("ol", { orderedStyle: next });
-          }}
-        >
-          {ORDERED_STYLE_OPTIONS.map((o) => (
-            <option key={o.style} value={o.style}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-      </span>
-
-      <button
-        type="button"
-        onClick={() => handleToolbarIndent(1)}
-        disabled={currentLineType !== "ul" && currentLineType !== "ol"}
-      >
-        縮排
-      </button>
-      <button
-        type="button"
-        onClick={() => handleToolbarIndent(-1)}
-        disabled={currentLineType !== "ul" && currentLineType !== "ol"}
-      >
-        取消縮排
-      </button>
-
-      {/* 粗體與底線 */}
-      <button
-        type="button"
-        onClick={() => handleToolbarInlineWrap("**", "粗體文字")}
-        title="粗體 (**文字**，快捷鍵 Ctrl+B)"
-        style={{ fontWeight: 700 }}
-      >
-        B 粗體
-      </button>
-      <button
-        type="button"
-        onClick={() => handleToolbarInlineWrap("++", "底線文字")}
-        title="底線 (++文字++，快捷鍵 Ctrl+U)"
-        style={{ textDecoration: "underline" }}
-      >
-        U 底線
-      </button>
-
-      {/* 螢光筆重點（主按鈕＋5 種深色主題色點＋清除） */}
-      <span
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 4,
-          padding: "1px 6px",
-          borderRadius: 6,
-          border: "1px solid var(--line, #334155)",
-          background: "var(--bg)",
-        }}
-      >
-        <button
-          type="button"
-          onClick={() => handleToolbarHighlight(highlightColor)}
-          title={`套用或取消螢光筆（目前顏色：${activeHighlightMeta.label}）`}
-          style={{
-            border: "none",
-            background: "transparent",
-            padding: "1px 4px",
-            borderBottom: `3px solid ${activeHighlightMeta.dotColor}`,
-            cursor: "pointer",
-          }}
-        >
-          🖍 螢光筆
-        </button>
-        {HIGHLIGHT_COLOR_OPTIONS.map((c) => (
+      <span role="group" aria-label="段落格式" style={{ display: "inline-flex", gap: 2 }}>
+        {LINE_TYPE_BUTTONS.map((btn) => (
           <button
-            key={c.color}
+            key={btn.type}
             type="button"
-            aria-label={`螢光筆：${c.label}`}
-            title={`螢光筆：${c.label}（選取文字後點擊直接套用或換色）`}
-            onClick={() => handleToolbarHighlight(c.color)}
-            style={{
-              width: 14,
-              height: 14,
-              padding: 0,
-              borderRadius: "50%",
-              background: c.dotColor,
-              border:
-                highlightColor === c.color
-                  ? "2px solid var(--text)"
-                  : "1px solid var(--line)",
-              cursor: "pointer",
-            }}
-          />
+            className={currentLineType === btn.type ? "on" : ""}
+            aria-pressed={currentLineType === btn.type}
+            onClick={() => handleToolbarLineType(btn.type)}
+          >
+            {btn.label}
+          </button>
         ))}
+      </span>
+
+      <span role="group" aria-label="清單" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        {renderListSplits()}
+
         <button
           type="button"
-          onClick={() => handleToolbarHighlight(null)}
-          title="移除選取文字的螢光筆標記"
-          style={{ fontSize: 11, padding: "0 4px", cursor: "pointer" }}
+          aria-label="增加縮排"
+          title="增加縮排（Tab）"
+          onClick={() => handleToolbarIndent(1)}
+          disabled={currentLineType !== "ul" && currentLineType !== "ol"}
         >
-          ✕
+          ⇥
+        </button>
+        <button
+          type="button"
+          aria-label="減少縮排"
+          title="減少縮排（Shift+Tab）"
+          onClick={() => handleToolbarIndent(-1)}
+          disabled={currentLineType !== "ul" && currentLineType !== "ol"}
+        >
+          ⇤
         </button>
       </span>
 
-      <button type="button" onClick={openMentionFromToolbar}>
-        @ 引用
-      </button>
-      <button type="button" onClick={insertCodeBlock} title="在卡片中插入可命名的代碼區塊">
-        ＋ 代碼塊
-      </button>
-      <button
-        type="button"
-        onClick={() => setCodePatchOpen(true)}
-        title="對卡片內的代碼塊或外部代碼執行精確定位與自動取代"
-      >
-        定位取代
-      </button>
+      <span role="group" aria-label="螢光筆顏色" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        {renderHighlightDots(lineMenuHasSelection)}
+      </span>
+
+      <span role="group" aria-label="插入" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <button type="button" onClick={openMentionFromToolbar}>
+          @ 引用
+        </button>
+        <button type="button" onClick={insertCodeBlock} title="在卡片中插入可命名的代碼區塊">
+          ＋ 代碼塊
+        </button>
+        <button
+          type="button"
+          onClick={() => setCodePatchOpen(true)}
+          title="對卡片內的代碼塊或外部代碼執行精確定位與自動取代"
+        >
+          定位取代
+        </button>
+      </span>
     </>
   );
 
@@ -660,25 +805,23 @@ export function Editor({ card, compact = false, hideTopToolbar = false, initialS
         <span className={`status ${status}`} data-testid="save-status">
           {uploading > 0 ? `上傳中（${uploading}）…` : STATUS_TEXT[status]}
         </span>
-        {hideTopToolbar && (
-          <button
-            type="button"
-            className={`preview-toggle-btn${previewing ? " on" : ""}`}
-            style={{ fontSize: 11, padding: "2px 8px", marginLeft: 6 }}
-            onClick={() => {
-              setPreviewing((p) => {
-                const next = !p;
-                if (next) {
-                  setMentionState(null);
-                  setLineMenu(null);
-                }
-                return next;
-              });
-            }}
-          >
-            {previewing ? "✎ 返回編輯" : "👁 預覽"}
-          </button>
-        )}
+        <button
+          type="button"
+          className={`preview-toggle-btn${previewing ? " on" : ""}`}
+          style={{ fontSize: 11, padding: "2px 8px", marginLeft: 6 }}
+          onClick={() => {
+            setPreviewing((p) => {
+              const next = !p;
+              if (next) {
+                setMentionState(null);
+                setLineMenu(null);
+              }
+              return next;
+            });
+          }}
+        >
+          {previewing ? "✎ 返回編輯" : "👁 預覽"}
+        </button>
       </div>
       {status === "conflict" && (
         <div className="banner danger" role="alert">
@@ -704,37 +847,7 @@ export function Editor({ card, compact = false, hideTopToolbar = false, initialS
         </div>
       )}
 
-      {!hideTopToolbar && (
-        <div
-          className="editor-toolbar"
-          role="toolbar"
-          aria-label="格式與引用工具列"
-          onMouseDown={(e) => {
-            // 防止點擊工具列導致輸入框失去焦點與選取範圍
-            if ((e.target as HTMLElement).tagName !== "SELECT" && (e.target as HTMLElement).tagName !== "INPUT") {
-              e.preventDefault();
-            }
-          }}
-        >
-          {!previewing && renderFormatControls()}
-          <button
-            type="button"
-            className={`preview-toggle-btn${previewing ? " on" : ""}`}
-            onClick={() => {
-              setPreviewing((p) => {
-                const next = !p;
-                if (next) {
-                  setMentionState(null);
-                  setLineMenu(null);
-                }
-                return next;
-              });
-            }}
-          >
-            {previewing ? "✎ 返回編輯" : "👁 預覽"}
-          </button>
-        </div>
-      )}
+
 
       {!previewing && mentionState && (
         <MentionPopup
@@ -786,6 +899,7 @@ export function Editor({ card, compact = false, hideTopToolbar = false, initialS
               style={{
                 minHeight: compact ? 120 : 320,
                 paddingLeft: 26,
+                paddingBottom: bottomPadVh ? `${bottomPadVh}vh` : undefined,
                 cursor: "text",
                 display: "flex",
                 flexDirection: "column",
@@ -832,14 +946,15 @@ export function Editor({ card, compact = false, hideTopToolbar = false, initialS
                       style={{
                         position: "absolute",
                         left: 26,
-                        right: 10,
+                        width: "max-content",
+                        maxWidth: "calc(100% - 36px)",
                         top: isAbove ? lineMenu.lineTop - 6 : lineMenu.lineBottom + 6,
                         transform: isAbove ? "translateY(-100%)" : undefined,
                         zIndex: 30,
                       display: "flex",
-                      flexWrap: "wrap",
-                      alignItems: "center",
-                      gap: 4,
+                      flexDirection: "column",
+                      alignItems: "flex-start",
+                      gap: 6,
                       padding: "6px 8px",
                       background: "var(--panel, #1e293b)",
                       border: "1px solid var(--line, #475569)",
@@ -853,17 +968,64 @@ export function Editor({ card, compact = false, hideTopToolbar = false, initialS
                     }}
                   >
                     {renderFormatControls()}
-                    <button
-                      type="button"
-                      style={{ marginLeft: "auto", padding: "2px 6px", color: "var(--muted)" }}
-                      onClick={() => setLineMenu(null)}
-                      title="關閉浮動工具列"
-                    >
-                      ✕
-                    </button>
                   </div>
                   );
                 })()}
+
+                {selBubble && !lineMenu && (
+                  <div
+                    className="selection-bubble"
+                    role="toolbar"
+                    aria-label="文字格式快捷"
+                    style={{
+                      position: "absolute",
+                      left: Math.max(
+                        110,
+                        Math.min(selBubble.left, (scrollContainerRef.current?.clientWidth ?? 600) - 110),
+                      ),
+                      top: selBubble.top + 6,
+                      transform: "translateX(-50%)",
+                      zIndex: 30,
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "flex-start",
+                      gap: 6,
+                      padding: 6,
+                      background: "var(--panel, #1e293b)",
+                      border: "1px solid var(--line, #475569)",
+                      borderRadius: 8,
+                      boxShadow: "0 4px 14px rgba(0, 0, 0, 0.28)",
+                    }}
+                    onMouseDown={(e) => e.preventDefault()}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                      <button
+                        type="button"
+                        aria-label="粗體"
+                        title="粗體（Ctrl+B）"
+                        style={{ ...bubbleBtnStyle, fontWeight: 700 }}
+                        onClick={() => handleToolbarInlineWrap("**", "粗體文字")}
+                      >
+                        B
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="底線"
+                        title="底線（Ctrl+U）"
+                        style={{ ...bubbleBtnStyle, textDecoration: "underline" }}
+                        onClick={() => handleToolbarInlineWrap("++", "底線文字")}
+                      >
+                        U
+                      </button>
+                      <span
+                        aria-hidden="true"
+                        style={{ width: 1, height: 18, margin: "0 2px", background: "var(--line, #475569)" }}
+                      />
+                      {renderHighlightDots(true)}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>{renderListSplits()}</div>
+                  </div>
+                )}
 
                 {segments.map((seg, idx) => {
                   if (seg.kind === "media") {
@@ -920,6 +1082,7 @@ export function Editor({ card, compact = false, hideTopToolbar = false, initialS
                         if (h) textRef.current = h;
                       }}
                       onSelectionChange={(from) => setCursorPos(seg.start + from)}
+                      onSelectionRect={(rect) => reportSelectionRect(seg.start, rect)}
                       onToggleLineMenu={(rect) => {
                         setLineMenu((cur) =>
                           cur && cur.segStart === seg.start && Math.abs(cur.lineTop - rect.lineTop) < 4
@@ -936,6 +1099,7 @@ export function Editor({ card, compact = false, hideTopToolbar = false, initialS
                         const globalPos = seg.start + cursor;
                         onBody(nextBody);
                         setCursorPos(globalPos);
+                        requestAnimationFrame(keepCaretComfortable);
                         if (nextBody.length >= prevBodyLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
                           const trig = detectAtTrigger(nextBody, globalPos);
                           if (trig && trig.query === "") {
@@ -972,6 +1136,7 @@ export function Editor({ card, compact = false, hideTopToolbar = false, initialS
                           const patch = handleListEnter(latest.current.body, gStart, gEnd);
                           if (!patch) return false;
                           applyEditPatch(patch);
+                          requestAnimationFrame(keepCaretComfortable);
                           return true;
                         }
                         return false;
