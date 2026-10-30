@@ -1,5 +1,5 @@
 // @depends-on ./layout.ts (LayoutBox)
-// @depends-on ../components/Board.tsx (GROUP_PAD_TOP 需 ≥ .group-header 高度；Board.createGroup 內的 24／44 邊距需與此處一致)
+// @depends-on ../components/Board.tsx (GROUP_PAD_TOP 需 ≥ .group-header 高度；Board.createGroup 直接引用此處的 GROUP_PAD／GROUP_PAD_TOP，不再各自寫死數字)
 import type { LayoutBox } from "./layout";
 
 export interface GroupRect {
@@ -13,7 +13,8 @@ type Rect = { x: number; y: number; w: number; h: number };
 type Point = { x: number; y: number };
 type Dir = "left" | "right" | "up" | "down";
 
-export const GROUP_PAD = 24; // 左右下邊距
+// 原因：框邊縮放帶（內 8px）＋卡片縮放帶（外 8px）會吃掉留白，24 只剩約 8px 可抓；40 留出約 24px
+export const GROUP_PAD = 40; // 左右下邊距
 export const GROUP_PAD_TOP = 44; // 上邊距（含標題列）
 export const GROUP_MIN_W = 220; // 與 NodeResizer minWidth 一致
 export const GROUP_MIN_H = 140; // 與 NodeResizer minHeight 一致
@@ -26,6 +27,23 @@ export interface FitResult {
 
 const overlaps = (a: Rect, b: Rect) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
+// 被拖動／縮放過的框：old＝改動前的矩形；owned＝屬於這個框的卡片 id。
+// 推開別的框時，owned 內的卡片不會被當成別框的卡片帶走；別框在重疊區內的卡片才會跟著自己的框離開。
+export interface MovedGroup {
+  old: Rect;
+  owned: ReadonlySet<string>;
+}
+
+// 框從 old 變成 next 時哪幾個邊向外伸出；推開別的框只往這些方向推（長大、拖動、縮放共用同一份規則）
+function growthDirs(old: Rect, next: Rect): Dir[] {
+  const dirs: Dir[] = [];
+  if (next.x < old.x) dirs.push("left");
+  if (next.x + next.w > old.x + old.w) dirs.push("right");
+  if (next.y < old.y) dirs.push("up");
+  if (next.y + next.h > old.y + old.h) dirs.push("down");
+  return dirs;
+}
+
 // 中心點落在矩形內，與 Board 拖曳分組框時的成員判定相同
 export function centerInRect(box: Rect, r: Rect): boolean {
   const cx = box.x + box.w / 2;
@@ -33,16 +51,33 @@ export function centerInRect(box: Rect, r: Rect): boolean {
   return cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h;
 }
 
+// 歸屬判定（拖曳中的亮框提示與放開時共用同一份）：中心點落在哪個框內；多框重疊取面積最小者
+export function groupAtCenter(box: Rect, groups: readonly GroupRect[]): GroupRect | null {
+  let best: GroupRect | null = null;
+  for (const g of groups) {
+    if (!centerInRect(box, g)) continue;
+    if (!best || g.w * g.h < best.w * best.h) best = g;
+  }
+  return best;
+}
+
 // members：分組框 id → 成員卡片 id（由呼叫端決定，此函式不自行判定成員）
-export function fitGroups(groups: GroupRect[], cards: LayoutBox[], members: Map<string, string[]>): FitResult {
+export function fitGroups(
+  groups: GroupRect[],
+  cards: LayoutBox[],
+  members: Map<string, string[]>,
+  moved?: ReadonlyMap<string, MovedGroup>, // 呼叫端已把新矩形放進 groups；這裡只負責把撞到的別框推開
+): FitResult {
   const rects = new Map<string, Rect>(groups.map((g) => [g.id, { x: g.x, y: g.y, w: g.w, h: g.h }]));
   const cardRects = new Map<string, Rect>(cards.map((c) => [c.id, { x: c.x, y: c.y, w: c.w, h: c.h }]));
   const changedGroups = new Set<string>();
   const movedCards = new Set<string>();
 
   // 分組框長大後碰到「新」重疊的框：沿成長方向推開，連同其成員卡片，並連鎖處理
-  const push = (srcId: string, oldRect: Rect, dirs: Dir[]) => {
-    const queue = [{ srcId, oldRect, dirs }];
+  const push = (srcId: string, oldRect: Rect, dirs: Dir[], owned?: ReadonlySet<string>) => {
+    const queue: Array<{ srcId: string; oldRect: Rect; dirs: Dir[]; owned?: ReadonlySet<string> }> = [
+      { srcId, oldRect, dirs, owned },
+    ];
     for (let guard = 0; queue.length > 0 && guard < 500; guard++) {
       const cur = queue.shift();
       if (!cur) break;
@@ -63,8 +98,9 @@ export function fitGroups(groups: GroupRect[], cards: LayoutBox[], members: Map<
 
         const hBefore = { ...h };
         cardRects.forEach((cr, id) => {
-          // 中心在被推框內、且不屬於正在長大的框 → 跟著被推框一起位移
-          if (centerInRect(cr, hBefore) && !centerInRect(cr, src)) {
+          // 中心在被推框內、且不屬於推它的框 → 跟著被推框一起位移。
+          // 有 owned（拖動／縮放）就以它為準，重疊區內別框的卡片才不會被留下；長大則沿用「不在長大後的框內」
+          if (centerInRect(cr, hBefore) && (cur.owned ? !cur.owned.has(id) : !centerInRect(cr, src))) {
             cr.x += best.dx;
             cr.y += best.dy;
             movedCards.add(id);
@@ -100,13 +136,17 @@ export function fitGroups(groups: GroupRect[], cards: LayoutBox[], members: Map<
     rects.set(gid, next);
     changedGroups.add(gid);
 
-    const dirs: Dir[] = [];
-    if (next.x < oldCopy.x) dirs.push("left");
-    if (next.x + next.w > oldCopy.x + oldCopy.w) dirs.push("right");
-    if (next.y < oldCopy.y) dirs.push("up");
-    if (next.y + next.h > oldCopy.y + oldCopy.h) dirs.push("down");
+    const dirs = growthDirs(oldCopy, next);
     if (dirs.length > 0) push(gid, oldCopy, dirs);
   }
+
+  // 被拖動／縮放過的框：與長大同一套推開規則（只推「新碰到」的框）
+  moved?.forEach((mg, gid) => {
+    const cur = rects.get(gid);
+    if (!cur) return;
+    const dirs = growthDirs(mg.old, cur);
+    if (dirs.length > 0) push(gid, mg.old, dirs, mg.owned);
+  });
 
   const outGroups = new Map<string, Rect>();
   changedGroups.forEach((id) => {

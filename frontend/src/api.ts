@@ -13,6 +13,8 @@ import type {
   CleanupResult,
   ConceptGraphResponse,
   CurationStatus,
+  DailyChangesResponse,
+  DailyStream,
   DeletePreview,
   LinkStatus,
   MediaInfo,
@@ -91,8 +93,10 @@ export const httpApi = {
     request<import("./types").FileSyncResult>("POST", `/cards/${id}/file/write`, payload),
   readCardFile: (id: string) =>
     request<{ card: CardDetail; mtime: number; message: string }>("POST", `/cards/${id}/file/read`),
-  restoreCardFileBackup: (id: string) =>
-    request<{ card: CardDetail; mtime: number; message: string }>("POST", `/cards/${id}/file/restore`),
+  listCardFileBackups: (id: string) =>
+    request<{ backups: { filename: string; time: string }[] }>("GET", `/cards/${id}/file/backups`),
+  restoreCardFileBackup: (id: string, backup_filename?: string) =>
+    request<{ card: CardDetail; mtime: number; message: string }>("POST", `/cards/${id}/file/restore`, { backup_filename }),
   cardImpact: (id: string) => request<CardImpact>("GET", `/cards/${id}/impact`),
   deleteCard: (id: string) => request<{ deleted: boolean }>("DELETE", `/cards/${id}`),
   listCards: (p: {
@@ -161,7 +165,8 @@ export const httpApi = {
   getBoard: (id: string) => request<BoardData>("GET", `/boards/${id}`),
   addToBoard: (board_id: string, card_id: string, x: number, y: number) =>
     request<Omit<BoardCard, "title" | "body" | "updated_at">>("POST", `/boards/${board_id}/cards`, { card_id, x, y }),
-  patchBoardCards: (board_id: string, items: { card_id: string; x: number; y: number; w?: number; h?: number }[]) =>
+  // assumption: h 傳 null＝把高度設回 NULL（自動高度），省略＝不變更；後端端點是否區分兩者尚未確認（見驗證 J-1）
+  patchBoardCards: (board_id: string, items: { card_id: string; x: number; y: number; w?: number; h?: number | null }[]) =>
     request<{ updated: number }>("PATCH", `/boards/${board_id}/cards`, { items }),
   removeFromBoard: (board_id: string, card_id: string) =>
     request<{ removed: boolean }>("DELETE", `/boards/${board_id}/cards/${card_id}`),
@@ -188,7 +193,12 @@ export const httpApi = {
   syncExport: () => request<SyncPackage>("GET", "/sync/export"),
   syncDiff: (pkg: SyncPackage) => request<SyncDiffReport>("POST", "/sync/diff", pkg),
   syncApply: (payload: SyncApplyRequest) => request<SyncApplyResult>("POST", "/sync/apply", payload),
-  syncOverwrite: (pkg: SyncPackage) => request<{ restored: boolean; cards_count: number }>("POST", "/sync/overwrite", pkg),
+  syncOverwrite: (pkg: SyncPackage) =>
+    request<{ restored: boolean; cards_count: number; daily_pruned?: { bindings: number; converted_refs: number } }>(
+      "POST",
+      "/sync/overwrite",
+      pkg,
+    ),
   syncSaveToFile: (target_path: string) => request<{ saved: boolean; path: string; exported_at: string }>("POST", "/sync/save-file", { target_path }),
   pickSystemFile: (body: {
     mode?: "open" | "save";
@@ -211,6 +221,30 @@ export const httpApi = {
   deleteCardRelation: (card_id: string) =>
     request<{ removed: boolean }>("DELETE", `/cards/${card_id}/relation`),
   getRelationsReport: () => request<RelationsReport>("GET", "/relations/report"),
+  // daily（今日總結）：僅電腦端 SQLite。新增方法時 driver.ts／httpDriver.ts 要同步，否則 Proxy 回 501
+  listDailyStreams: (day: string) => request<{ items: DailyStream[] }>("GET", `/daily/streams${qs({ day })}`),
+  createDailyStream: (day: string) => request<DailyStream>("POST", "/daily/streams", { day }),
+  patchDailyStream: (
+    id: string,
+    patch: { title?: string; recall_text?: string; review_text?: string },
+    expected_updated_at: string,
+  ) => request<DailyStream>("PATCH", `/daily/streams/${id}`, { ...patch, expected_updated_at }),
+  unlockDailyStream: (id: string, recall_text: string, expected_updated_at: string) =>
+    request<DailyStream>("POST", `/daily/streams/${id}/unlock`, { recall_text, expected_updated_at }),
+  finishDailyStream: (id: string, review_text: string, expected_updated_at: string) =>
+    request<DailyStream>("POST", `/daily/streams/${id}/finish`, { review_text, expected_updated_at }),
+  reopenDailyStream: (id: string, expected_updated_at: string) =>
+    request<DailyStream>("POST", `/daily/streams/${id}/reopen`, { expected_updated_at }),
+  peekDailyStream: (id: string) => request<DailyStream>("POST", `/daily/streams/${id}/peek`),
+  convertDailyStream: (id: string, expected_updated_at: string) =>
+    request<DailyStream>("POST", `/daily/streams/${id}/convert`, { expected_updated_at }),
+  deleteDailyStream: (id: string) => request<{ deleted: boolean }>("DELETE", `/daily/streams/${id}`),
+  bindDailyCard: (stream_id: string, card_id: string) =>
+    request<DailyStream>("PUT", `/daily/streams/${stream_id}/cards/${card_id}`),
+  unbindDailyCard: (stream_id: string, card_id: string) =>
+    request<DailyStream>("DELETE", `/daily/streams/${stream_id}/cards/${card_id}`),
+  listDailyChanges: (from: string, to: string) =>
+    request<DailyChangesResponse>("GET", `/daily/changes${qs({ from, to })}`),
 };
 
 import { getStorageDriver } from "./lib/storage";
@@ -235,3 +269,4 @@ export const api: typeof httpApi = new Proxy(httpApi, {
     return typeof val === "function" ? val.bind(driver) : val;
   },
 });
+

@@ -45,7 +45,14 @@ export class HttpDriver implements StorageDriver {
   syncExport = httpApi.syncExport;
   syncDiff = httpApi.syncDiff;
   syncApply = httpApi.syncApply;
+  // 桌面專屬：Proxy 不再退回 httpApi，所以 HttpDriver 必須自己列出（Dexie 端是 fail-loud 存根）
+  syncOverwrite = httpApi.syncOverwrite;
+  syncSaveToFile = httpApi.syncSaveToFile;
   pickSystemFile = httpApi.pickSystemFile;
+  writeCardFile = httpApi.writeCardFile;
+  readCardFile = httpApi.readCardFile;
+  listCardFileBackups = httpApi.listCardFileBackups;
+  restoreCardFileBackup = httpApi.restoreCardFileBackup;
 
   uploadMedia = httpApi.uploadMedia;
   mediaInfo = httpApi.mediaInfo;
@@ -60,4 +67,17 @@ export class HttpDriver implements StorageDriver {
   putCardRelation = httpApi.putCardRelation;
   deleteCardRelation = httpApi.deleteCardRelation;
   getRelationsReport = httpApi.getRelationsReport;
+
+  listDailyStreams = httpApi.listDailyStreams;
+  createDailyStream = httpApi.createDailyStream;
+  patchDailyStream = httpApi.patchDailyStream;
+  unlockDailyStream = httpApi.unlockDailyStream;
+  finishDailyStream = httpApi.finishDailyStream;
+  reopenDailyStream = httpApi.reopenDailyStream;
+  peekDailyStream = httpApi.peekDailyStream;
+  convertDailyStream = httpApi.convertDailyStream;
+  deleteDailyStream = httpApi.deleteDailyStream;
+  bindDailyCard = httpApi.bindDailyCard;
+  unbindDailyCard = httpApi.unbindDailyCard;
+  listDailyChanges = httpApi.listDailyChanges;
 }

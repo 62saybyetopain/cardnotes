@@ -1202,6 +1202,10 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
                           if (files.length) void uploadFiles(files, gFrom);
                           return true;
                         }
+                        // 游標在代碼圍欄內：一律走原生純文字貼上，不經 HTML 重建，避免代碼被改寫
+                        if (extractCodeBlocks(latest.current.body).some((b) => gFrom >= b.contentStart && gFrom <= b.contentEnd)) {
+                          return false;
+                        }
                         const transformed = transformPasteContent(cd.getData("text/plain"), cd.getData("text/html"));
                         if (transformed === null) return false;
                         const cur = latest.current.body;
@@ -1463,7 +1467,7 @@ function normalizeSmartPasteInput(rawInput: string): string {
   // 語言標籤與代碼可能是點號相連（如 CSS.app）、空格相連（如 Python   return）、或直接換行
   const markerRegex = new RegExp(
     `([^\n\r])?[ \\t]*` +
-      `([#*>\`\\-\\s0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
+      `([#*>\`\\-\\t 0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
       `(?:[ \\t]*(?:` +
       LANGS +
       `)(?:[ \\t]*(?:copy(?:[ \\t]*code)?|複製(?:[ \\t]*代碼|[ \\t]*程式碼)?))?)?` +
@@ -1481,7 +1485,7 @@ function normalizeSmartPasteInput(rawInput: string): string {
   // 在標記前補換行、標記後補換行，並將緊鄰的語言標記剝除，把純代碼保留到下一行
   const inlineMarkerRegex = new RegExp(
     `([^\n\r])?[ \\t]*` +
-      `([#*>\`\\-\\s0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
+      `([#*>\`\\-\\t 0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
       `(?:[ \\t]*(?:` +
       LANGS +
       `)(?:[ \\t]*(?:copy(?:[ \\t]*code)?|複製(?:[ \\t]*代碼|[ \\t]*程式碼)?))?)?` +

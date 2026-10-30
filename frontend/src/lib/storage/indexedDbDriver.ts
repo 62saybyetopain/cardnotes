@@ -1434,7 +1434,10 @@ export class IndexedDbDriver implements StorageDriver {
   async readCardFile(): Promise<never> {
     throw new ApiError("FILE_OPERATION_ERROR", "純前端靜態環境不支援讀取本機檔案", 400);
   }
-  async restoreCardFileBackup(): Promise<never> {
+  async listCardFileBackups(_id: string): Promise<{ backups: { filename: string; time: string }[] }> {
+    return { backups: [] };
+  }
+  async restoreCardFileBackup(_id: string, _backup_filename?: string): Promise<never> {
     throw new ApiError("FILE_OPERATION_ERROR", "純前端靜態環境不支援還原實體檔案備份", 400);
   }
   async syncSaveToFile(): Promise<never> {
@@ -1447,3 +1450,4 @@ export class IndexedDbDriver implements StorageDriver {
     throw new ApiError("FILE_OPERATION_ERROR", "純前端靜態環境（GitHub Pages）不支援瀏覽選取本機實體檔案", 400);
   }
 }
+

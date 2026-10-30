@@ -4,10 +4,13 @@
 // @depends-on ./components/IPadCardView.tsx (IPadCardView)
 // @depends-on ./components/Board.tsx (toolsSlot：App 工具列提供的容器，Board 以 createPortal 把「定位／自動對齊」渲染進去；toolsOpen 只控制容器的展開動畫)
 // @depends-on ./styles.css (.tools-dock / .tools-slide 及其內部 button 樣式)
+// @depends-on ./components/DailyReview.tsx (DailyReview：只在 viewMode === "daily" 掛載；此視圖不渲染右側面板，grid 欄位與 right-closed 都改看 showRight)
+// @depends-on ./styles.css (.board-toolbar.daily：日誌視圖隱藏「新增卡片」與「收合右側面板」)
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { Board, type BoardHandle } from "./components/Board";
 import { ConceptGraph } from "./components/ConceptGraph";
+import { DailyReview } from "./components/DailyReview";
 import { IPadCardView } from "./components/IPadCardView";
 import { LeftPanel } from "./components/LeftPanel";
 import { CardOpenProvider, notifyCardDeleted, notifyCardTitleUpdated } from "./components/Markdown";
@@ -17,7 +20,7 @@ import { useNotify } from "./notify";
 import type { BoardLink, BoardSummary, CardDetail, CardSummary, RelationType, Tag } from "./types";
 
 const VIEW_KEY = "cardboard:view";
-type ViewMode = "board" | "graph" | "cards";
+type ViewMode = "board" | "graph" | "cards" | "daily";
 
 // 還原重新整理前的白板、視圖與篩選；欄位型別不符一律丟棄，退回預設
 function loadSavedView(): { boardId: string | null; viewMode: ViewMode; filter: Filter } {
@@ -26,7 +29,8 @@ function loadSavedView(): { boardId: string | null; viewMode: ViewMode; filter: 
     const v = JSON.parse(localStorage.getItem(VIEW_KEY) ?? "null");
     if (!v || typeof v !== "object") return view;
     if (typeof v.boardId === "string") view.boardId = v.boardId;
-    if (v.viewMode === "board" || v.viewMode === "graph" || v.viewMode === "cards") view.viewMode = v.viewMode;
+    if (v.viewMode === "board" || v.viewMode === "graph" || v.viewMode === "cards" || v.viewMode === "daily")
+      view.viewMode = v.viewMode;
     const f = v.filter;
     if (f && typeof f === "object") {
       if (typeof f.tagId === "string") view.filter.tagId = f.tagId;
@@ -420,12 +424,15 @@ export default function App() {
 
   if (!booted) return <div className="boot">載入中…</div>;
 
+  // 日誌視圖整頁接管中央與右欄；standalone 沒有日誌視圖，不隱藏右側面板
+  const showRight = rightOpen && !(viewMode === "daily" && !isStandalone);
+
   return (
     <CardOpenProvider onOpenCard={openCardPreview}>
       <div
-        className={`app${leftOpen ? "" : " left-closed"}${rightOpen ? "" : " right-closed"}`}
+        className={`app${leftOpen ? "" : " left-closed"}${showRight ? "" : " right-closed"}`}
         style={{
-          gridTemplateColumns: `${leftOpen ? "260px" : "0px"} 1fr${rightOpen ? ` ${rightWidth}px` : ""}`,
+          gridTemplateColumns: `${leftOpen ? "260px" : "0px"} 1fr${showRight ? ` ${rightWidth}px` : ""}`,
         }}
       >
         <LeftPanel
@@ -435,7 +442,7 @@ export default function App() {
           unclassifiedCount={unclassified}
           inboxCount={inboxCount}
           filter={filter}
-          isSearchTab={rightOpen && tab === "search"}
+          isSearchTab={showRight && tab === "search"}
           theme={theme}
           onToggleTheme={toggleTheme}
           onToggleCollapse={toggleLeft}
@@ -479,7 +486,7 @@ export default function App() {
           )}
 
           {!isStandalone && viewMode !== "cards" && (
-            <div className="board-toolbar">
+            <div className={`board-toolbar${viewMode === "daily" ? " daily" : ""}`}>
               {!centerEditing && (
                 <div className="view-switch" role="group" aria-label="視圖模式切換">
                   <button
@@ -504,6 +511,13 @@ export default function App() {
                     title="卡片冊模式（列表瀏覽、批次歸檔與收件夾整理）"
                   >
                     卡片冊
+                  </button>
+                  <button
+                    className={viewMode === "daily" ? "on" : ""}
+                    onClick={() => setViewMode("daily")}
+                    title="今日總結（先盲寫，再對照今天動過的卡片）"
+                  >
+                    今日總結
                   </button>
                 </div>
               )}
@@ -617,6 +631,15 @@ export default function App() {
                   report={report}
                 />
               )}
+              {viewMode === "daily" && (
+                <DailyReview
+                  version={version}
+                  centerEditing={centerEditing}
+                  onOpenCard={openCardInCenter}
+                  report={report}
+                  info={info}
+                />
+              )}
             </>
           ) : (
             <IPadCardView
@@ -652,9 +675,11 @@ export default function App() {
                 style={isStandalone || viewMode === "cards" ? { paddingRight: 16 } : undefined}
               >
                 <button onClick={closeCenterEditor} title="返回（Esc）">
-                  ← 返回{isStandalone ? "卡片冊" : viewMode === "graph" ? "概念圖譜" : "白板"}
+                  ← 返回{isStandalone ? "卡片冊" : viewMode === "graph" ? "概念圖譜" : viewMode === "daily" ? "今日總結" : "白板"}
                 </button>
-                <span className="muted">卡片編輯模式（按 Esc 返回{isStandalone ? "卡片冊" : "白板"}）</span>
+                <span className="muted">
+                  卡片編輯模式（按 Esc 返回{isStandalone ? "卡片冊" : viewMode === "daily" ? "今日總結" : "白板"}）
+                </span>
                 {(isStandalone || viewMode === "cards") && (
                   <button
                     type="button"
@@ -687,7 +712,7 @@ export default function App() {
             </div>
           )}
         </main>
-      {rightOpen && (
+      {showRight && (
           <RightPanel
             selectedCardId={selected}
             previewCardId={previewCardId}
@@ -723,3 +748,4 @@ export default function App() {
     </CardOpenProvider>
   );
 }
+

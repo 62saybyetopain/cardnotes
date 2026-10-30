@@ -135,16 +135,44 @@ function FileLinkBox(props: {
     }
   };
 
-  const handleRestore = async () => {
+  const [showBackupList, setShowBackupList] = useState(false);
+  const [backupItems, setBackupItems] = useState<{ filename: string; time: string }[]>([]);
+  const [loadingBackups, setLoadingBackups] = useState(false);
+
+  const handleOpenRestoreMenu = async () => {
+    if (!card.file_path || blocked) return;
+    if (showBackupList) {
+      setShowBackupList(false);
+      return;
+    }
+    setLoadingBackups(true);
+    try {
+      const res = await api.listCardFileBackups(card.id);
+      if (!res.backups || res.backups.length === 0) {
+        info?.("目前沒有可還原的備份紀錄（需先在卡片點擊「寫入檔案」至少一次產生備份）");
+        return;
+      }
+      setBackupItems(res.backups);
+      setShowBackupList(true);
+    } catch (e) {
+      report(e, "取得備份清單失敗");
+    } finally {
+      setLoadingBackups(false);
+    }
+  };
+
+  const handleRestoreTarget = async (filename?: string, timeStr?: string) => {
     if (!card.file_path || busy) return;
-    const ok = window.confirm("確定要還原上一版備份？這只會還原實體檔案，卡片內文不會變動。");
+    const ok = window.confirm(
+      `確定要還原至「${timeStr || "此版本"}」的備份？\n這只會覆寫實體檔案，卡片目前的內文不會變動。`,
+    );
     if (!ok) return;
     setBusy(true);
     try {
-      const res = await api.restoreCardFileBackup(card.id);
-      // 原因：卡片內文沒變，不需要 onReload 重建 Editor；onSaved 只是同步 file_hash/mtime 快照
+      const res = await api.restoreCardFileBackup(card.id, filename);
       onSaved(res.card);
-      info?.("✓ 已還原上一版備份至實體檔案（卡片內文未變動，需要時請按「讀入」）");
+      setShowBackupList(false);
+      info?.(`✓ 已還原至備份（${timeStr || "最新版"}）！實體檔案已更新。`);
     } catch (e) {
       report(e, "還原備份失敗");
     } finally {
@@ -229,13 +257,70 @@ function FileLinkBox(props: {
           </button>
           <button
             type="button"
+            className={showBackupList ? "on" : ""}
             style={{ fontSize: 11, padding: "3px 8px" }}
-            disabled={blocked}
-            onClick={() => void handleRestore()}
-            title="還原上一版備份檔"
+            disabled={blocked || loadingBackups}
+            onClick={() => void handleOpenRestoreMenu()}
+            title="檢視最近 3 份備份並選擇還原"
           >
-            ↩ 還原備份
+            {loadingBackups ? "載入中…" : showBackupList ? "▴ 收合備份" : "↩ 還原備份…"}
           </button>
+        </div>
+      )}
+
+      {card.file_path && showBackupList && (
+        <div
+          style={{
+            marginTop: 4,
+            padding: "6px 8px",
+            background: "var(--panel, rgba(0, 0, 0, 0.2))",
+            borderRadius: 6,
+            border: "1px dashed var(--line, #475569)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11 }}>
+            <span className="muted">選擇要還原的歷史版本（最多保留 3 份）：</span>
+            <button
+              type="button"
+              style={{ fontSize: 10, padding: "1px 5px", background: "none", border: "none" }}
+              onClick={() => setShowBackupList(false)}
+            >
+              ✕ 關閉
+            </button>
+          </div>
+          {backupItems.map((b, idx) => (
+            <div
+              key={b.filename}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                padding: "3px 6px",
+                background: "var(--panel-sub, rgba(255, 255, 255, 0.03))",
+                borderRadius: 4,
+                fontSize: 12,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span className="facet-badge" style={{ fontSize: 10 }}>
+                  {idx === 0 ? "最新備份" : `歷史 #${idx + 1}`}
+                </span>
+                <span style={{ fontFamily: "monospace" }}>{b.time}</span>
+              </div>
+              <button
+                type="button"
+                className={idx === 0 ? "primary" : ""}
+                style={{ fontSize: 11, padding: "2px 8px" }}
+                disabled={busy}
+                onClick={() => void handleRestoreTarget(b.filename, b.time)}
+              >
+                還原此版
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -851,10 +936,10 @@ function ContentTab(props: {
             </div>
           )}
 
-          <SourcesField key={card.id} sources={card.sources ?? []} onSave={updateSources} />
+          <SourcesField key={`sources:${card.id}`} sources={card.sources ?? []} onSave={updateSources} />
 
           <RelationBox
-            key={card.id}
+            key={`relation:${card.id}`}
             card={card}
             tags={tags}
             onAssignBridgeTag={assignTagById}
@@ -1674,3 +1759,4 @@ function BoardCardsTab(props: {
     </div>
   );
 }
+

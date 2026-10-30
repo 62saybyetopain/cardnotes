@@ -1,5 +1,6 @@
 // @depends-on ../lib/layout.ts (autoLayoutCards, placeCardsAvoidingCollisions, snapDimension, snapToGridValue, GRID_SIZE)
-// @depends-on ../lib/groupFit.ts (fitGroups, centerInRect：分組框貼合與推開；成員判定「中心點在框內」須與 onNodeDragStart 帶動卡片的判定保持一致)
+// @depends-on ../lib/groupFit.ts (fitGroups, groupAtCenter, MovedGroup, GROUP_PAD, GROUP_PAD_TOP：卡片歸屬一律用 groupAtCenter（中心點所在、面積最小的框，一張卡片只屬於一個框），拖曳帶動成員、貼合、亮框、放開歸屬四處必須一致)
+// @depends-on ../styles.css (.react-flow__node-boardGroup.drop-target：拖曳卡片時「放開後會歸入」的亮框樣式，class 由 setDropTargets 掛在節點上)
 // @depends-on ../App.tsx (toolsSlot：右上工具列的 .tools-slide 容器，null 時不渲染「定位／自動對齊」)
 // @depends-on ../styles.css (.tools-slide button / .on：這兩顆按鈕的外觀由容器樣式決定，此處不寫 inline style)
 // @depends-on ../App.tsx (selectedCardId 有兩條寫入路徑：onNodeClick→onOpenCard，與 onSelectionChange→onSelectCard；Board 以 nodes 的 selected 為準去重；onOpenCard 支援 options.smartPasteText)
@@ -50,7 +51,7 @@ import {
   type LayoutMode,
   type SplitMode,
 } from "../lib/layout";
-import { centerInRect, fitGroups, type GroupRect } from "../lib/groupFit";
+import { fitGroups, groupAtCenter, GROUP_PAD, GROUP_PAD_TOP, type GroupRect, type MovedGroup } from "../lib/groupFit";
 import { computeMagnetSnap, MAGNET_THRESHOLD_PX, quantizeFromStart, type MagnetGuide } from "../lib/magnet";
 import {
   LINK_STATUS_LABELS,
@@ -612,11 +613,55 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     [],
   );
 
+  // ---- 雙擊縮放把手：四角回預設大小（預設寬＋h=NULL 即自動高度）；底邊在「全文高度」與「自動高度」間切換 ----
+  // 原因：雙擊由 CardNode 依 .react-flow__resize-control 的 handle／bottom 類別分流；這裡只負責判斷狀態與寫入。
+  // assumption: api.patchBoardCards 接受 h: null 並把資料庫的 h 設為 NULL（api.ts／後端未提供，無法確認）
+  // if broken: 型別錯誤（大聲），或重新載入後尺寸回到舊值（靜默，見驗證 J-1）
+  const cardSizeImpl = useRef<((id: string, h: number | null, w?: number) => Promise<void>) | undefined>(undefined);
+  cardSizeImpl.current = async (id, h, w) => {
+    if (!boardId) return;
+    const n = nodesRef.current.find((x): x is CardFlowNode => x.type === "card" && x.id === id);
+    if (!n) return;
+    const prev = saved.current.get(id);
+    const x = prev?.x ?? n.position.x;
+    const y = prev?.y ?? n.position.y;
+    const nextW = w ?? prev?.w ?? n.width ?? DEFAULT_CARD_W;
+    try {
+      await api.patchBoardCards(boardId, [{ card_id: id, x, y, w: nextW, h }]);
+      saved.current.set(id, { x, y, w: nextW, h });
+      setNodes((ns) =>
+        ns.map((m) =>
+          m.id === id && m.type === "card"
+            ? {
+                ...m,
+                width: nextW,
+                height: h ?? undefined,
+                style: { width: nextW, height: h ?? undefined },
+                data: { ...m.data, sized: h != null },
+              }
+            : m,
+        ),
+      );
+    } catch (e) {
+      report(e, "儲存卡片大小失敗");
+    }
+  };
+  const onResetCardSize = useCallback((id: string) => void cardSizeImpl.current?.(id, null, DEFAULT_CARD_W), []);
+  const onFitCardHeight = useCallback((id: string, fullH: number) => {
+    const n = nodesRef.current.find((x): x is CardFlowNode => x.type === "card" && x.id === id);
+    if (!n) return;
+    // 開啟自動對齊時向上取整到格距，才不會因取整切到內文最後幾 px
+    const target = snapRef.current ? Math.ceil(fullH / GRID_SIZE) * GRID_SIZE : Math.ceil(fullH);
+    const cur = n.measured?.height ?? n.height ?? 0;
+    void cardSizeImpl.current?.(id, Math.abs(cur - target) <= 1 ? null : target);
+  }, []);
+
   // ---- 分組框操作（縮放、改名、換色、刪除）----
   const groupResizeImpl = useRef<((gid: string, p: { x: number; y: number; width: number; height: number }) => Promise<void>) | undefined>(undefined);
   groupResizeImpl.current = async (gid, p) => {
     if (!boardId) return;
     const nodeId = `group:${gid}`;
+    const prev = saved.current.get(nodeId);
     try {
       await api.patchBoardGroup(boardId, gid, { x: p.x, y: p.y, w: p.width, h: p.height });
       saved.current.set(nodeId, { x: p.x, y: p.y, w: p.width, h: p.height });
@@ -627,6 +672,17 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
             : n,
         ),
       );
+      if (prev) {
+        // 縮放後撞到別的框就整組推開；owned＝縮放前屬於這個框的卡片
+        const oldRect = { x: prev.x, y: prev.y, w: prev.w ?? p.width, h: prev.h ?? p.height };
+        const groupsBefore = savedGroupRects().map((g) => (g.id === nodeId ? { ...g, ...oldRect } : g));
+        const owned = new Set(
+          nodesRef.current
+            .filter((n): n is CardFlowNode => n.type === "card" && groupAtCenter(nodeBox(n), groupsBefore)?.id === nodeId)
+            .map((n) => n.id),
+        );
+        await refitGroupsImpl.current?.(new Map(), new Map(), false, undefined, new Map([[nodeId, { old: oldRect, owned }]]));
+      }
     } catch (e) {
       const g = saved.current.get(nodeId);
       if (g)
@@ -700,10 +756,12 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         before: Map<string, { x: number; y: number }>,
         after: Map<string, { x: number; y: number }>,
         keepOldMembers: boolean,
+        forced?: Map<string, string>, // 卡片 id → 放開時意圖歸入的分組框節點 id（被推出框外也算成員）
+        movedGroups?: Map<string, MovedGroup>, // 被拖動／縮放過的框（saved 已是新矩形）：把撞到的別框連同卡片整組推開
       ) => Promise<void>)
     | undefined
   >(undefined);
-  refitGroupsImpl.current = async (before, after, keepOldMembers) => {
+  refitGroupsImpl.current = async (before, after, keepOldMembers, forced, movedGroups) => {
     if (!boardId) return;
     try {
       const boxes: LayoutBox[] = nodesRef.current
@@ -729,16 +787,20 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         for (const b of boxes) {
           const old = before.get(b.id);
           const moved = !!old;
-          const inNow = centerInRect(b, g);
-          const inOld = !!old && centerInRect({ ...b, x: old.x, y: old.y }, g);
-          if (moved && (inNow || inOld)) affected = true;
-          if (inNow || (moved && keepOldMembers && inOld)) ids.push(b.id);
+          // 原因：重疊的框各自用 centerInRect 判定，會同時認領同一張卡片，框就越長越大去「搶」別框的卡片；
+          // 一張卡片同時只屬於一個框（中心點所在、面積最小者）
+          const inNow = groupAtCenter(b, groups)?.id === g.id;
+          const inOld = !!old && groupAtCenter({ ...b, x: old.x, y: old.y }, groups)?.id === g.id;
+          // 原因：歸屬在避讓之前判定；被推到框外的卡片中心出框，不算意圖就會被丟出成員，框也不會長大
+          const wantsIn = forced?.get(b.id) === g.id;
+          if (moved && (inNow || inOld || wantsIn)) affected = true;
+          if (inNow || wantsIn || (moved && keepOldMembers && inOld)) ids.push(b.id);
         }
         if (affected) members.set(g.id, ids);
       }
-      if (members.size === 0) return;
+      if (members.size === 0 && !movedGroups?.size) return;
 
-      const result = fitGroups(groups, boxes, members);
+      const result = fitGroups(groups, boxes, members, movedGroups);
       if (result.groups.size === 0 && result.cards.size === 0) return;
 
       // 先更新畫面，儲存失敗再回復
@@ -832,11 +894,13 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         updatedAt: c.updated_at,
         sized: c.h != null,
         onResizeEnd,
+        onResetSize: onResetCardSize,
+        onFitHeight: onFitCardHeight,
         onOpenCard,
         report,
       },
     }),
-    [onOpenCard, onResizeEnd, report],
+    [onOpenCard, onResizeEnd, onResetCardSize, onFitCardHeight, report],
   );
 
   const toGroupNode = useCallback(
@@ -1109,6 +1173,34 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     [onSelectCard],
   );
 
+  // 分組框的伺服器已確認矩形（拖曳中的畫面位置不可信，取法與 refitGroupsImpl 一致）
+  const savedGroupRects = useCallback(
+    (): GroupRect[] =>
+      nodesRef.current
+        .filter((n): n is GroupFlowNode => n.type === "boardGroup")
+        .map((n) => {
+          const g = saved.current.get(n.id);
+          return { id: n.id, x: g?.x ?? n.position.x, y: g?.y ?? n.position.y, w: g?.w ?? n.width ?? 360, h: g?.h ?? n.height ?? 240 };
+        }),
+    [],
+  );
+
+  // 拖曳卡片時亮起「放開後會歸入」的分組框；只在亮框集合改變時才更新 nodes
+  const dropTargetKeyRef = useRef("");
+  const setDropTargets = useCallback((ids: string[]) => {
+    const key = [...ids].sort().join("|");
+    if (key === dropTargetKeyRef.current) return;
+    dropTargetKeyRef.current = key;
+    const on = new Set(ids);
+    setNodes((ns) =>
+      ns.map((n) =>
+        n.type === "boardGroup" && (n.className === "drop-target") !== on.has(n.id)
+          ? { ...n, className: on.has(n.id) ? "drop-target" : undefined }
+          : n,
+      ),
+    );
+  }, []);
+
   // ---- 拖曳分組框時，框內卡片同步跟隨移動 ----
   const onNodeDragStart: OnNodeDrag<AnyFlowNode> = useCallback((_e, node, dragged) => {
     activeDragRef.current = { id: node.id, type: node.type ?? "card" };
@@ -1121,21 +1213,29 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     const g = saved.current.get(node.id);
     const gx = g?.x ?? node.position.x;
     const gy = g?.y ?? node.position.y;
-    const gw = g?.w ?? node.width ?? 360;
-    const gh = g?.h ?? node.height ?? 240;
+    // 原因：純幾何判定會把重疊區內別框的卡片一起拖走；改用唯一歸屬（與貼合、亮框同一判定）
+    const rects = savedGroupRects();
     const members = nodesRef.current
-      .filter((n): n is CardFlowNode => {
-        if (n.type !== "card") return false;
-        const box = nodeBox(n);
-        const cx = box.x + box.w / 2;
-        const cy = box.y + box.h / 2;
-        return cx >= gx && cx <= gx + gw && cy >= gy && cy <= gy + gh;
-      })
+      .filter((n): n is CardFlowNode => n.type === "card" && groupAtCenter(nodeBox(n), rects)?.id === node.id)
       .map((n) => n.id);
     groupDragRef.current = { groupId: node.id, startX: gx, startY: gy, memberIds: members };
-  }, []);
+  }, [savedGroupRects]);
 
-  const onNodeDrag: OnNodeDrag<AnyFlowNode> = useCallback((_e, node) => {
+  const onNodeDrag: OnNodeDrag<AnyFlowNode> = useCallback((_e, node, dragged) => {
+    if (node.type === "card") {
+      // 判定與 onNodeDragStop 相同：中心點、磁吸後座標、伺服器已確認的框
+      const gs = savedGroupRects();
+      const hits = new Set<string>();
+      for (const n of dragged) {
+        if (n.type !== "card") continue;
+        const b = nodeBox(n as CardFlowNode);
+        const p = lastSnappedPosRef.current.get(n.id);
+        const hit = groupAtCenter(p ? { ...b, x: p.x, y: p.y } : b, gs);
+        if (hit) hits.add(hit.id);
+      }
+      setDropTargets(Array.from(hits));
+      return;
+    }
     const gd = groupDragRef.current;
     if (!gd || node.id !== gd.groupId || gd.memberIds.length === 0) return;
     const dx = node.position.x - gd.startX;
@@ -1149,7 +1249,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         return { ...n, position: { x: orig.x + dx, y: orig.y + dy } };
       }),
     );
-  }, []);
+  }, [savedGroupRects, setDropTargets]);
 
   // ---- 拖曳結束才寫入；開啟自動對齊時吸附格線並避開重疊卡片；失敗回復 ----
   const onNodeDragStop: OnNodeDrag<AnyFlowNode> = useCallback(
@@ -1157,6 +1257,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       const activeType = activeDragRef.current?.type ?? node.type;
       activeDragRef.current = null;
       setMagnetGuides([]);
+      setDropTargets([]);
       if (!boardId) return;
       const gd = groupDragRef.current;
       groupDragRef.current = null;
@@ -1165,6 +1266,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         activeType === "boardGroup"
           ? dragged.filter((n): n is GroupFlowNode => n.type === "boardGroup")
           : [];
+      // 框實際落地的位移（吸附後）與落地前的矩形；null＝沒動或沒存成功
+      let groupMove: { dx: number; dy: number; old: { x: number; y: number; w: number; h: number } } | null = null;
       for (const gn of groupNodes) {
         const nextX = snapRef.current ? snapToGridValue(gn.position.x, GRID_SIZE) : gn.position.x;
         const nextY = snapRef.current ? snapToGridValue(gn.position.y, GRID_SIZE) : gn.position.y;
@@ -1178,6 +1281,13 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
             w: prev?.w ?? gn.width ?? 360,
             h: prev?.h ?? gn.height ?? 240,
           });
+          if (gd && gn.id === gd.groupId) {
+            groupMove = {
+              dx: nextX - gd.startX,
+              dy: nextY - gd.startY,
+              old: { x: gd.startX, y: gd.startY, w: prev?.w ?? gn.width ?? 360, h: prev?.h ?? gn.height ?? 240 },
+            };
+          }
           if (nextX !== gn.position.x || nextY !== gn.position.y) {
             setNodes((ns) => ns.map((n) => (n.id === gn.id ? { ...n, position: { x: nextX, y: nextY } } : n)));
           }
@@ -1187,6 +1297,17 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           }
           report(e, "儲存分組框位置失敗，已回到原位");
         }
+      }
+
+      // 框對框：被框碰到的別的框連同它的卡片整組推開。owned＝這個框自己的成員，不會被當成別框的卡片帶走
+      if (groupMove && gd) {
+        await refitGroupsImpl.current?.(
+          new Map(),
+          new Map(),
+          false,
+          undefined,
+          new Map([[gd.groupId, { old: groupMove.old, owned: new Set(gd.memberIds) }]]),
+        );
       }
 
       const movedCardIds = new Set<string>(
@@ -1209,9 +1330,42 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       lastSnappedPosRef.current.clear();
       const fixedBoxes = allCards.filter((n) => !movedCardIds.has(n.id)).map(nodeBox);
 
-      const resolvedMap = snapRef.current
-        ? placeCardsAvoidingCollisions(movingBoxes, fixedBoxes, GRID_SIZE)
-        : new Map(movingBoxes.map((b) => [b.id, { x: b.x, y: b.y }]));
+      // 歸屬以「放開當下中心點在哪個框內」為準（與亮框同一判定）：
+      // 中心進框＝不避讓自己要進的框，之後框長大包住它；中心沒進＝框是障礙物，卡片被推開、框不動。
+      // 拖的是分組框時（成員剛體跟著走）不在此處理，維持原行為（檢查點 3 處理）。
+      const groupRects = activeType === "card" ? savedGroupRects() : [];
+      const intent = new Map<string, string>();
+      for (const b of movingBoxes) {
+        const hit = groupAtCenter(b, groupRects);
+        if (hit) intent.set(b.id, hit.id);
+      }
+
+      const resolvedMap = new Map<string, { x: number; y: number }>();
+      if (activeType === "boardGroup") {
+        // 原因：成員被當成獨立卡片逐張避讓，整組相對位置會被打散。框是剛體：成員位移＝框實際落地（吸附後）的位移；
+        // 框沒動或沒存成功（groupMove 為 null）就全部回到伺服器已確認的位置。碰撞由上面的框對框推開處理。
+        for (const b of movingBoxes) {
+          const o = saved.current.get(b.id);
+          resolvedMap.set(b.id, o ? { x: o.x + (groupMove?.dx ?? 0), y: o.y + (groupMove?.dy ?? 0) } : { x: b.x, y: b.y });
+        }
+      } else if (!snapRef.current) {
+        movingBoxes.forEach((b) => resolvedMap.set(b.id, { x: b.x, y: b.y }));
+      } else {
+        const fixed: LayoutBox[] = [...fixedBoxes];
+        for (const key of Array.from(new Set(movingBoxes.map((b) => intent.get(b.id) ?? "")))) {
+          const part = movingBoxes.filter((b) => (intent.get(b.id) ?? "") === key);
+          const placed = placeCardsAvoidingCollisions(
+            part,
+            [...fixed, ...groupRects.filter((g) => g.id !== key)],
+            GRID_SIZE,
+          );
+          for (const b of part) {
+            const p = placed.get(b.id) ?? { x: b.x, y: b.y };
+            resolvedMap.set(b.id, p);
+            fixed.push({ ...b, x: p.x, y: p.y });
+          }
+        }
+      }
 
       // 更新視覺位置（若有被推開或吸附調整）
       setNodes((ns) =>
@@ -1249,6 +1403,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
             before,
             new Map<string, { x: number; y: number }>(items.map((i) => [i.card_id, { x: i.x, y: i.y }])),
             false,
+            intent,
           );
         }
       } catch (e) {
@@ -1262,7 +1417,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         report(e, "儲存位置失敗，已回到原位");
       }
     },
-    [boardId, report],
+    [boardId, report, savedGroupRects, setDropTargets],
   );
 
   // ---- 拉線建立有向具名連結（成功後顯示線，並開啟關係設定視窗）----
@@ -1846,10 +2001,10 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           const minY = Math.min(...selCards.map((c) => c.position.y));
           const maxX = Math.max(...selCards.map((c) => c.position.x + (c.width ?? 280)));
           const maxY = Math.max(...selCards.map((c) => c.position.y + (c.height ?? 160)));
-          x = minX - 24;
-          y = minY - 44;
-          w = Math.max(260, maxX - minX + 48);
-          h = Math.max(180, maxY - minY + 68);
+          x = minX - GROUP_PAD;
+          y = minY - GROUP_PAD_TOP;
+          w = Math.max(260, maxX - minX + GROUP_PAD * 2);
+          h = Math.max(180, maxY - minY + GROUP_PAD_TOP + GROUP_PAD);
         } else {
           const b = wrapRef.current?.getBoundingClientRect();
           const center = b

@@ -40,7 +40,14 @@ export interface StorageDriver {
   listAllCardTitles(): Promise<{ items: { id: string; title: string }[] }>;
   patchCard(
     id: string,
-    patch: { title?: string; body?: string; card_type?: CardType; curation_status?: CurationStatus },
+    patch: {
+      title?: string;
+      body?: string;
+      card_type?: CardType;
+      curation_status?: CurationStatus;
+      sources?: string[];
+      file_path?: string | null;
+    },
     expected_updated_at: string,
   ): Promise<CardDetail>;
   cardImpact(id: string): Promise<CardImpact>;
@@ -101,7 +108,7 @@ export interface StorageDriver {
   patchBoardGroup(board_id: string, group_id: string, patch: { label?: string; x?: number; y?: number; w?: number; h?: number; color?: string }): Promise<BoardGroup>;
   deleteBoardGroup(board_id: string, group_id: string): Promise<{ deleted: boolean }>;
 
-  // 同步與維護
+  // 同步、檔案與選取操作
   syncExport(): Promise<SyncPackage>;
   syncDiff(pkg: SyncPackage): Promise<SyncDiffReport>;
   syncApply(payload: SyncApplyRequest): Promise<SyncApplyResult>;
@@ -112,15 +119,22 @@ export interface StorageDriver {
     title?: string;
     initial_path?: string | null;
     default_name?: string;
+    card_id?: string;
   }): Promise<{ cancelled: boolean; path: string | null }>;
+  syncSaveToFile?(target_path: string): Promise<{ saved: boolean; path: string; exported_at: string }>;
+  syncOverwrite?(pkg: SyncPackage): Promise<{ restored: boolean; cards_count: number }>;
+  writeCardFile?(id: string, payload: { expected_updated_at: string; force?: boolean }): Promise<import("../../types").FileSyncResult>;
+  readCardFile?(id: string): Promise<{ card: CardDetail; mtime: number; message: string }>;
+  listCardFileBackups?(id: string): Promise<{ backups: { filename: string; time: string }[] }>;
+  restoreCardFileBackup?(id: string, backup_filename?: string): Promise<{ card: CardDetail; mtime: number; message: string }>;
 
-  // 媒體與全域圖譜（本地端提供相容實作）
+  // 媒體與全域圖譜
   uploadMedia?(file: File): Promise<MediaInfo>;
   mediaInfo?(id: string): Promise<MediaInfo>;
   cleanupMedia?(dry_run?: boolean): Promise<CleanupResult>;
   getConceptGraph?(p: { min_cooccurrence?: number; min_jaccard?: number; max_neighbors?: number; include_locations?: boolean }): Promise<ConceptGraphResponse>;
 
-  // 橋樑詞關係句型與評估（僅電腦端 SQLite 支援，Dexie 為 fail-loud stub）
+  // 關係句型與評估
   listRelationPatterns(): Promise<{ patterns: RelationPattern[] }>;
   createRelationPattern(body: RelationPatternCreate): Promise<RelationPattern>;
   patchRelationPattern(id: string, patch: RelationPatternPatch): Promise<RelationPattern>;
@@ -130,3 +144,4 @@ export interface StorageDriver {
   deleteCardRelation(card_id: string): Promise<{ removed: boolean }>;
   getRelationsReport(): Promise<RelationsReport>;
 }
+

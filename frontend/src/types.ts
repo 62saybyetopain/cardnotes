@@ -573,3 +573,39 @@ export interface RelationsReport {
   inconsistencies: RelationInconsistency[];
   candidates: RelationCandidate[];
 }
+
+// 今日總結（日誌）。值必須與後端 schemas.py 的 DailyStatus／DailyChangeKind 一致
+export type DailyStatus = "recalling" | "comparing" | "done";
+export type DailyChangeKind = "new" | "updated";
+
+export interface DailyStream {
+  id: string;
+  day: string; // 用戶端本地日期 YYYY-MM-DD
+  position: number;
+  title: string;
+  status: DailyStatus;
+  recall_text: string;
+  review_text: string;
+  peeked_at: string | null;
+  unlocked_at: string | null;
+  converted_card_id: string | null;
+  created_at: string;
+  updated_at: string;
+  cards: { id: string; title: string }[];
+}
+
+export interface DailyChange {
+  id: string;
+  title: string;
+  body: string;
+  card_type: CardType;
+  created_at: string;
+  updated_at: string;
+  kind: DailyChangeKind;
+}
+
+export interface DailyChangesResponse {
+  items: DailyChange[];
+  truncated: boolean;
+}
+

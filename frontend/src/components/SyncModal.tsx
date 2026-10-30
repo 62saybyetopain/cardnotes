@@ -952,7 +952,9 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
 
               {autoBackupCfg.enabled && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
-                  <div className="field-row" style={{ margin: 0, display: "flex", alignItems: "center", gap: 6 }}>
+                  {/* 原因：styles.css 的 .field-row 預設 flex-direction: column（給表單欄位用），這一列需要橫排。
+                      在 inline 指定 row 只影響此處，不動我看不到的其他 .field-row 使用處。 */}
+                  <div className="field-row" style={{ margin: 0, display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
                     <span className="muted" style={{ minWidth: 120 }}>本機固定備份檔案：</span>
                     <input
                       readOnly
