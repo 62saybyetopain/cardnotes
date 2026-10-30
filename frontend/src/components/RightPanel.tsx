@@ -1303,6 +1303,7 @@ function RelationsTab(props: {
   const [newReason, setNewReason] = useState("");
   const [guideFor, setGuideFor] = useState<{ id: string; title: string } | null>(null); // 新增連結時，正在用引導挑類型的對象
   const [guideEditKey, setGuideEditKey] = useState<string | null>(null); // 修改連結時，開著引導的那一條
+  const [guideTopOpen, setGuideTopOpen] = useState(false); // 還沒選目標卡片時，從上排下拉選單旁開的引導（只填下拉選單，不建立連結）
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editRel, setEditRel] = useState<RelationType>("延伸");
   const [editStatus, setEditStatus] = useState<LinkStatus>("confirmed");
@@ -1311,6 +1312,7 @@ function RelationsTab(props: {
   useEffect(() => {
     setGuideFor(null);
     setGuideEditKey(null);
+    setGuideTopOpen(false);
   }, [card.id]);
 
   useEffect(() => {
@@ -1450,7 +1452,7 @@ function RelationsTab(props: {
                         onClick={() => setGuideEditKey(guideEditKey === key ? null : key)}
                         title="不確定選哪種關係時，回答幾個問題來決定"
                       >
-                        ❓ 引導
+                        ⓘ 引導
                       </button>
                     </div>
                   </div>
@@ -1512,7 +1514,29 @@ function RelationsTab(props: {
               </option>
             ))}
           </select>
+          <button
+            type="button"
+            className={`facet-help-btn${guideTopOpen ? " on" : ""}`}
+            onClick={() => setGuideTopOpen((v) => !v)}
+            title="還沒選目標卡片、不確定選哪種關係時，回答幾個問題來決定"
+            aria-label="查看關係類型判準與引導"
+          >
+            ⓘ 關係判準／引導
+          </button>
         </div>
+        {guideTopOpen && (
+          <RelationGuide
+            allowSwap={false}
+            aTitle={card.title}
+            bTitle="目標卡片"
+            onPick={(rel, status) => {
+              setNewRel(rel);
+              setNewStatus(status);
+              setGuideTopOpen(false);
+            }}
+            onCancel={() => setGuideTopOpen(false)}
+          />
+        )}
         <input
           value={newReason}
           onChange={(e) => setNewReason(e.target.value)}
@@ -1530,7 +1554,7 @@ function RelationsTab(props: {
           <li key={c.id}>
             <span className="result-main">{c.title || "（無標題）"}</span>
             <button onClick={() => setGuideFor({ id: c.id, title: c.title })} title="不確定選哪種關係時，回答幾個問題來決定">
-              ❓ 引導
+              ⓘ 引導
             </button>
             <button className="primary" onClick={() => void link(c.id)}>
               建立「{RELATION_LABELS[newRel]}」
