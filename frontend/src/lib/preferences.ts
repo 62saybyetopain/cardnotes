@@ -1,4 +1,5 @@
 import type { RelationType } from "../types";
+import { buildDefaultTypeSideMap, upgradeTypeSideMap } from "./relations";
 
 const SNAP_KEY = "cardboard:snap-to-grid";
 const LAYOUT_PREFS_KEY = "cardboard:layout-prefs";
@@ -14,14 +15,7 @@ export interface SavedLayoutPrefs {
   typeSideMap: Record<RelationType, "left" | "right">;
 }
 
-export const DEFAULT_TYPE_SIDE_MAP: Record<RelationType, "left" | "right"> = {
-  refute: "left",
-  support: "right",
-  influence: "right",
-  instance_of: "right",
-  applied_to: "right",
-  extend: "right",
-};
+export const DEFAULT_TYPE_SIDE_MAP: Record<RelationType, "left" | "right"> = buildDefaultTypeSideMap();
 
 export function loadSnapToGrid(): boolean {
   try {
@@ -66,7 +60,7 @@ export function loadLayoutPrefs(): SavedLayoutPrefs {
       splitMode: p?.splitMode === "direction" || p?.splitMode === "type" ? p.splitMode : fallback.splitMode,
       typeSideMap: {
         ...DEFAULT_TYPE_SIDE_MAP,
-        ...(p?.typeSideMap && typeof p.typeSideMap === "object" ? p.typeSideMap : {}),
+        ...upgradeTypeSideMap(p?.typeSideMap), // 舊的 key（refute、extend…）在這裡轉成新 key
       },
     };
   } catch {

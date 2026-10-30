@@ -346,7 +346,7 @@ export function IPadCardView({
           {
             source_id: "sample-c2",
             target_id: "sample-c1",
-            relation_type: "support",
+            relation_type: "支持",
             status: "confirmed",
             reason: "改善胸椎活動度可支持肩胛力學穩定",
           },

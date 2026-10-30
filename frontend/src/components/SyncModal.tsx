@@ -194,6 +194,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
   const [autoBackupCfg, setAutoBackupCfg] = useState<AutoBackupConfig>(loadAutoBackupConfig);
   const [lastBackupTime, setLastBackupTime] = useState<string>(() => localStorage.getItem(LAST_BACKUP_TIME_KEY) || "");
   const [savingBackupNow, setSavingBackupNow] = useState(false);
+  const [pickingBackupPath, setPickingBackupPath] = useState(false);
 
   const saveBackupSettings = (patch: Partial<AutoBackupConfig>) => {
     setAutoBackupCfg((prev) => {
@@ -201,6 +202,27 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       localStorage.setItem(AUTO_BACKUP_CONFIG_KEY, JSON.stringify(next));
       return next;
     });
+  };
+
+  const handlePickBackupPath = async () => {
+    if (pickingBackupPath) return;
+    setPickingBackupPath(true);
+    try {
+      const res = await api.pickSystemFile({
+        mode: "save",
+        title: "選擇定時自動備份儲存檔案 (.json)",
+        initial_path: autoBackupCfg.targetPath || null,
+        default_name: "cardboard_auto_backup.json",
+      });
+      if (!res.cancelled && res.path) {
+        saveBackupSettings({ targetPath: res.path });
+        info(`📁 已設定定時備份檔案位置：${res.path}`);
+      }
+    } catch (err) {
+      report(err, "選取備份檔案位置失敗");
+    } finally {
+      setPickingBackupPath(false);
+    }
   };
 
   const handleManualBackupNow = async () => {
@@ -449,20 +471,27 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
     );
   };
 
-  const handleIpadExportJson = () => {
-    if (!ipadFilteredExport.pkg) return;
+  const handleIpadExportJson = (fullBackup = false) => {
+    const targetPkg = fullBackup ? ipadFullPkg : ipadFilteredExport.pkg;
+    if (!targetPkg) return;
     try {
-      const blob = new Blob([JSON.stringify(ipadFilteredExport.pkg, null, 2)], { type: "application/json" });
+      const blob = new Blob([JSON.stringify(targetPkg, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       const dateStr = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       a.href = url;
-      a.download = `cardboard-ipad-sync-${dateStr}.json`;
+      a.download = fullBackup
+        ? `cardboard-full-backup-${dateStr}.json`
+        : `cardboard-ipad-sync-${dateStr}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      info(`📤 已匯出 iPad 資料 JSON（含 ${ipadFilteredExport.matchedCards.length} 張卡片）。`);
+      info(
+        fullBackup
+          ? `📥 已匯出完整全庫備份 JSON（含全部 ${targetPkg.cards.length} 張卡片）。`
+          : `📤 已匯出篩選變更 JSON（含 ${targetPkg.cards.length} 張卡片）。`,
+      );
     } catch (e) {
-      report(e, "匯出 iPad JSON 失敗");
+      report(e, "匯出 JSON 失敗");
     }
   };
 
@@ -654,25 +683,31 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
   return (
     <div className="modal" role="dialog" aria-label="資料同步與備份">
       <div className="modal-card sync-modal-card">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h4>{isIpad ? "📱 iPad 資料同步與匯出" : "💻 電腦版資料同步與備份"}</h4>
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <div className="sync-head">
+          <div className="sync-head-title">
+            <h4>資料同步與備份</h4>
+            <span className="facet-badge">{isIpad ? "iPad" : "電腦版"}</span>
+          </div>
+          <div className="sync-head-actions">
             <button
               type="button"
               onClick={() => setShowKeyInput((v) => !v)}
+              aria-expanded={showKeyInput}
               title="設定或檢視 Google Drive 金鑰"
             >
               🔑 金鑰設定
             </button>
-            <button type="button" onClick={onClose} aria-label="關閉視窗">
+            <button type="button" className="icon-btn" onClick={onClose} aria-label="關閉視窗">
               ✕
             </button>
           </div>
         </div>
 
         {showKeyInput && (
-          <div className="p2p-banner" style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <span style={{ fontSize: 13 }}>Google Drive 金鑰（<code>CLIENT_ID|CLIENT_SECRET|REFRESH_TOKEN</code>）：</span>
+          <label className="sync-section">
+            <span className="sync-section-title">
+              Google Drive 金鑰（<code>CLIENT_ID|CLIENT_SECRET|REFRESH_TOKEN</code>）
+            </span>
             <input
               type="password"
               value={cloudCredential}
@@ -681,9 +716,9 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                 saveCloudCredential(e.target.value);
               }}
               placeholder="貼上金鑰（輸入一次即自動記憶於本機）"
-              style={{ flex: 1, minWidth: 240, padding: "6px 8px" }}
+              style={{ width: "100%" }}
             />
-          </div>
+          </label>
         )}
 
         {isIpad ? (
@@ -700,7 +735,6 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                 <button
                   type="button"
                   className="primary"
-                  style={{ background: "#2563eb", borderColor: "transparent" }}
                   onClick={handleIpadPullFromDrive}
                   disabled={cloudBusy}
                 >
@@ -777,13 +811,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                       return (
                         <div key={c.id} className="sync-diff-item">
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span
-                              className="facet-badge"
-                              style={{
-                                background: isNewAfterBaseline ? "rgba(16, 185, 129, 0.15)" : "rgba(59, 130, 246, 0.15)",
-                                color: isNewAfterBaseline ? "#10b981" : "#3b82f6",
-                              }}
-                            >
+                            <span className={`facet-badge sync-badge ${isNewAfterBaseline ? "green" : "blue"}`}>
                               {isNewAfterBaseline ? "新增" : "修改"}
                             </span>
                             <strong>{c.title || "（無標題）"}</strong>
@@ -801,19 +829,27 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                   <button
                     type="button"
                     className="primary"
-                    style={{ background: "#10b981", borderColor: "transparent" }}
                     onClick={handleIpadUploadToDrive}
-                    disabled={cloudBusy || ipadFilteredExport.matchedCards.length === 0}
-                    title="將篩選後的 iPad 變更上傳至 Google Drive，供電腦版拉取合併"
+                    disabled={cloudBusy || !ipadFilteredExport.pkg}
+                    title="將篩選後的變更上傳至 Google Drive，供電腦版拉取合併"
                   >
-                    {cloudBusy ? "雲端傳輸中…" : `☁️ 上傳 iPad 資料至 Drive（${ipadFilteredExport.matchedCards.length} 張）`}
+                    {cloudBusy ? "雲端傳輸中…" : `☁️ 上傳變更至 Drive（${ipadFilteredExport.matchedCards.length} 張卡片）`}
                   </button>
                   <button
                     type="button"
-                    onClick={handleIpadExportJson}
-                    disabled={cloudBusy || ipadFilteredExport.matchedCards.length === 0}
+                    onClick={() => handleIpadExportJson(false)}
+                    disabled={cloudBusy || !ipadFilteredExport.pkg}
+                    title="匯出上方篩選條件的變更封包（供電腦端合併匯入）"
                   >
-                    📤 匯出 iPad 資料 (.json)
+                    📤 匯出篩選變更 (.json, {ipadFilteredExport.matchedCards.length} 張)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleIpadExportJson(true)}
+                    disabled={cloudBusy || !ipadFullPkg || ipadFilteredExport.totalCount === 0}
+                    title="匯出瀏覽器內的完整資料庫備份（含全部卡片、白板與分組框）"
+                  >
+                    📥 匯出完整全庫備份 (.json, {ipadFilteredExport.totalCount} 張)
                   </button>
                 </div>
               </div>
@@ -828,62 +864,73 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
         ) : (
           /* ==================== 電腦版專屬介面 ==================== */
           <>
-            <div className="sync-top-actions" style={{ flexWrap: "wrap", gap: 6 }}>
-              <button type="button" onClick={() => void exportBackup()}>
-                📥 匯出 JSON 備份
-              </button>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={cloudBusy}
-                title="選取本機 JSON 檔案比對差異並合併入目前資料庫"
-              >
-                📥 本機合併匯入…
-              </button>
-              <button
-                type="button"
-                style={{ color: "#ef4444", borderColor: "#ef4444" }}
-                onClick={() => overwriteInputRef.current?.click()}
-                disabled={cloudBusy}
-                title="【危險】選取本機 JSON 備份檔，完全清空並 100% 覆蓋還原目前資料庫"
-              >
-                ⚠️ 本機完整覆蓋還原…
-              </button>
-              <button
-                type="button"
-                className="primary"
-                style={{ background: "#2563eb", borderColor: "transparent" }}
-                onClick={() => void handleUploadPcBackupToCloud()}
-                disabled={cloudBusy}
-                title="將電腦完整資料庫上傳至 Google Drive，供 iPad 隨時下載覆蓋"
-              >
-                {cloudBusy ? "雲端處理中…" : "☁️ 上傳雲端備份 (供 iPad)"}
-              </button>
-              <button
-                type="button"
-                className="primary"
-                style={{ background: "#10b981", borderColor: "transparent" }}
-                onClick={() => void handlePullIpadFromCloud()}
-                disabled={cloudBusy}
-                title="從 Google Drive 讀取 iPad 發送的資料並進行差異比對"
-              >
-                {cloudBusy ? "雲端處理中…" : "☁️ 拉取 iPad 資料 (Drive)"}
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".json,application/json"
-                style={{ display: "none" }}
-                onChange={(e) => void handleFileSelect(e)}
-              />
-              <input
-                ref={overwriteInputRef}
-                type="file"
-                accept=".json,application/json"
-                style={{ display: "none" }}
-                onChange={(e) => void handlePcOverwriteImport(e)}
-              />
+            <div className="sync-section">
+              <div className="sync-section-title">本機檔案</div>
+              <div className="sync-actions">
+                <button type="button" onClick={() => void exportBackup()}>
+                  📥 匯出 JSON 備份
+                </button>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={cloudBusy}
+                  title="選取本機 JSON 檔案比對差異並合併入目前資料庫"
+                >
+                  📂 合併匯入…
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => overwriteInputRef.current?.click()}
+                  disabled={cloudBusy}
+                  title="【危險】選取本機 JSON 備份檔，完全清空並 100% 覆蓋還原目前資料庫"
+                >
+                  ⚠️ 完整覆蓋還原…
+                </button>
+              </div>
             </div>
+
+            <div className="sync-section">
+              <div className="sync-section-title">Google Drive（與 iPad 同步）</div>
+              <p className="sync-section-desc">
+                先上傳電腦版完整備份供 iPad 拉取；iPad 上傳變更後，再從這裡拉取並比對合併。
+              </p>
+              <div className="sync-actions">
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => void handleUploadPcBackupToCloud()}
+                  disabled={cloudBusy}
+                  title="將電腦完整資料庫上傳至 Google Drive，供 iPad 隨時下載覆蓋"
+                >
+                  {cloudBusy ? "雲端處理中…" : "☁️ 上傳雲端備份 (供 iPad)"}
+                </button>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => void handlePullIpadFromCloud()}
+                  disabled={cloudBusy}
+                  title="從 Google Drive 讀取 iPad 發送的資料並進行差異比對"
+                >
+                  {cloudBusy ? "雲端處理中…" : "☁️ 拉取 iPad 資料 (Drive)"}
+                </button>
+              </div>
+            </div>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,application/json"
+              style={{ display: "none" }}
+              onChange={(e) => void handleFileSelect(e)}
+            />
+            <input
+              ref={overwriteInputRef}
+              type="file"
+              accept=".json,application/json"
+              style={{ display: "none" }}
+              onChange={(e) => void handlePcOverwriteImport(e)}
+            />
 
             {/* 定時自動備份設定面板（選項 2-A） */}
             <div className="resolve-box" style={{ padding: 10, marginTop: 8, fontSize: 12 }}>
@@ -905,15 +952,42 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
 
               {autoBackupCfg.enabled && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
-                  <label className="field-row" style={{ margin: 0 }}>
-                    <span className="muted" style={{ minWidth: 140 }}>本機固定檔案完整路徑：</span>
+                  <div className="field-row" style={{ margin: 0, display: "flex", alignItems: "center", gap: 6 }}>
+                    <span className="muted" style={{ minWidth: 120 }}>本機固定備份檔案：</span>
                     <input
+                      readOnly
                       value={autoBackupCfg.targetPath}
-                      onChange={(e) => saveBackupSettings({ targetPath: e.target.value })}
-                      placeholder="例如 D:\Backups\cardboard_auto_backup.json（自動覆寫此檔案）"
-                      style={{ flex: 1, fontFamily: "monospace", fontSize: 12, padding: "4px 8px" }}
+                      onClick={() => void handlePickBackupPath()}
+                      placeholder="點擊右側「瀏覽選取…」指定備份 .json 檔案位置"
+                      title={autoBackupCfg.targetPath || "點擊瀏覽選取備份檔案位置"}
+                      style={{
+                        flex: 1,
+                        fontFamily: "monospace",
+                        fontSize: 12,
+                        padding: "4px 8px",
+                        cursor: "pointer",
+                      }}
                     />
-                  </label>
+                    <button
+                      type="button"
+                      onClick={() => void handlePickBackupPath()}
+                      disabled={pickingBackupPath || savingBackupNow}
+                      style={{ fontSize: 12, padding: "4px 10px", flexShrink: 0 }}
+                    >
+                      {pickingBackupPath ? "選取中…" : "📂 瀏覽選取…"}
+                    </button>
+                    {autoBackupCfg.targetPath && (
+                      <button
+                        type="button"
+                        onClick={() => saveBackupSettings({ targetPath: "" })}
+                        disabled={pickingBackupPath || savingBackupNow}
+                        title="清除備份路徑"
+                        style={{ fontSize: 12, padding: "4px 8px", flexShrink: 0 }}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
 
                   <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                     <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -1044,10 +1118,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                                   checked={selectedNewCardIds.has(c.id)}
                                   onChange={() => toggleNewCard(c.id)}
                                 />
-                                <span
-                                  className="facet-badge"
-                                  style={{ background: "rgba(16, 185, 129, 0.15)", color: "#10b981" }}
-                                >
+                                <span className="facet-badge sync-badge green">
                                   新增
                                 </span>
                                 <strong>{c.title || "（無標題）"}</strong>
@@ -1145,14 +1216,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                                       checked={selectedUpdateCardIds.has(c.id)}
                                       onChange={() => toggleUpdateCard(c.id)}
                                     />
-                                    <span
-                                      className="facet-badge"
-                                      style={
-                                        newer
-                                          ? { background: "rgba(16, 185, 129, 0.16)", color: "#10b981" }
-                                          : { background: "rgba(245, 158, 11, 0.16)", color: "#f59e0b" }
-                                      }
-                                    >
+                                    <span className={`facet-badge sync-badge ${newer ? "green" : "amber"}`}>
                                       {newer ? "匯入檔較新" : "電腦端較新"}
                                     </span>
                                     <strong>{c.new_title || c.old_title || c.title || "（無標題）"}</strong>

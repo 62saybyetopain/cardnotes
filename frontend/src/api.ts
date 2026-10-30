@@ -81,11 +81,18 @@ export const httpApi = {
   cardTitle: (id: string) => request<{ id: string; title: string }>("GET", `/cards/${id}/title`),
   cardTitles: (ids: string[]) =>
     request<{ titles: Record<string, string> }>("GET", `/cards/titles${qs({ ids: ids.join(",") })}`),
+  listAllCardTitles: () => request<{ items: { id: string; title: string }[] }>("GET", "/cards/titles/all"),
   patchCard: (
     id: string,
-    patch: { title?: string; body?: string; card_type?: CardType; curation_status?: CurationStatus; sources?: string[] },
+    patch: { title?: string; body?: string; card_type?: CardType; curation_status?: CurationStatus; sources?: string[]; file_path?: string | null },
     expected_updated_at: string,
   ) => request<CardDetail>("PATCH", `/cards/${id}`, { ...patch, expected_updated_at }),
+  writeCardFile: (id: string, payload: { expected_updated_at: string; force?: boolean }) =>
+    request<import("./types").FileSyncResult>("POST", `/cards/${id}/file/write`, payload),
+  readCardFile: (id: string) =>
+    request<{ card: CardDetail; mtime: number; message: string }>("POST", `/cards/${id}/file/read`),
+  restoreCardFileBackup: (id: string) =>
+    request<{ card: CardDetail; mtime: number; message: string }>("POST", `/cards/${id}/file/restore`),
   cardImpact: (id: string) => request<CardImpact>("GET", `/cards/${id}/impact`),
   deleteCard: (id: string) => request<{ deleted: boolean }>("DELETE", `/cards/${id}`),
   listCards: (p: {
@@ -105,7 +112,7 @@ export const httpApi = {
     request<BoardLink & { existed: boolean }>("PUT", "/links", {
       source_id,
       target_id,
-      relation_type: opts?.relation_type ?? "extend",
+      relation_type: opts?.relation_type ?? "延伸",
       status: opts?.status ?? "confirmed",
       reason: opts?.reason ?? "",
     }),
@@ -183,6 +190,12 @@ export const httpApi = {
   syncApply: (payload: SyncApplyRequest) => request<SyncApplyResult>("POST", "/sync/apply", payload),
   syncOverwrite: (pkg: SyncPackage) => request<{ restored: boolean; cards_count: number }>("POST", "/sync/overwrite", pkg),
   syncSaveToFile: (target_path: string) => request<{ saved: boolean; path: string; exported_at: string }>("POST", "/sync/save-file", { target_path }),
+  pickSystemFile: (body: {
+    mode?: "open" | "save";
+    title?: string;
+    initial_path?: string | null;
+    default_name?: string;
+  }) => request<{ cancelled: boolean; path: string | null }>("POST", "/system/pick-file", body),
   // relations
   listRelationPatterns: () => request<{ patterns: RelationPattern[] }>("GET", "/relation-patterns"),
   createRelationPattern: (body: RelationPatternCreate) =>
@@ -202,10 +215,23 @@ export const httpApi = {
 
 import { getStorageDriver } from "./lib/storage";
 
+// 只有這些桌面專屬方法允許在 driver 沒實作時退回 httpApi（打後端）。
+// 原因：其餘方法若退回，Dexie 模式會悄悄讀寫伺服器資料而不是 IndexedDB，資料語義錯了卻沒有任何錯誤。
+// 純靜態前端環境下，driver 必須自行提供明確存根以拋出錯誤，絕不允許靜默退回必定失敗的網路請求
+const DESKTOP_ONLY_FALLBACK: ReadonlySet<string> = new Set([]);
+
 export const api: typeof httpApi = new Proxy(httpApi, {
   get(target, prop, receiver) {
     const driver = getStorageDriver();
-    const val = Reflect.get(driver, prop) ?? Reflect.get(target, prop, receiver);
+    let val = Reflect.get(driver, prop);
+    if (val === undefined || val === null) {
+      val = Reflect.get(target, prop, receiver);
+      if (val !== undefined && !(typeof prop === "string" && DESKTOP_ONLY_FALLBACK.has(prop))) {
+        const method = String(prop);
+        return () =>
+          Promise.reject(new ApiError("DRIVER_METHOD_MISSING", `目前的儲存驅動沒有實作 ${method}`, 501, { method }));
+      }
+    }
     return typeof val === "function" ? val.bind(driver) : val;
   },
 });

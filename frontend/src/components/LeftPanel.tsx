@@ -1,10 +1,10 @@
 // @depends-on ./SyncModal.tsx (SyncModal)
 // @depends-on ../lib/storage/index.ts (getPreferredDriverType)
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { getPreferredDriverType } from "../lib/storage";
 import { buildTree, descendantIds, isSameAxisGroup, tagPath, type TreeNode } from "../lib/tree";
-import type { Axis, BoardSummary, CleanupResult, Tag } from "../types";
+import type { Axis, BoardSummary, CardSummary, CleanupResult, Tag } from "../types";
 import { FacetPicker } from "./FacetPicker";
 import type { Filter } from "./RightPanel";
 import { SyncModal } from "./SyncModal";
@@ -27,6 +27,140 @@ interface Props {
   report(e: unknown, prefix?: string): void;
 }
 
+// 線條圖標：規格與 Board.tsx 的 CrosshairIcon 一致（stroke=currentColor、圓端點、線寬為尺寸的 1/10）。
+// viewBox 用 24 以沿用 Feather 風格幾何，所以線寬是 2.4（= 24 × 0.1）
+type IconName =
+  | "layers"
+  | "inbox"
+  | "folder"
+  | "folder-dashed"
+  | "search"
+  | "cloud"
+  | "trash"
+  | "sun"
+  | "moon"
+  | "chevron-left"
+  | "plus"
+  | "x"
+  | "pencil"
+  | "sliders"
+  | "merge"
+  | "arrow-up-right"
+  | "more";
+
+const FOLDER_PATH = "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z";
+
+const ICON_SHAPES: Record<IconName, ReactNode> = {
+  layers: (
+    <>
+      <polygon points="12 2 2 7 12 12 22 7 12 2" />
+      <polyline points="2 17 12 22 22 17" />
+      <polyline points="2 12 12 17 22 12" />
+    </>
+  ),
+  inbox: (
+    <>
+      <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
+      <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+    </>
+  ),
+  folder: <path d={FOLDER_PATH} />,
+  "folder-dashed": <path d={FOLDER_PATH} strokeDasharray="4 3" />,
+  search: (
+    <>
+      <circle cx="11" cy="11" r="8" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </>
+  ),
+  cloud: <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />,
+  trash: (
+    <>
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    </>
+  ),
+  sun: (
+    <>
+      <circle cx="12" cy="12" r="5" />
+      <line x1="12" y1="1" x2="12" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="23" />
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+      <line x1="1" y1="12" x2="3" y2="12" />
+      <line x1="21" y1="12" x2="23" y2="12" />
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+    </>
+  ),
+  moon: <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />,
+  "chevron-left": <polyline points="15 18 9 12 15 6" />,
+  plus: (
+    <>
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </>
+  ),
+  x: (
+    <>
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </>
+  ),
+  pencil: <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />,
+  sliders: (
+    <>
+      <line x1="4" y1="21" x2="4" y2="14" />
+      <line x1="4" y1="10" x2="4" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12" y2="3" />
+      <line x1="20" y1="21" x2="20" y2="16" />
+      <line x1="20" y1="12" x2="20" y2="3" />
+      <line x1="1" y1="14" x2="7" y2="14" />
+      <line x1="9" y1="8" x2="15" y2="8" />
+      <line x1="17" y1="16" x2="23" y2="16" />
+    </>
+  ),
+  merge: (
+    <>
+      <circle cx="18" cy="18" r="3" />
+      <circle cx="6" cy="6" r="3" />
+      <path d="M6 21V9a9 9 0 0 0 9 9" />
+    </>
+  ),
+  "arrow-up-right": (
+    <>
+      <line x1="7" y1="17" x2="17" y2="7" />
+      <polyline points="7 7 17 7 17 17" />
+    </>
+  ),
+  more: (
+    <>
+      <circle cx="12" cy="12" r="1" />
+      <circle cx="19" cy="12" r="1" />
+      <circle cx="5" cy="12" r="1" />
+    </>
+  ),
+};
+
+function Icon({ name, size = 14 }: { name: IconName; size?: number }) {
+  return (
+    <svg
+      className="ui-icon"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {ICON_SHAPES[name]}
+    </svg>
+  );
+}
+
 const AXIS_LABEL: Record<Axis, string> = {
   location: "收納位置（櫃子／抽屜）",
   domain: "收納位置（櫃子／抽屜）",
@@ -34,6 +168,16 @@ const AXIS_LABEL: Record<Axis, string> = {
   concept: "概念標籤（描述維度）",
   free: "概念標籤（描述維度）",
 };
+
+// 標籤排序：default 維持各清單原本的順序；其餘兩種依「卡片最後更新時間」（updated_at）計算，編輯內文也算
+type TagSortMode = "default" | "recent-touch" | "recent-freq";
+const TAG_SORT_LABEL: Record<TagSortMode, string> = {
+  default: "預設",
+  "recent-touch": "最近有動靜",
+  "recent-freq": "近期常用",
+};
+// 「近期常用」只統計最近更新的這幾張卡片
+const RECENT_CARD_WINDOW = 30;
 
 export function LeftPanel(p: Props) {
   const [moving, setMoving] = useState<Tag | null>(null);
@@ -46,8 +190,11 @@ export function LeftPanel(p: Props) {
   const [tagQuery, setTagQuery] = useState("");
   const [tagSearchOpen, setTagSearchOpen] = useState(false);
   const [showEmptyTags, setShowEmptyTags] = useState(false);
+  const [tagMenuOpen, setTagMenuOpen] = useState(false);
   const [fallbackCounts, setFallbackCounts] = useState<Map<string, number>>(new Map());
   const [countsReady, setCountsReady] = useState(false);
+  const [sortMode, setSortMode] = useState<TagSortMode>("default");
+  const [recentCards, setRecentCards] = useState<CardSummary[]>([]);
   const searchWrapRef = useRef<HTMLDivElement>(null);
 
   const hasNativeCount = useMemo(
@@ -85,14 +232,16 @@ export function LeftPanel(p: Props) {
   }, [p.tags, hasNativeCount]);
 
   useEffect(() => {
-    if (!tagSearchOpen) return;
+    if (!tagSearchOpen && !tagMenuOpen) return;
+    const closeAll = () => {
+      setTagSearchOpen(false);
+      setTagMenuOpen(false);
+    };
     const onDown = (e: MouseEvent) => {
-      if (searchWrapRef.current && !searchWrapRef.current.contains(e.target as Node)) {
-        setTagSearchOpen(false);
-      }
+      if (searchWrapRef.current && !searchWrapRef.current.contains(e.target as Node)) closeAll();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setTagSearchOpen(false);
+      if (e.key === "Escape") closeAll();
     };
     window.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey);
@@ -100,7 +249,7 @@ export function LeftPanel(p: Props) {
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey);
     };
-  }, [tagSearchOpen]);
+  }, [tagSearchOpen, tagMenuOpen]);
 
   const getDirectCardCount = useCallback(
     (t: Tag): number => {
@@ -138,6 +287,61 @@ export function LeftPanel(p: Props) {
     [countsReady, getSubtreeCardCount, p.filter.tagId, showEmptyTags],
   );
 
+  // 近期排序的資料來源：卡片 updated_at。只在選了近期排序時才抓；失敗要大聲報錯，不默默沿用舊資料
+  useEffect(() => {
+    if (sortMode === "default") return;
+    let alive = true;
+    api
+      .listCards({ limit: 200 })
+      .then((r) => {
+        if (alive) setRecentCards(r.items);
+      })
+      .catch((e) => {
+        if (alive) p.report(e, "載入近期卡片失敗，標籤排序可能不是最新");
+      });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.tags, sortMode]);
+
+  const recentStats = useMemo(() => {
+    const sorted = [...recentCards].sort((a, b) =>
+      a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0,
+    );
+    const stats = new Map<string, { lastTouched: string; recentCount: number }>();
+    sorted.forEach((c, i) => {
+      for (const t of c.tags ?? []) {
+        let s = stats.get(t.id);
+        if (!s) {
+          s = { lastTouched: c.updated_at, recentCount: 0 }; // 由新到舊走訪，第一次遇到的就是最近一次
+          stats.set(t.id, s);
+        }
+        if (i < RECENT_CARD_WINDOW) s.recentCount += 1;
+      }
+    });
+    return stats;
+  }, [recentCards]);
+
+  // default 模式下等同原本下拉選單的「卡片數多→少、再依名稱」
+  const compareBySort = useCallback(
+    (a: Tag, b: Tag): number => {
+      const sa = recentStats.get(a.id);
+      const sb = recentStats.get(b.id);
+      if (sortMode === "recent-touch") {
+        const ta = sa?.lastTouched ?? "";
+        const tb = sb?.lastTouched ?? "";
+        if (ta !== tb) return ta < tb ? 1 : -1;
+      } else if (sortMode === "recent-freq") {
+        const ca = sa?.recentCount ?? 0;
+        const cb = sb?.recentCount ?? 0;
+        if (ca !== cb) return cb - ca;
+      }
+      return getDirectCardCount(b) - getDirectCardCount(a) || a.name.localeCompare(b.name);
+    },
+    [getDirectCardCount, recentStats, sortMode],
+  );
+
   const locationTreeNodes = useMemo(
     () => filterTreeByCount(buildTree(p.tags, "location")),
     [filterTreeByCount, p.tags],
@@ -156,12 +360,15 @@ export function LeftPanel(p: Props) {
       g.nodes.push(n);
       g.totalCards += getDirectCardCount(n.tag);
     }
+    if (sortMode !== "default") {
+      for (const g of groups.values()) g.nodes.sort((x, y) => compareBySort(x.tag, y.tag));
+    }
     return Array.from(groups.values()).sort((a, b) => {
       if (a.facet === "未指定維度") return 1;
       if (b.facet === "未指定維度") return -1;
       return b.totalCards - a.totalCards || a.facet.localeCompare(b.facet);
     });
-  }, [filterTreeByCount, getDirectCardCount, p.tags]);
+  }, [compareBySort, filterTreeByCount, getDirectCardCount, p.tags, sortMode]);
 
   const dropdownTags = useMemo(() => {
     const q = tagQuery.trim().toLowerCase();
@@ -169,7 +376,7 @@ export function LeftPanel(p: Props) {
       const nonEmpty = p.tags.filter((t) => getDirectCardCount(t) > 0);
       const base = nonEmpty.length > 0 ? nonEmpty : p.tags;
       return [...base]
-        .sort((a, b) => getDirectCardCount(b) - getDirectCardCount(a) || a.name.localeCompare(b.name))
+        .sort(compareBySort)
         .slice(0, 30)
         .map((t) => ({ tag: t, matchedAlias: null as string | null, count: getDirectCardCount(t) }));
     }
@@ -191,7 +398,7 @@ export function LeftPanel(p: Props) {
     return matches
       .sort((a, b) => b.rank - a.rank || b.count - a.count || a.tag.name.localeCompare(b.tag.name))
       .slice(0, 30);
-  }, [getDirectCardCount, p.tags, tagQuery]);
+  }, [compareBySort, getDirectCardCount, p.tags, tagQuery]);
 
   const run = async (fn: () => Promise<unknown>, prefix: string) => {
     try {
@@ -327,7 +534,7 @@ export function LeftPanel(p: Props) {
             aria-label={p.theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
             title={p.theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
           >
-            {p.theme === "dark" ? "☀️" : "🌙"}
+            <Icon name={p.theme === "dark" ? "sun" : "moon"} size={16} />
           </button>
           <button
             type="button"
@@ -336,7 +543,7 @@ export function LeftPanel(p: Props) {
             aria-label="收納左側面板"
             title="收納左側面板"
           >
-            ◀
+            <Icon name="chevron-left" size={16} />
           </button>
         </div>
       </div>
@@ -345,7 +552,7 @@ export function LeftPanel(p: Props) {
         <div className="section-head">
           <h3>白板</h3>
           <button onClick={() => void newBoard()} aria-label="新增白板">
-            ＋
+            <Icon name="plus" size={12} />
           </button>
         </div>
         {p.boards.length === 0 && <div className="muted pad">還沒有白板</div>}
@@ -357,10 +564,10 @@ export function LeftPanel(p: Props) {
               </button>
               <span className="actions">
                 <button onClick={() => void renameBoard(b)} aria-label={`重新命名 ${b.name}`}>
-                  ✎
+                  <Icon name="pencil" size={12} />
                 </button>
                 <button onClick={() => void deleteBoard(b)} aria-label={`刪除白板 ${b.name}`}>
-                  ✕
+                  <Icon name="x" size={12} />
                 </button>
               </span>
             </li>
@@ -373,68 +580,99 @@ export function LeftPanel(p: Props) {
           <h3>卡片冊</h3>
         </div>
         <div
-          className={`row${
+          className={`row nav-row${
             p.isSearchTab && !p.filter.unclassified && !p.filter.tagId && !p.filter.curationStatus ? " on" : ""
           }`}
         >
           <button className="label" onClick={() => p.onFilter({})}>
-            全部卡片
+            <Icon name="layers" /> 全部卡片
           </button>
         </div>
-        <div className={`row${p.filter.curationStatus === "inbox" ? " on" : ""}`}>
-          <button className="label" onClick={() => p.onFilter({ curationStatus: "inbox" })}>
-            📥 收件夾（待整理） <span className="count">{p.inboxCount ?? 0}</span>
+        <div className={`row nav-row${p.filter.curationStatus === "inbox" ? " on" : ""}`}>
+          <button
+            className="label"
+            onClick={() => p.onFilter({ curationStatus: "inbox" })}
+            title="尚未整理的卡片"
+          >
+            <Icon name="inbox" /> 收件夾 <span className="count">{p.inboxCount ?? 0}</span>
           </button>
         </div>
-        <div className={`row${p.filter.unclassified ? " on" : ""}`}>
-          <button className="label" onClick={() => p.onFilter({ unclassified: true })}>
-            未歸檔（無位置） <span className="count">{p.unclassifiedCount}</span>
+        <div className={`row nav-row${p.filter.unclassified ? " on" : ""}`}>
+          <button
+            className="label"
+            onClick={() => p.onFilter({ unclassified: true })}
+            title="尚未放進任何收納位置的卡片"
+          >
+            <Icon name="folder-dashed" /> 未歸檔 <span className="count">{p.unclassifiedCount}</span>
           </button>
         </div>
       </section>
 
       <section style={{ paddingBottom: 4 }}>
-        <div ref={searchWrapRef} style={{ position: "relative", padding: "4px 8px" }}>
-          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+        <div className="section-head">
+          <h3>標籤</h3>
+        </div>
+        <div ref={searchWrapRef} style={{ position: "relative", padding: "4px 0" }}>
+          <div className="tag-search">
+            <Icon name="search" />
             <input
               value={tagQuery}
-              onFocus={() => setTagSearchOpen(true)}
+              onFocus={() => {
+                setTagMenuOpen(false);
+                setTagSearchOpen(true);
+              }}
               onClick={() => setTagSearchOpen(true)}
               onChange={(e) => {
                 setTagQuery(e.target.value);
                 setTagSearchOpen(true);
               }}
-              placeholder="🔍 搜尋標籤或別名…"
+              placeholder="搜尋標籤或別名…"
               aria-label="搜尋標籤或別名"
-              style={{
-                flex: 1,
-                fontSize: 12,
-                padding: "4px 8px",
-                borderRadius: 6,
-                border: "1px solid var(--line, #334155)",
-                background: "var(--bg)",
-                color: "var(--text)",
-              }}
             />
             {tagQuery && (
-              <button
-                type="button"
-                onClick={() => setTagQuery("")}
-                title="清除搜尋"
-                style={{ fontSize: 11, padding: "2px 5px" }}
-              >
-                ✕
+              <button type="button" onClick={() => setTagQuery("")} title="清除搜尋" aria-label="清除搜尋">
+                <Icon name="x" size={12} />
               </button>
             )}
             <button
               type="button"
-              className={showEmptyTags ? "on" : ""}
-              onClick={() => setShowEmptyTags((v) => !v)}
-              title={showEmptyTags ? "目前已顯示 0 張卡片的空標籤（點擊隱藏）" : "目前已隱藏 0 張卡片的空標籤（點擊顯示全部）"}
-              style={{ fontSize: 11, padding: "3px 6px", flexShrink: 0 }}
+              className={tagMenuOpen || showEmptyTags ? "on" : ""}
+              aria-haspopup="menu"
+              aria-expanded={tagMenuOpen}
+              onClick={() => {
+                setTagSearchOpen(false);
+                setTagMenuOpen((v) => !v);
+              }}
+              title="標籤顯示選項"
+              aria-label="標籤顯示選項"
             >
-              {showEmptyTags ? "含空" : "非空"}
+              <Icon name="more" size={16} />
             </button>
+            {tagMenuOpen && (
+              <div className="tag-filter-menu" role="menu">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={showEmptyTags}
+                    onChange={(e) => setShowEmptyTags(e.target.checked)}
+                  />
+                  顯示沒有卡片的標籤
+                </label>
+                <p>預設只列出有卡片的標籤，避免清單被空標籤塞滿。這個選項只影響下方的收納位置與概念標籤清單。</p>
+                <div className="tag-sort-group" role="radiogroup" aria-label="標籤排序">
+                  <span className="muted">排序（概念標籤與下拉選單）</span>
+                  {(Object.keys(TAG_SORT_LABEL) as TagSortMode[]).map((m) => (
+                    <label key={m}>
+                      <input type="radio" name="tag-sort" checked={sortMode === m} onChange={() => setSortMode(m)} />
+                      {TAG_SORT_LABEL[m]}
+                    </label>
+                  ))}
+                  <p>
+                    「最近有動靜」依標籤所屬卡片的最後更新時間；「近期常用」統計最近更新的 {RECENT_CARD_WINDOW} 張卡片。編輯內文也算更新。
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
 
           {tagSearchOpen && (
@@ -443,8 +681,8 @@ export function LeftPanel(p: Props) {
               aria-label="標籤檢索選單"
               style={{
                 position: "absolute",
-                left: 8,
-                right: 8,
+                left: 0,
+                right: 0,
                 top: "calc(100% + 2px)",
                 maxHeight: 280,
                 overflowY: "auto",
@@ -466,7 +704,13 @@ export function LeftPanel(p: Props) {
                   justifyContent: "space-between",
                 }}
               >
-                <span>{tagQuery.trim() ? "相關標籤（含別名比對）" : "常用標籤（依卡片數排序）"}</span>
+                <span>
+                  {tagQuery.trim()
+                    ? "相關標籤（含別名比對）"
+                    : sortMode === "default"
+                      ? "常用標籤（依卡片數排序）"
+                      : `常用標籤（依「${TAG_SORT_LABEL[sortMode]}」排序）`}
+                </span>
                 <span>卡片數</span>
               </div>
               {dropdownTags.length === 0 ? (
@@ -502,8 +746,8 @@ export function LeftPanel(p: Props) {
                         >
                           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {isLoc ? (
-                              <span className="facet-badge">📁 抽屜</span>
-                            ) : (
+                              <span className="facet-badge"><Icon name="folder" size={11} /> 抽屜</span>
+                            )  : (
                               t.facet && <span className="facet-badge">{t.facet}</span>
                             )}
                             <span>{isLoc ? tagPath(p.tags, t.id) : t.name}</span>
@@ -547,7 +791,7 @@ export function LeftPanel(p: Props) {
             onClick={(e) => (e.preventDefault(), void createTag("location", null))}
             aria-label="新增櫃子"
           >
-            ＋櫃子
+            <Icon name="plus" size={12} /> 櫃子
           </button>
         </summary>
         {locationTreeNodes.length === 0 ? (
@@ -584,7 +828,7 @@ export function LeftPanel(p: Props) {
             onClick={(e) => (e.preventDefault(), void createTag("concept", null))}
             aria-label="新增概念標籤"
           >
-            ＋
+            <Icon name="plus" size={12} />
           </button>
         </summary>
         {conceptFacetGroups.length === 0 ? (
@@ -638,17 +882,19 @@ export function LeftPanel(p: Props) {
       <section>
         <div className="section-head">
           <h3>資料維護與同步</h3>
-          <div style={{ display: "flex", gap: 4 }}>
-            <button onClick={() => setSyncOpen(true)} aria-label="資料同步與備份">
-              同步／備份
-            </button>
-            {getPreferredDriverType() !== "dexie" && (
-              <button onClick={() => void openCleanup()} aria-label="清理孤兒媒體">
-                孤兒媒體
-              </button>
-            )}
-          </div>
         </div>
+        <div className="row">
+          <button className="label" onClick={() => setSyncOpen(true)} aria-label="資料同步與備份">
+            <Icon name="cloud" /> 同步／備份
+          </button>
+        </div>
+        {getPreferredDriverType() !== "dexie" && (
+          <div className="row">
+            <button className="label" onClick={() => void openCleanup()} aria-label="清理孤兒媒體">
+              <Icon name="trash" /> 清理孤兒媒體
+            </button>
+          </div>
+        )}
       </section>
 
       {syncOpen && (
@@ -786,25 +1032,25 @@ function Tree(props: {
             <span className="actions">
               {nest && (
                 <button onClick={() => props.onAdd(n.tag)} aria-label={`在 ${n.tag.name} 底下新增`} title="新增子項目">
-                  ＋
+                  <Icon name="plus" size={13} />
                 </button>
               )}
               <button onClick={() => props.onEditMeta(n.tag)} aria-label={`設定 ${n.tag.name} 維度與別名`} title="設定維度、定義與別名">
-                ⚙
+                <Icon name="sliders" size={13} />
               </button>
               <button onClick={() => props.onMerge(n.tag)} aria-label={`合併 ${n.tag.name}`} title="合併至其他同軸標籤">
-                ⇄
+                <Icon name="merge" size={13} />
               </button>
               <button onClick={() => props.onRename(n.tag)} aria-label={`重新命名 ${n.tag.name}`} title="重新命名">
-                ✎
+                <Icon name="pencil" size={13} />
               </button>
               {nest && (
                 <button onClick={() => props.onMove(n.tag)} aria-label={`移動 ${n.tag.name}`} title="移動">
-                  ↗
+                  <Icon name="arrow-up-right" size={13} />
                 </button>
               )}
               <button onClick={() => props.onDelete(n.tag)} aria-label={`刪除 ${n.tag.name}`} title="刪除">
-                ✕
+                <Icon name="x" size={13} />
               </button>
             </span>
           </div>

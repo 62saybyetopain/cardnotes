@@ -113,25 +113,93 @@ export const FACET_ELIMINATION_STEPS: {
   },
 ];
 
-export type RelationType = "support" | "refute" | "influence" | "instance_of" | "applied_to" | "extend";
+// 值必須等於後端 relation_types.py 的 RELATION_TYPE_KEYS（逐項同序）：
+// 前 14 項與知識庫 RELATION_TAXONOMY 同文，後 3 項是 cardnote 擴充（支持、反駁＝論證立場；實例＝舊 instance_of）
+export const RELATION_TYPES = [
+  "依賴",
+  "延伸",
+  "包含",
+  "類比",
+  "互補",
+  "應用於",
+  "導致",
+  "改善",
+  "張力",
+  "取代",
+  "限制",
+  "鄰接",
+  "指標於",
+  "保護性限制",
+  "支持",
+  "反駁",
+  "實例",
+] as const;
+export type RelationType = (typeof RELATION_TYPES)[number];
 export type LinkStatus = "confirmed" | "hypothesis";
 
 export const RELATION_LABELS: Record<RelationType, string> = {
-  support: "支持",
-  refute: "反駁",
-  influence: "可能影響",
-  instance_of: "是……的實例",
-  applied_to: "應用於",
-  extend: "延伸／補充",
+  依賴: "依賴",
+  延伸: "延伸／補充",
+  包含: "包含",
+  類比: "類比",
+  互補: "互補",
+  應用於: "應用於",
+  導致: "導致",
+  改善: "改善",
+  張力: "張力（權衡／拮抗）",
+  取代: "取代",
+  限制: "限制",
+  鄰接: "鄰接",
+  指標於: "指標於",
+  保護性限制: "保護性限制",
+  支持: "支持",
+  反駁: "反駁",
+  實例: "是……的實例",
 };
 
+// 對稱類型沒有方向（與後端 SYMMETRIC_TYPES 同）：畫圖時不畫箭頭，資料庫只存 source_id < target_id 一種寫法
+export const SYMMETRIC_RELATIONS: ReadonlySet<RelationType> = new Set<RelationType>(["類比", "互補", "鄰接", "張力"]);
+
+// 與後端 CARD_RELATION_TYPES 的 category／is_tension 同文
+export const RELATION_CATEGORIES: Record<RelationType, { category: string; isTension: boolean }> = {
+  依賴: { category: "dependency", isTension: false },
+  延伸: { category: "hierarchy", isTension: false },
+  包含: { category: "hierarchy", isTension: false },
+  類比: { category: "similarity", isTension: false },
+  互補: { category: "complementary", isTension: false },
+  應用於: { category: "application", isTension: false },
+  導致: { category: "causality", isTension: false },
+  改善: { category: "enhancement", isTension: false },
+  張力: { category: "tension", isTension: true },
+  取代: { category: "tension", isTension: true },
+  限制: { category: "tension", isTension: true },
+  鄰接: { category: "spatial", isTension: false },
+  指標於: { category: "evidential", isTension: false },
+  保護性限制: { category: "compensatory", isTension: false },
+  支持: { category: "stance", isTension: false },
+  反駁: { category: "stance", isTension: false },
+  實例: { category: "instantiation", isTension: false },
+};
+
+// 顏色是暫定值：沿用舊六種的顏色，新增的依類別挑色，之後可依畫面調整
 export const RELATION_COLORS: Record<RelationType, string> = {
-  support: "#16a34a",
-  refute: "#dc2626",
-  influence: "#d97706",
-  instance_of: "#7c3aed",
-  applied_to: "#0891b2",
-  extend: "#2f6fed",
+  依賴: "#64748b",
+  延伸: "#2f6fed",
+  包含: "#1d4ed8",
+  類比: "#0ea5e9",
+  互補: "#14b8a6",
+  應用於: "#0891b2",
+  導致: "#d97706",
+  改善: "#65a30d",
+  張力: "#e11d48",
+  取代: "#be123c",
+  限制: "#9f1239",
+  鄰接: "#94a3b8",
+  指標於: "#8b5cf6",
+  保護性限制: "#ca8a04",
+  支持: "#16a34a",
+  反駁: "#dc2626",
+  實例: "#7c3aed",
 };
 
 export const LINK_STATUS_LABELS: Record<LinkStatus, string> = {
@@ -202,6 +270,9 @@ export interface CardDetail {
   body: string;
   card_type?: CardType;
   curation_status?: CurationStatus;
+  file_path?: string | null;
+  file_hash?: string | null;
+  file_mtime?: number | null;
   updated_at: string;
   created_at: string;
   sources?: string[]; // 出處（多筆）；舊資料沒有此欄時視為 []
@@ -209,6 +280,15 @@ export interface CardDetail {
   links: CardLink[];
   boards: { id: string; name: string }[];
   warnings: Warning[];
+}
+
+export interface FileSyncResult {
+  success: boolean;
+  file_path: string;
+  file_hash: string;
+  mtime: number;
+  has_backup: boolean;
+  message: string;
 }
 export interface CardSummary {
   id: string;
@@ -310,6 +390,7 @@ export interface SyncPackage {
   links: BoardLink[];
   boards: { id: string; name: string }[];
   board_cards: { board_id: string; card_id: string; x?: number; y?: number; w?: number; h?: number }[];
+  board_groups?: BoardGroup[];
   // 電腦端雲端備份才有：卡片引用的圖片清單，iPad 據此下載缺少的圖片
   media?: SyncMediaEntry[];
 }

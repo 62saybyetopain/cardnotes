@@ -62,6 +62,7 @@ import {
   type LinkStatus,
   type RelationType,
 } from "../types";
+import { isSymmetricRelation } from "../lib/relations";
 import { CardNode, type CardFlowNode } from "./CardNode";
 import { FloatingEdge } from "./FloatingEdge";
 import { notifyCardTitleUpdated } from "./Markdown";
@@ -273,7 +274,7 @@ function normalizeLink(l: Partial<BoardLink> & { source_id: string; target_id: s
     ...l,
     source_id: l.source_id,
     target_id: l.target_id,
-    relation_type: l.relation_type ?? "extend",
+    relation_type: l.relation_type ?? "延伸",
     status: l.status ?? "confirmed",
     reason: l.reason ?? "",
   };
@@ -1271,7 +1272,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       if (c.source.startsWith("group:") || c.target.startsWith("group:")) return;
       try {
         const r = await api.putLink(c.source, c.target, {
-          relation_type: "extend",
+          relation_type: "延伸",
           status: "confirmed",
           reason: "",
         });
@@ -1311,12 +1312,15 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           deletable: false,
           selectable: true,
           focusable: true,
-          markerEnd: {
-            type: MarkerType.ArrowClosed,
-            color,
-            width: 18,
-            height: 18,
-          },
+          // 對稱類型（類比、互補、鄰接、張力）沒有方向，不畫箭頭
+          markerEnd: isSymmetricRelation(l.relation_type)
+            ? undefined
+            : {
+                type: MarkerType.ArrowClosed,
+                color,
+                width: 18,
+                height: 18,
+              },
           style: {
             stroke: color,
             strokeWidth: 2,
@@ -1760,7 +1764,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
                 normalizeLink({
                   source_id: l.source_id ?? (l.direction === "incoming" ? l.id : cardId),
                   target_id: l.target_id ?? (l.direction === "incoming" ? cardId : l.id),
-                  relation_type: l.relation_type ?? "extend",
+                  relation_type: l.relation_type ?? "延伸",
                   status: l.status ?? "confirmed",
                   reason: l.reason ?? "",
                 }),
@@ -2299,8 +2303,9 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           onUpdated={(oldRel, updated) => {
             setLinks((ls) =>
               ls.map((l) =>
-                l.source_id === updated.source_id &&
-                l.target_id === updated.target_id &&
+                // 用舊連結的兩端比對：改成對稱類型時後端可能把方向對調，updated 的兩端不一定等於舊的
+                l.source_id === editingLink.source_id &&
+                l.target_id === editingLink.target_id &&
                 l.relation_type === oldRel
                   ? normalizeLink(updated)
                   : l,
@@ -2457,7 +2462,11 @@ function LinkEditorModal(props: {
         <h4>設定語意關係</h4>
         <div className="link-direction-preview">
           <strong>{titleOf(link.source_id)}</strong>
-          <span className="muted"> ──({RELATION_LABELS[relationType]})──▶ </span>
+          <span className="muted">
+            {isSymmetricRelation(relationType)
+              ? ` ──(${RELATION_LABELS[relationType]})── `
+              : ` ──(${RELATION_LABELS[relationType]})──▶ `}
+          </span>
           <strong>{titleOf(link.target_id)}</strong>
         </div>
         <label className="field-row">

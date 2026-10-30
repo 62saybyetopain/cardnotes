@@ -1,4 +1,5 @@
 // @depends-on ../../types.ts
+// @depends-on ../relations.ts (upgradeLinkRelation)
 import Dexie, { type Table } from "dexie";
 import type {
   Axis,
@@ -6,6 +7,7 @@ import type {
   CardType,
   CurationStatus,
 } from "../../types";
+import { upgradeLinkRelation } from "../relations";
 
 export interface DbCard {
   id: string;
@@ -99,6 +101,20 @@ export class CardboardDatabase extends Dexie {
       board_groups: "id, board_id",
       media: "id, kind, created_at",
     });
+    // v2：links.relation_type 改用知識庫分類表的值（extend→延伸、support→支持…；舊的 influence 降為待驗證假說）。
+    // 索引不變，只轉資料；已是新值的連結原樣保留；不認得的值丟錯讓升級失敗，不靜默改成別的類型。
+    this.version(2)
+      .stores({})
+      .upgrade(async (tx) => {
+        await tx
+          .table("links")
+          .toCollection()
+          .modify((l: DbLink) => {
+            const up = upgradeLinkRelation(l.relation_type, l.status);
+            l.relation_type = up.relation_type;
+            l.status = up.status ?? "confirmed";
+          });
+      });
   }
 }
 

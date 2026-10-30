@@ -8,6 +8,7 @@ export class HttpDriver implements StorageDriver {
   getCard = httpApi.getCard;
   cardTitle = httpApi.cardTitle;
   cardTitles = httpApi.cardTitles;
+  listAllCardTitles = httpApi.listAllCardTitles;
   patchCard = httpApi.patchCard;
   cardImpact = httpApi.cardImpact;
   deleteCard = httpApi.deleteCard;
@@ -44,6 +45,7 @@ export class HttpDriver implements StorageDriver {
   syncExport = httpApi.syncExport;
   syncDiff = httpApi.syncDiff;
   syncApply = httpApi.syncApply;
+  pickSystemFile = httpApi.pickSystemFile;
 
   uploadMedia = httpApi.uploadMedia;
   mediaInfo = httpApi.mediaInfo;

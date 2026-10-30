@@ -37,6 +37,7 @@ export interface StorageDriver {
   getCard(id: string): Promise<CardDetail>;
   cardTitle(id: string): Promise<{ id: string; title: string }>;
   cardTitles(ids: string[]): Promise<{ titles: Record<string, string> }>;
+  listAllCardTitles(): Promise<{ items: { id: string; title: string }[] }>;
   patchCard(
     id: string,
     patch: { title?: string; body?: string; card_type?: CardType; curation_status?: CurationStatus },
@@ -106,6 +107,12 @@ export interface StorageDriver {
   syncApply(payload: SyncApplyRequest): Promise<SyncApplyResult>;
   importPackageOverwrite?(pkg: SyncPackage): Promise<{ imported: number }>;
   findLocalOnlyCards?(pkg: SyncPackage): Promise<{ id: string; title: string }[]>;
+  pickSystemFile?(body: {
+    mode?: "open" | "save";
+    title?: string;
+    initial_path?: string | null;
+    default_name?: string;
+  }): Promise<{ cancelled: boolean; path: string | null }>;
 
   // 媒體與全域圖譜（本地端提供相容實作）
   uploadMedia?(file: File): Promise<MediaInfo>;

@@ -20,7 +20,14 @@ export function getPreferredDriverType(): StorageDriverType {
     }
     // 2. localStorage 偏好
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved === "dexie") return "dexie";
+    if (saved === "dexie" || saved === "http") return saved;
+
+    // 3. 環境自動感知：非 localhost / 127.0.0.1 之靜態環境（如 GitHub Pages）預設為 dexie
+    if (typeof window !== "undefined" && window.location) {
+      const host = window.location.hostname;
+      const isLocal = host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+      if (!isLocal) return "dexie";
+    }
   } catch {
     /* 忽略例外 */
   }

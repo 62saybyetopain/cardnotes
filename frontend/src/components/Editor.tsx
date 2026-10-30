@@ -44,6 +44,7 @@ interface Props {
   onReload(): void;
   onLinkAdded?(sourceId: string, targetId: string, extra?: Partial<BoardLink>): void;
   onOpenCard?(cardId: string): void;
+  onDirtyChange?(dirty: boolean): void;
   report(e: unknown, prefix?: string): void;
 }
 
@@ -196,6 +197,45 @@ function SplitMenuButton(props: {
   );
 }
 
+function BulletListIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <circle cx="2.5" cy="3.5" r="1.3" />
+      <circle cx="2.5" cy="8" r="1.3" />
+      <circle cx="2.5" cy="12.5" r="1.3" />
+      <rect x="6" y="2.75" width="8.5" height="1.5" rx="0.75" />
+      <rect x="6" y="7.25" width="8.5" height="1.5" rx="0.75" />
+      <rect x="6" y="11.75" width="8.5" height="1.5" rx="0.75" />
+    </svg>
+  );
+}
+
+function NumberedListIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <text x="0.4" y="5.3" fontSize="5" fontWeight="700" fontFamily="system-ui, sans-serif">
+        1
+      </text>
+      <text x="0.4" y="9.8" fontSize="5" fontWeight="700" fontFamily="system-ui, sans-serif">
+        2
+      </text>
+      <text x="0.4" y="14.3" fontSize="5" fontWeight="700" fontFamily="system-ui, sans-serif">
+        3
+      </text>
+      <rect x="6" y="2.75" width="8.5" height="1.5" rx="0.75" />
+      <rect x="6" y="7.25" width="8.5" height="1.5" rx="0.75" />
+      <rect x="6" y="11.75" width="8.5" height="1.5" rx="0.75" />
+    </svg>
+  );
+}
+
+// 樣式選單用的符號：依選項順序對應原本 select 提示的順序；數量對不上就退回選項原文，不猜
+const BULLET_GLYPHS = ["•", "◦", "▪", "▸", "✓"] as const;
+const ORDERED_GLYPHS = ["1.", "(1)", "a.", "A.", "i."] as const;
+function styleGlyph(glyphs: readonly string[], total: number, index: number, fallback: string): string {
+  return glyphs.length === total ? glyphs[index] : fallback;
+}
+
 const STATUS_TEXT: Record<Status, string> = {
   saved: "已儲存",
   dirty: "未儲存",
@@ -211,7 +251,7 @@ const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
   { type: "h3", label: "標題 3" },
 ];
 
-export function Editor({ card, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, report }: Props) {
+export function Editor({ card, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, onDirtyChange, report }: Props) {
   const [title, setTitle] = useState(card.title);
   const [body, setBody] = useState(() => normalizeNewlines(card.body));
   const [cursorPos, setCursorPos] = useState(0);
@@ -346,6 +386,11 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
     };
   }, []);
 
+  // 讓外層（檔案連動列）知道目前畫面上的內文是否已存進資料庫
+  useEffect(() => {
+    onDirtyChange?.(status !== "saved" || uploading > 0);
+  }, [status, uploading, onDirtyChange]);
+
   useEffect(() => {
     const unsafe = status !== "saved" || uploading > 0;
     if (!unsafe) return;
@@ -447,7 +492,7 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
     if (!mentionState) return;
     try {
       const link = await api.putLink(card.id, target.id, {
-        relation_type: "extend",
+        relation_type: "延伸",
         status: "confirmed",
         reason: "",
       });
@@ -635,26 +680,29 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
       <SplitMenuButton
         open={openMenu === "bullet"}
         onToggle={() => setOpenMenu((m) => (m === "bullet" ? null : "bullet"))}
-        main={<>{activeBulletMeta?.label ?? "•"} 項目</>}
-        mainTitle="套用或取消項目符號"
+        main={<BulletListIcon />}
+        mainTitle={`套用或取消項目符號（目前：${activeBulletMeta?.label ?? ""}）`}
         mainActive={currentLineType === "ul"}
         menuLabel="選擇項目符號樣式"
         onMain={() => handleToolbarLineType("ul", { bulletStyle: activeBulletStyle })}
       >
-        {BULLET_STYLE_OPTIONS.map((o) => (
+        {BULLET_STYLE_OPTIONS.map((o, i) => (
           <button
             key={o.style}
             type="button"
             role="menuitemradio"
             aria-checked={activeBulletStyle === o.style}
+            aria-label={o.label}
+            title={o.label}
             className={activeBulletStyle === o.style ? "on" : ""}
+            style={{ minWidth: 28 }}
             onClick={() => {
               setBulletStyle(o.style);
               setOpenMenu(null);
               handleToolbarLineType("ul", { bulletStyle: o.style });
             }}
           >
-            {o.label}
+            {styleGlyph(BULLET_GLYPHS, BULLET_STYLE_OPTIONS.length, i, o.label)}
           </button>
         ))}
       </SplitMenuButton>
@@ -662,26 +710,29 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
       <SplitMenuButton
         open={openMenu === "ordered"}
         onToggle={() => setOpenMenu((m) => (m === "ordered" ? null : "ordered"))}
-        main={<>{activeOrderedMeta?.label ?? "1."} 編號</>}
-        mainTitle="套用或取消編號清單"
+        main={<NumberedListIcon />}
+        mainTitle={`套用或取消編號清單（目前：${activeOrderedMeta?.label ?? ""}）`}
         mainActive={currentLineType === "ol"}
         menuLabel="選擇編號清單樣式"
         onMain={() => handleToolbarLineType("ol", { orderedStyle: activeOrderedStyle })}
       >
-        {ORDERED_STYLE_OPTIONS.map((o) => (
+        {ORDERED_STYLE_OPTIONS.map((o, i) => (
           <button
             key={o.style}
             type="button"
             role="menuitemradio"
             aria-checked={activeOrderedStyle === o.style}
+            aria-label={o.label}
+            title={o.label}
             className={activeOrderedStyle === o.style ? "on" : ""}
+            style={{ minWidth: 28 }}
             onClick={() => {
               setOrderedStyle(o.style);
               setOpenMenu(null);
               handleToolbarLineType("ol", { orderedStyle: o.style });
             }}
           >
-            {o.label}
+            {styleGlyph(ORDERED_GLYPHS, ORDERED_STYLE_OPTIONS.length, i, o.label)}
           </button>
         ))}
       </SplitMenuButton>
@@ -974,7 +1025,7 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
 
                 {selBubble && !lineMenu && (
                   <div
-                    className="selection-bubble"
+                    className="selection-bubble editor-toolbar"
                     role="toolbar"
                     aria-label="文字格式快捷"
                     style={{

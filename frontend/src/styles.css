@@ -98,6 +98,24 @@ h3, h4 { margin: 4px 0; font-size: 13px; color: var(--muted); }
 .row:hover .actions { display: flex; }
 .row .actions button { border: 0; background: transparent; padding: 0 4px; }
 .count { color: var(--muted); font-size: 12px; margin-left: 4px; }
+
+/* 側邊欄導覽列：圖標＋名稱靠左、數量靠右 */
+.nav-row .label { display: flex; align-items: center; gap: 6px; }
+.nav-row .count { margin-left: auto; }
+
+/* 標籤檢索：圖標、輸入框、清除、顯示選項合成同一個欄位 */
+.tag-search { position: relative; display: flex; align-items: center; gap: 2px; padding: 0 4px 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.tag-search:focus-within { border-color: var(--accent); }
+.tag-search > input { flex: 1; min-width: 0; border: 0; background: transparent; padding: 5px 4px; font-size: 12px; outline: none; }
+.tag-search button { border: 0; background: transparent; padding: 2px 6px; font-size: 12px; color: var(--muted); }
+.tag-search button:hover, .tag-search button.on { color: var(--accent); }
+.tag-filter-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 61; min-width: 220px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28); display: flex; flex-direction: column; gap: 4px; }
+.tag-filter-menu label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
+.tag-filter-menu input { flex: none; padding: 0; margin: 0; }
+.tag-filter-menu p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.tag-sort-group { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--line); }
+.tag-sort-group > .muted { font-size: 11px; }
+.ui-icon { flex-shrink: 0; vertical-align: -2px; }
 .muted { color: var(--muted); } .pad { padding: 4px 6px; }
 details { margin-top: 8px; } summary { cursor: pointer; color: var(--muted); }
 summary .add { float: right; border: 0; background: transparent; }
@@ -527,7 +545,23 @@ summary .add { float: right; border: 0; background: transparent; }
 }
 
 /* 資料同步與 Diff 預覽彈窗樣式 */
-.sync-modal-card { width: 680px; max-width: 90vw; max-height: 85vh; display: flex; flex-direction: column; }
+.sync-modal-card { width: 680px; max-width: 90vw; max-height: 85vh; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+.sync-modal-card > * { flex-shrink: 0; }
+.sync-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.sync-head-title { display: flex; align-items: center; gap: 8px; }
+.sync-head h4 { margin: 0; font-size: 15px; color: var(--text); }
+.sync-head-title .facet-badge { margin-right: 0; }
+.sync-head-actions { display: inline-flex; align-items: center; gap: 4px; }
+.sync-section { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
+.sync-section-title { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; }
+.sync-section-desc { margin: 0; font-size: 12px; color: var(--muted); }
+.sync-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.sync-actions button.danger { margin-top: 0; }
+.sync-badge.green { background: var(--hl-green-bg); color: var(--text); }
+.sync-badge.blue { background: var(--hl-blue-bg); color: var(--text); }
+.sync-badge.amber { background: var(--hl-amber-bg); color: var(--text); }
+.sync-modal-card .resolve-box { border-color: var(--line); margin-bottom: 0; padding: 10px 12px; }
+.sync-modal-card .modal-actions { position: sticky; bottom: -16px; background: var(--panel); border-top: 1px solid var(--line); padding-top: 8px; }
 .sync-top-actions { display: flex; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
 .sync-diff-container { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; overflow: hidden; flex: 1; }
 .sync-summary-bar { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--muted); padding: 6px 8px; background: var(--bg); border-radius: 6px; }

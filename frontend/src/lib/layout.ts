@@ -1,5 +1,7 @@
 // @depends-on ../types.ts (RelationType)
+// @depends-on ./relations.ts (buildDefaultTypeSideMap, isSymmetricRelation)
 import type { RelationType } from "../types";
+import { buildDefaultTypeSideMap, isSymmetricRelation } from "./relations";
 
 export const GRID_SIZE = 10;
 export const MIN_CARD_GAP = 10;
@@ -10,14 +12,7 @@ export const DEFAULT_CARD_H = 140;
 export type LayoutMode = "grid" | "radial" | "right" | "split";
 export type SplitMode = "direction" | "type";
 
-export const DEFAULT_TYPE_SIDE_MAP: Record<RelationType, "left" | "right"> = {
-  refute: "left",
-  support: "right",
-  influence: "right",
-  instance_of: "right",
-  applied_to: "right",
-  extend: "right",
-};
+export const DEFAULT_TYPE_SIDE_MAP: Record<RelationType, "left" | "right"> = buildDefaultTypeSideMap();
 
 export interface LayoutBox {
   id: string;
@@ -47,12 +42,23 @@ export interface AutoLayoutOptions {
 }
 
 const RELATION_ORDER: readonly RelationType[] = [
-  "refute",
-  "support",
-  "influence",
-  "instance_of",
-  "applied_to",
-  "extend",
+  "反駁",
+  "支持",
+  "導致",
+  "實例",
+  "應用於",
+  "延伸",
+  "依賴",
+  "包含",
+  "類比",
+  "互補",
+  "改善",
+  "張力",
+  "取代",
+  "限制",
+  "鄰接",
+  "指標於",
+  "保護性限制",
 ];
 
 export function snapToGridValue(val: number, gridSize = GRID_SIZE): number {
@@ -315,14 +321,14 @@ function buildClusterTrees(
     }
     const srcMap = adj.get(l.source_id)!;
     const dstMap = adj.get(l.target_id)!;
-    if (!srcMap.has(l.target_id) || l.relation_type === "refute") {
+    if (!srcMap.has(l.target_id) || l.relation_type === "反駁") {
       srcMap.set(l.target_id, {
         neighborId: l.target_id,
         direction: "outgoing",
         relation_type: l.relation_type,
       });
     }
-    if (!dstMap.has(l.source_id) || l.relation_type === "refute") {
+    if (!dstMap.has(l.source_id) || l.relation_type === "反駁") {
       dstMap.set(l.source_id, {
         neighborId: l.source_id,
         direction: "incoming",
@@ -371,7 +377,8 @@ function buildClusterTrees(
   }
 
   const resolveFirstLayerSide = (edgeFromCenter: AdjEdge): "left" | "right" => {
-    if (options.splitMode === "direction") {
+    // 對稱類型沒有方向（資料庫依 id 大小存放），不能用 incoming／outgoing 分左右，改用類型對應表
+    if (options.splitMode === "direction" && !isSymmetricRelation(edgeFromCenter.relation_type)) {
       return edgeFromCenter.direction === "incoming" ? "left" : "right";
     }
     return options.typeSideMap[edgeFromCenter.relation_type] ?? "right";

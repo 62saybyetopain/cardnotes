@@ -211,6 +211,8 @@ export default function App() {
   useEffect(() => {
     if (!booted || isStandalone) return;
 
+    // 原因：失敗不會更新上次備份時間，此檢查每 60 秒重試一次；不加旗標同一個錯誤會每分鐘跳一次。
+    let failureReported = false;
     const runBackupCheck = async () => {
       try {
         const rawCfg = localStorage.getItem("cardboard:auto-backup-config");
@@ -258,8 +260,14 @@ export default function App() {
         if (needBackup) {
           const res = await api.syncSaveToFile(cfg.targetPath.trim());
           localStorage.setItem("cardboard:last-auto-backup-time", res.exported_at);
+          failureReported = false;
         }
-      } catch {
+      } catch (e) {
+        // 原因：原本整個吞掉，路徑被後端拒絕（422）或磁碟錯誤時使用者會以為有備份；改為大聲報錯，每次失敗期間只報一次。
+        if (!failureReported) {
+          failureReported = true;
+          report(e, "自動備份失敗");
+        }
         /* 靜默守護背景備份，不中斷前端使用 */
       }
     };
@@ -269,7 +277,7 @@ export default function App() {
     // 2. 每 60 秒定期輪詢一次時間
     const timer = setInterval(() => void runBackupCheck(), 60000);
     return () => clearInterval(timer);
-  }, [booted, isStandalone]);
+  }, [booted, isStandalone, report]);
 
   const selectCard = useCallback(
     (id: string | null) => {
@@ -397,8 +405,18 @@ export default function App() {
 
   const onTagsChanged = useCallback(() => {
     void refreshTags();
-    bump(); // 標籤組織改變：目前抽屜的卡片組織可能更新，重新取得
-  }, [refreshTags, bump]);
+    void refreshIpadCards();
+    if (selected) {
+      void api.cardTitle(selected).catch(() => {
+        setSelected(null);
+        setCenterEditing(false);
+      });
+    }
+    if (previewCardId) {
+      void api.cardTitle(previewCardId).catch(() => setPreviewCardId(null));
+    }
+    bump(); // 標籤組織或同步覆蓋完成：重新取得卡片與畫布狀態
+  }, [refreshTags, refreshIpadCards, selected, previewCardId, bump]);
 
   if (!booted) return <div className="boot">載入中…</div>;
 

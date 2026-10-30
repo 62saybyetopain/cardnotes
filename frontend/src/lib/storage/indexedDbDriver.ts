@@ -90,6 +90,18 @@ export class IndexedDbDriver implements StorageDriver {
     return result;
   }
 
+  private normalizeAxis(axis: string): Tag["axis"] {
+    return axis === "domain" ? "location" : (axis as Tag["axis"]);
+  }
+
+  private canonicalEndpoints(relationType: RelationType, sourceId: string, targetId: string): [string, string] {
+    const symmetricSet = new Set<RelationType>(["類比", "互補", "鄰接", "張力"]);
+    if (symmetricSet.has(relationType) && sourceId > targetId) {
+      return [targetId, sourceId];
+    }
+    return [sourceId, targetId];
+  }
+
   private async buildTagDict(tagId: string): Promise<Tag> {
     const t = await db.tags.get(tagId);
     if (!t) throw new ApiError("NOT_FOUND", "標籤不存在", 404, { tag_id: tagId });
@@ -97,7 +109,7 @@ export class IndexedDbDriver implements StorageDriver {
     return {
       id: t.id,
       name: t.name,
-      axis: t.axis,
+      axis: this.normalizeAxis(t.axis),
       facet: t.facet,
       definition: t.definition || "",
       parent_id: t.parent_id,
@@ -115,6 +127,7 @@ export class IndexedDbDriver implements StorageDriver {
       body: "",
       card_type: "untyped",
       curation_status: "inbox",
+      sources: [],
       created_at: now,
       updated_at: now,
     };
@@ -154,14 +167,15 @@ export class IndexedDbDriver implements StorageDriver {
     for (const l of outgoing) {
       const other = await db.cards.get(l.target_id);
       if (other) {
+        const { relation_type, forceHypothesis } = this.upgradeRelationType(l.relation_type);
         links.push({
           id: other.id,
           title: other.title,
           source_id: id,
           target_id: other.id,
           direction: "outgoing",
-          relation_type: l.relation_type as RelationType,
-          status: l.status as LinkStatus,
+          relation_type,
+          status: forceHypothesis ? "hypothesis" : (l.status as LinkStatus),
           reason: l.reason,
         });
       }
@@ -169,14 +183,15 @@ export class IndexedDbDriver implements StorageDriver {
     for (const l of incoming) {
       const other = await db.cards.get(l.source_id);
       if (other) {
+        const { relation_type, forceHypothesis } = this.upgradeRelationType(l.relation_type);
         links.push({
           id: other.id,
           title: other.title,
           source_id: other.id,
           target_id: id,
           direction: "incoming",
-          relation_type: l.relation_type as RelationType,
-          status: l.status as LinkStatus,
+          relation_type,
+          status: forceHypothesis ? "hypothesis" : (l.status as LinkStatus),
           reason: l.reason,
         });
       }
@@ -205,7 +220,9 @@ export class IndexedDbDriver implements StorageDriver {
 
     return {
       ...c,
-      sources: c.sources ?? [],
+      card_type: c.card_type ?? "untyped",
+      curation_status: c.curation_status ?? "inbox",
+      sources: Array.isArray(c.sources) ? c.sources : [],
       tags,
       links,
       boards,
@@ -228,11 +245,28 @@ export class IndexedDbDriver implements StorageDriver {
     return { titles: map };
   }
 
+  // 對齊後端 /cards/titles/all：全部卡片的 id/title，供提及偵測使用（不經 listCards 的 200 筆上限）
+  async listAllCardTitles(): Promise<{ items: { id: string; title: string }[] }> {
+    const rows = await db.cards.toArray();
+    return { items: rows.map((c) => ({ id: c.id, title: c.title })) };
+  }
+
   async patchCard(
     id: string,
-    patch: { title?: string; body?: string; card_type?: CardType; curation_status?: CurationStatus; sources?: string[] },
+    patch: {
+      title?: string;
+      body?: string;
+      card_type?: CardType;
+      curation_status?: CurationStatus;
+      sources?: string[];
+      file_path?: string | null;
+    },
     expected_updated_at: string,
   ): Promise<CardDetail> {
+    if (patch.file_path !== undefined && patch.file_path !== null && patch.file_path.trim() !== "") {
+      throw new ApiError("FILE_OPERATION_ERROR", "純前端靜態環境（GitHub Pages）不支援綁定本機實體檔案", 400);
+    }
+
     const c = await db.cards.get(id);
     if (!c) throw new ApiError("NOT_FOUND", "卡片不存在", 404, { card_id: id });
     if (c.updated_at !== expected_updated_at) {
@@ -246,7 +280,7 @@ export class IndexedDbDriver implements StorageDriver {
       body: patch.body !== undefined ? patch.body : c.body,
       card_type: patch.card_type !== undefined ? patch.card_type : c.card_type,
       curation_status: patch.curation_status !== undefined ? patch.curation_status : c.curation_status,
-      sources: patch.sources !== undefined ? patch.sources : c.sources,
+      sources: patch.sources !== undefined ? patch.sources : (c.sources ?? []),
       updated_at: utcNow(),
     };
 
@@ -374,20 +408,29 @@ export class IndexedDbDriver implements StorageDriver {
     target_id: string,
     opts?: { relation_type?: RelationType; status?: LinkStatus; reason?: string },
   ): Promise<BoardLink & { existed: boolean }> {
-    const relation_type = opts?.relation_type ?? "extend";
-    const status = opts?.status ?? "confirmed";
+    if (source_id === target_id) {
+      throw new ApiError("VALIDATION_ERROR", "不能建立指向自己的連結", 422);
+    }
+    const { relation_type, forceHypothesis } = this.upgradeRelationType(opts?.relation_type ?? "延伸");
+    const [sId, tId] = this.canonicalEndpoints(relation_type, source_id, target_id);
+    const status = forceHypothesis ? "hypothesis" : (opts?.status ?? "confirmed");
     const reason = opts?.reason ?? "";
 
     const existing = await db.links
-      .filter((l) => l.source_id === source_id && l.target_id === target_id && l.relation_type === relation_type)
+      .filter(
+        (l) =>
+          l.source_id === sId &&
+          l.target_id === tId &&
+          this.upgradeRelationType(l.relation_type).relation_type === relation_type,
+      )
       .first();
 
     if (existing) {
       return {
-        source_id,
-        target_id,
-        card_a: source_id,
-        card_b: target_id,
+        source_id: sId,
+        target_id: tId,
+        card_a: sId,
+        card_b: tId,
         relation_type,
         status: existing.status as LinkStatus,
         reason: existing.reason,
@@ -395,12 +438,12 @@ export class IndexedDbDriver implements StorageDriver {
       };
     }
 
-    await db.links.add({ source_id, target_id, relation_type, status, reason });
+    await db.links.add({ source_id: sId, target_id: tId, relation_type, status, reason });
     return {
-      source_id,
-      target_id,
-      card_a: source_id,
-      card_b: target_id,
+      source_id: sId,
+      target_id: tId,
+      card_a: sId,
+      card_b: tId,
       relation_type,
       status,
       reason,
@@ -413,31 +456,42 @@ export class IndexedDbDriver implements StorageDriver {
     target_id: string,
     patch: { old_relation_type?: RelationType; relation_type?: RelationType; status?: LinkStatus; reason?: string },
   ): Promise<BoardLink> {
-    const oldRel = patch.old_relation_type ?? "extend";
+    const { relation_type: oldRel } = this.upgradeRelationType(patch.old_relation_type ?? "延伸");
+    const [oldS, oldT] = this.canonicalEndpoints(oldRel, source_id, target_id);
     const match = await db.links
-      .filter((l) => l.source_id === source_id && l.target_id === target_id && l.relation_type === oldRel)
+      .filter(
+        (l) =>
+          ((l.source_id === oldS && l.target_id === oldT) ||
+            (l.source_id === source_id && l.target_id === target_id)) &&
+          this.upgradeRelationType(l.relation_type).relation_type === oldRel,
+      )
       .first();
 
     if (!match || match.id === undefined) {
       throw new ApiError("NOT_FOUND", "找不到此連結", 404);
     }
 
-    const nextRel = patch.relation_type ?? oldRel;
+    const { relation_type: nextRel } = patch.relation_type
+      ? this.upgradeRelationType(patch.relation_type)
+      : { relation_type: oldRel };
+    const [nextS, nextT] = this.canonicalEndpoints(nextRel, source_id, target_id);
     const nextStatus = patch.status ?? match.status;
     const nextReason = patch.reason !== undefined ? patch.reason : match.reason;
 
     await db.links.update(match.id, {
+      source_id: nextS,
+      target_id: nextT,
       relation_type: nextRel,
       status: nextStatus,
       reason: nextReason,
     });
 
     return {
-      source_id,
-      target_id,
-      card_a: source_id,
-      card_b: target_id,
-      relation_type: nextRel as RelationType,
+      source_id: nextS,
+      target_id: nextT,
+      card_a: nextS,
+      card_b: nextT,
+      relation_type: nextRel,
       status: nextStatus as LinkStatus,
       reason: nextReason,
     };
@@ -484,8 +538,14 @@ export class IndexedDbDriver implements StorageDriver {
   ): Promise<Tag> {
     const tid = newId();
     const cleanName = name.trim();
+    const normAxis = this.normalizeAxis(axis);
     const conflict = await db.tags
-      .filter((t) => t.axis === axis && t.parent_id === parent_id && t.name.toLowerCase() === cleanName.toLowerCase())
+      .filter(
+        (t) =>
+          this.normalizeAxis(t.axis) === normAxis &&
+          t.parent_id === parent_id &&
+          t.name.toLowerCase() === cleanName.toLowerCase(),
+      )
       .first();
     if (conflict) {
       throw new ApiError("NAME_CONFLICT", `同一層已有名為「${cleanName}」的標籤`, 409, { names: [cleanName] });
@@ -494,7 +554,7 @@ export class IndexedDbDriver implements StorageDriver {
     await db.tags.add({
       id: tid,
       name: cleanName,
-      axis,
+      axis: normAxis,
       facet: extra?.facet ?? null,
       definition: extra?.definition?.trim() ?? "",
       parent_id,
@@ -729,15 +789,19 @@ export class IndexedDbDriver implements StorageDriver {
     const rawLinks = await db.links.toArray();
     const links: BoardLink[] = rawLinks
       .filter((l) => cardIdSet.has(l.source_id) && cardIdSet.has(l.target_id))
-      .map((l) => ({
-        source_id: l.source_id,
-        target_id: l.target_id,
-        card_a: l.source_id,
-        card_b: l.target_id,
-        relation_type: l.relation_type as RelationType,
-        status: l.status as LinkStatus,
-        reason: l.reason,
-      }));
+      .map((l) => {
+        const { relation_type, forceHypothesis } = this.upgradeRelationType(l.relation_type);
+        const [sId, tId] = this.canonicalEndpoints(relation_type, l.source_id, l.target_id);
+        return {
+          source_id: sId,
+          target_id: tId,
+          card_a: sId,
+          card_b: tId,
+          relation_type,
+          status: forceHypothesis ? "hypothesis" : (l.status as LinkStatus),
+          reason: l.reason,
+        };
+      });
 
     const groups = await db.board_groups.where("board_id").equals(id).toArray();
     return {
@@ -832,15 +896,19 @@ export class IndexedDbDriver implements StorageDriver {
     const card_tags = rawCts.map((ct) => ({ card_id: ct.card_id, tag_id: ct.tag_id }));
 
     const rawLinks = await db.links.toArray();
-    const links: BoardLink[] = rawLinks.map((l) => ({
-      source_id: l.source_id,
-      target_id: l.target_id,
-      card_a: l.source_id,
-      card_b: l.target_id,
-      relation_type: l.relation_type as RelationType,
-      status: l.status as LinkStatus,
-      reason: l.reason,
-    }));
+    const links: BoardLink[] = rawLinks.map((l) => {
+      const { relation_type, forceHypothesis } = this.upgradeRelationType(l.relation_type);
+      const [sId, tId] = this.canonicalEndpoints(relation_type, l.source_id, l.target_id);
+      return {
+        source_id: sId,
+        target_id: tId,
+        card_a: sId,
+        card_b: tId,
+        relation_type,
+        status: forceHypothesis ? "hypothesis" : (l.status as LinkStatus),
+        reason: l.reason,
+      };
+    });
 
     const rawBoards = await db.boards.toArray();
     const boards = rawBoards.map((b) => ({ id: b.id, name: b.name }));
@@ -855,6 +923,8 @@ export class IndexedDbDriver implements StorageDriver {
       h: bc.h ?? undefined,
     }));
 
+    const board_groups = await db.board_groups.toArray();
+
     return {
       version: 1,
       exported_at: utcNow(),
@@ -865,10 +935,27 @@ export class IndexedDbDriver implements StorageDriver {
       links,
       boards,
       board_cards,
+      board_groups,
     };
   }
 
-  // ---- 同步：直接覆蓋匯入（移動端專用：電腦備份覆蓋 iPad） ----
+  // 舊版英文關聯向後相容映射表
+  private upgradeRelationType(raw: string): { relation_type: RelationType; forceHypothesis: boolean } {
+    const legacyMap: Record<string, RelationType> = {
+      support: "支持",
+      refute: "反駁",
+      influence: "導致",
+      instance_of: "實例",
+      applied_to: "應用於",
+      extend: "延伸",
+    };
+    if (raw in legacyMap) {
+      return { relation_type: legacyMap[raw], forceHypothesis: raw === "influence" };
+    }
+    return { relation_type: (raw as RelationType) || "延伸", forceHypothesis: false };
+  }
+
+  // ---- 同步：直接覆蓋匯入（電腦備份覆蓋純前端 IndexedDB） ----
   async importPackageOverwrite(pkg: SyncPackage): Promise<{ imported: number }> {
     if (!pkg || !Array.isArray(pkg.cards)) {
       throw new ApiError("VALIDATION_ERROR", "無效的備份封包格式", 422);
@@ -878,7 +965,7 @@ export class IndexedDbDriver implements StorageDriver {
       "rw",
       [db.cards, db.tags, db.tag_aliases, db.card_tags, db.links, db.boards, db.board_cards, db.board_groups],
       async () => {
-        // 清空本地全部資料表
+        // 1. 清空本地全部資料表
         await db.cards.clear();
         await db.tags.clear();
         await db.tag_aliases.clear();
@@ -888,65 +975,114 @@ export class IndexedDbDriver implements StorageDriver {
         await db.board_cards.clear();
         await db.board_groups.clear();
 
-        // 寫入標籤與別名
-        for (const t of pkg.tags ?? []) {
-          await db.tags.add({
-            id: t.id,
-            name: t.name,
-            axis: t.axis,
-            facet: t.facet ?? null,
-            definition: t.definition ?? "",
-            parent_id: t.parent_id,
-          });
-          for (const a of t.aliases ?? []) {
-            await db.tag_aliases.add({ tag_id: t.id, alias: a });
+        // 2. 依拓撲順序重灌標籤與別名（同時正規化舊版 domain -> location）
+        const pendingTags = [...(pkg.tags ?? [])];
+        const insertedTagIds = new Set<string>();
+        while (pendingTags.length > 0) {
+          const ready = pendingTags.filter((t) => !t.parent_id || insertedTagIds.has(t.parent_id));
+          const currentBatch = ready.length > 0 ? ready : pendingTags;
+          for (const t of currentBatch) {
+            await db.tags.put({
+              id: t.id,
+              name: t.name,
+              axis: this.normalizeAxis(t.axis),
+              facet: t.facet ?? null,
+              definition: t.definition ?? "",
+              parent_id: t.parent_id ?? null,
+            });
+            for (const a of t.aliases ?? []) {
+              await db.tag_aliases.add({ tag_id: t.id, alias: a });
+            }
+            insertedTagIds.add(t.id);
           }
+          const batchIds = new Set(currentBatch.map((t) => t.id));
+          const remaining = pendingTags.filter((t) => !batchIds.has(t.id));
+          pendingTags.length = 0;
+          pendingTags.push(...remaining);
         }
 
-        // 寫入卡片
+        // 3. 寫入卡片（完整保留 sources 出處欄位）
+        const importedCardIds = new Set<string>();
         for (const c of pkg.cards ?? []) {
-          await db.cards.add({
+          await db.cards.put({
             id: c.id,
             title: c.title,
             body: c.body,
             card_type: c.card_type ?? "untyped",
             curation_status: c.curation_status ?? "inbox",
-            sources: c.sources ?? [],
+            sources: Array.isArray(c.sources) ? c.sources : [],
             created_at: c.created_at || utcNow(),
             updated_at: c.updated_at || utcNow(),
           });
+          importedCardIds.add(c.id);
         }
 
-        // 寫入卡片標籤對應
+        // 4. 寫入卡片標籤對應（過濾孤兒關聯與重複鍵）
+        const seenCt = new Set<string>();
         for (const ct of pkg.card_tags ?? []) {
-          await db.card_tags.add({ card_id: ct.card_id, tag_id: ct.tag_id });
+          const key = `${ct.card_id}:${ct.tag_id}`;
+          if (importedCardIds.has(ct.card_id) && insertedTagIds.has(ct.tag_id) && !seenCt.has(key)) {
+            seenCt.add(key);
+            await db.card_tags.add({ card_id: ct.card_id, tag_id: ct.tag_id });
+          }
         }
 
-        // 寫入語意連結
+        // 5. 寫入語意連結（升級舊英文類型、保證對稱規範順序、阻擋指向自己與孤兒連結）
+        const seenLinks = new Set<string>();
         for (const l of pkg.links ?? []) {
-          await db.links.add({
-            source_id: l.source_id,
-            target_id: l.target_id,
-            relation_type: l.relation_type,
-            status: l.status,
-            reason: l.reason ?? "",
-          });
+          const { relation_type, forceHypothesis } = this.upgradeRelationType(l.relation_type as string);
+          const [sId, tId] = this.canonicalEndpoints(relation_type, l.source_id, l.target_id);
+          const key = `${sId}:${tId}:${relation_type}`;
+          if (sId !== tId && importedCardIds.has(sId) && importedCardIds.has(tId) && !seenLinks.has(key)) {
+            seenLinks.add(key);
+            await db.links.add({
+              source_id: sId,
+              target_id: tId,
+              relation_type,
+              status: forceHypothesis ? "hypothesis" : l.status || "confirmed",
+              reason: l.reason ?? "",
+            });
+          }
         }
 
-        // 寫入白板與卡片關係
+        // 6. 寫入白板與卡片關係（過濾孤兒白板卡片）
+        const importedBoardIds = new Set<string>();
         for (const b of pkg.boards ?? []) {
-          await db.boards.add({ id: b.id, name: b.name, created_at: utcNow(), updated_at: utcNow() });
+          await db.boards.put({ id: b.id, name: b.name, created_at: utcNow(), updated_at: utcNow() });
+          importedBoardIds.add(b.id);
         }
+        const seenBc = new Set<string>();
         for (const bc of pkg.board_cards ?? []) {
-          await db.board_cards.add({
-            board_id: bc.board_id,
-            card_id: bc.card_id,
-            x: bc.x ?? 100,
-            y: bc.y ?? 100,
-            w: bc.w ?? 280,
-            h: bc.h ?? null,
-            z: 0,
-          });
+          const key = `${bc.board_id}:${bc.card_id}`;
+          if (importedBoardIds.has(bc.board_id) && importedCardIds.has(bc.card_id) && !seenBc.has(key)) {
+            seenBc.add(key);
+            await db.board_cards.add({
+              board_id: bc.board_id,
+              card_id: bc.card_id,
+              x: bc.x ?? 100,
+              y: bc.y ?? 100,
+              w: bc.w ?? 280,
+              h: bc.h ?? null,
+              z: 0,
+            });
+          }
+        }
+
+        // 7. 完整還原視覺分組框（僅保留所屬白板存在的分組框）
+        for (const bg of (pkg as any).board_groups ?? []) {
+          if (importedBoardIds.has(bg.board_id)) {
+            await db.board_groups.put({
+              id: bg.id,
+              board_id: bg.board_id,
+              label: bg.label ?? "",
+              x: bg.x,
+              y: bg.y,
+              w: bg.w,
+              h: bg.h,
+              color: bg.color ?? "slate",
+              created_at: bg.created_at || utcNow(),
+            });
+          }
         }
       },
     );
@@ -954,42 +1090,262 @@ export class IndexedDbDriver implements StorageDriver {
     return { imported: (pkg.cards ?? []).length };
   }
 
-    // 覆蓋同步前檢查：iPad 有、備份沒有的卡片（覆蓋後會被刪除）
+  // 覆蓋同步前檢查：本地有、備份沒有的卡片（覆蓋後會被刪除）
   async findLocalOnlyCards(pkg: SyncPackage): Promise<{ id: string; title: string }[]> {
     const keep = new Set(pkg.cards.map((c) => c.id));
     const local = await db.cards.toArray();
     return local.filter((c) => !keep.has(c.id)).map((c) => ({ id: c.id, title: c.title }));
   }
 
-  // 移動端比對與套用直接相容
+  // 差量比對
   async syncDiff(pkg: SyncPackage): Promise<SyncDiffReport> {
+    const localCards = new Map((await db.cards.toArray()).map((c) => [c.id, c]));
+    const cards_new: { id: string; title: string; body: string; updated_at: string }[] = [];
+    const cards_updated: SyncDiffReport["cards_updated"] = [];
+    let cards_unchanged_count = 0;
+
+    for (const c of pkg.cards ?? []) {
+      const local = localCards.get(c.id);
+      if (!local) {
+        cards_new.push({ id: c.id, title: c.title, body: c.body, updated_at: c.updated_at });
+      } else if (c.updated_at > local.updated_at) {
+        cards_updated.push({
+          id: c.id,
+          title: c.title,
+          old_title: local.title,
+          new_title: c.title,
+          old_body: local.body,
+          new_body: c.body,
+          old_updated_at: local.updated_at,
+          new_updated_at: c.updated_at,
+        });
+      } else {
+        cards_unchanged_count++;
+      }
+    }
+
+    const localTags = new Set((await db.tags.toArray()).map((t) => t.id));
+    const tags_new = (pkg.tags ?? []).filter((t) => !localTags.has(t.id));
+
+    const localCt = new Set((await db.card_tags.toArray()).map((ct) => `${ct.card_id}:${ct.tag_id}`));
+    const card_tags_new = (pkg.card_tags ?? []).filter((ct) => !localCt.has(`${ct.card_id}:${ct.tag_id}`));
+
+    const localLinks = new Set(
+      (await db.links.toArray()).map((l) => {
+        const { relation_type } = this.upgradeRelationType(l.relation_type);
+        const [sId, tId] = this.canonicalEndpoints(relation_type, l.source_id, l.target_id);
+        return `${sId}:${tId}:${relation_type}`;
+      }),
+    );
+    const links_new = (pkg.links ?? []).filter((l) => {
+      const { relation_type } = this.upgradeRelationType(l.relation_type as string);
+      const [sId, tId] = this.canonicalEndpoints(relation_type, l.source_id, l.target_id);
+      return !localLinks.has(`${sId}:${tId}:${relation_type}`);
+    });
+
+    const localBc = new Set((await db.board_cards.toArray()).map((bc) => `${bc.board_id}:${bc.card_id}`));
+    const board_cards_new = (pkg.board_cards ?? []).filter((bc) => !localBc.has(`${bc.board_id}:${bc.card_id}`));
+
     return {
       source_device: pkg.source_device,
       exported_at: pkg.exported_at,
-      cards_new: [],
-      cards_updated: [],
-      cards_unchanged_count: pkg.cards.length,
-      tags_new: [],
+      cards_new,
+      cards_updated,
+      cards_unchanged_count,
+      tags_new,
       tags_updated: [],
-      card_tags_new: [],
-      links_new: [],
-      board_cards_new: [],
+      card_tags_new,
+      links_new,
+      board_cards_new,
     };
   }
 
+  // 安全差量套用：對齊後端 cards.py::sync_apply，支援同名標籤合併、保留既有出處、建立缺失白板並阻擋孤兒關聯
   async syncApply(payload: SyncApplyRequest): Promise<SyncApplyResult> {
-    await this.importPackageOverwrite(payload.package);
-    return {
-      applied: {
-        cards_added: payload.package.cards.length,
-        cards_updated: 0,
-        tags_added: payload.package.tags.length,
-        tags_updated: 0,
-        card_tags_added: payload.package.card_tags.length,
-        links_added: payload.package.links.length,
-        board_cards_added: payload.package.board_cards.length,
-      },
+    const pkg = payload.package;
+    const cardMap = new Map((pkg.cards ?? []).map((c) => [c.id, c]));
+    const tagMap = new Map((pkg.tags ?? []).map((t) => [t.id, t]));
+    const boardMap = new Map((pkg.boards ?? []).map((b) => [b.id, b]));
+
+    const applied = {
+      cards_added: 0,
+      cards_updated: 0,
+      tags_added: 0,
+      tags_updated: 0,
+      card_tags_added: 0,
+      links_added: 0,
+      board_cards_added: 0,
+      tags_merged: 0,
+      board_cards_skipped: 0,
+      boards_created: 0,
     };
+
+    await db.transaction(
+      "rw",
+      [db.cards, db.tags, db.tag_aliases, db.card_tags, db.links, db.boards, db.board_cards],
+      async () => {
+        // 1. 依拓撲順序新增標籤並處理同層同名合併
+        const tagRemap = new Map<string, string>();
+        const existingTags = await db.tags.toArray();
+        const knownTagIds = new Set(existingTags.map((t) => t.id));
+        const pendingTags = (payload.tag_ids_to_add ?? [])
+          .map((tid) => tagMap.get(tid))
+          .filter((t): t is Tag => Boolean(t));
+
+        while (pendingTags.length > 0) {
+          const ready = pendingTags.filter((t) => !t.parent_id || knownTagIds.has(t.parent_id));
+          const currentBatch = ready.length > 0 ? ready : pendingTags;
+          for (const t of currentBatch) {
+            const axisVal = this.normalizeAxis(t.axis);
+            const parentId = t.parent_id ? (tagRemap.get(t.parent_id) ?? t.parent_id) : null;
+            const allNow = await db.tags.toArray();
+            const dup = allNow.find((row) =>
+              parentId !== null
+                ? row.parent_id === parentId && row.name === t.name
+                : row.parent_id === null &&
+                  this.normalizeAxis(row.axis) === axisVal &&
+                  (row.facet || "") === (t.facet || "") &&
+                  row.name === t.name,
+            );
+            if (dup) {
+              if (dup.id !== t.id) {
+                tagRemap.set(t.id, dup.id);
+                applied.tags_merged++;
+              }
+            } else if (!(await db.tags.get(t.id))) {
+              await db.tags.add({
+                id: t.id,
+                name: t.name,
+                axis: axisVal,
+                facet: t.facet ?? null,
+                definition: t.definition ?? "",
+                parent_id: parentId,
+              });
+              applied.tags_added++;
+            }
+            const targetTagId = tagRemap.get(t.id) ?? t.id;
+            for (const a of t.aliases ?? []) {
+              const aliasExists = await db.tag_aliases
+                .filter((ar) => ar.alias.toLowerCase() === a.toLowerCase())
+                .first();
+              if (!aliasExists) {
+                await db.tag_aliases.add({ tag_id: targetTagId, alias: a });
+              }
+            }
+            knownTagIds.add(t.id);
+          }
+          const batchIds = new Set(currentBatch.map((t) => t.id));
+          const remaining = pendingTags.filter((t) => !batchIds.has(t.id));
+          pendingTags.length = 0;
+          pendingTags.push(...remaining);
+        }
+
+        // 2. 新增卡片
+        for (const cid of payload.card_ids_to_add ?? []) {
+          const c = cardMap.get(cid);
+          if (c && !(await db.cards.get(c.id))) {
+            await db.cards.add({
+              id: c.id,
+              title: c.title,
+              body: c.body,
+              card_type: c.card_type ?? "untyped",
+              curation_status: c.curation_status ?? "inbox",
+              sources: Array.isArray(c.sources) ? c.sources : [],
+              created_at: c.created_at || utcNow(),
+              updated_at: c.updated_at || utcNow(),
+            });
+            applied.cards_added++;
+          }
+        }
+
+        // 3. 更新卡片（若封包無 sources 欄位，保留本機既有 sources，絕不抹除）
+        for (const cid of payload.card_ids_to_update ?? []) {
+          const c = cardMap.get(cid);
+          const existing = await db.cards.get(cid);
+          if (c && existing) {
+            await db.cards.put({
+              id: c.id,
+              title: c.title,
+              body: c.body,
+              card_type: c.card_type ?? existing.card_type ?? "untyped",
+              curation_status: c.curation_status ?? existing.curation_status ?? "inbox",
+              sources: Array.isArray(c.sources) ? c.sources : (existing.sources ?? []),
+              created_at: existing.created_at || c.created_at || utcNow(),
+              updated_at: c.updated_at || utcNow(),
+            });
+            applied.cards_updated++;
+          }
+        }
+
+        // 4. 追加卡片標籤關聯（僅在卡片與標籤皆存在時寫入）
+        for (const ct of payload.card_tags_to_add ?? []) {
+          const tagId = tagRemap.get(ct.tag_id) ?? ct.tag_id;
+          if ((await db.cards.get(ct.card_id)) && (await db.tags.get(tagId))) {
+            const exists = await db.card_tags.where({ card_id: ct.card_id, tag_id: tagId }).first();
+            if (!exists) {
+              await db.card_tags.add({ card_id: ct.card_id, tag_id: tagId });
+              applied.card_tags_added++;
+            }
+          }
+        }
+
+        // 5. 追加語意連結（僅在雙端卡片皆存在時寫入）
+        for (const l of payload.links_to_add ?? []) {
+          const { relation_type, forceHypothesis } = this.upgradeRelationType(l.relation_type as string);
+          const [sId, tId] = this.canonicalEndpoints(relation_type, l.source_id, l.target_id);
+          if (sId !== tId && (await db.cards.get(sId)) && (await db.cards.get(tId))) {
+            const exists = await db.links
+              .filter((row) => row.source_id === sId && row.target_id === tId && row.relation_type === relation_type)
+              .first();
+            if (!exists) {
+              await db.links.add({
+                source_id: sId,
+                target_id: tId,
+                relation_type,
+                status: forceHypothesis ? "hypothesis" : l.status || "confirmed",
+                reason: l.reason ?? "",
+              });
+              applied.links_added++;
+            }
+          }
+        }
+
+        // 6. 追加白板放置關係（自動補建缺失白板，並略過未勾選的卡片）
+        const pkgBoardCardMap = new Map(
+          (pkg.board_cards ?? []).map((b) => [`${b.board_id}:${b.card_id}`, b]),
+        );
+        for (const bc of payload.board_cards_to_add ?? []) {
+          if (!(await db.cards.get(bc.card_id))) continue;
+          const exists = await db.board_cards.where({ board_id: bc.board_id, card_id: bc.card_id }).first();
+          if (exists) continue;
+
+          if (!(await db.boards.get(bc.board_id))) {
+            const srcBoard = boardMap.get(bc.board_id);
+            if (!srcBoard) {
+              applied.board_cards_skipped++;
+              continue;
+            }
+            const now = utcNow();
+            await db.boards.add({ id: bc.board_id, name: srcBoard.name, created_at: now, updated_at: now });
+            applied.boards_created++;
+          }
+
+          const pos = pkgBoardCardMap.get(`${bc.board_id}:${bc.card_id}`);
+          await db.board_cards.add({
+            board_id: bc.board_id,
+            card_id: bc.card_id,
+            x: pos?.x ?? 100,
+            y: pos?.y ?? 100,
+            w: pos?.w ?? 280,
+            h: pos?.h ?? null,
+            z: 0,
+          });
+          applied.board_cards_added++;
+        }
+      },
+    );
+
+    return { applied };
   }
 
   // 媒體存根
@@ -1069,5 +1425,25 @@ export class IndexedDbDriver implements StorageDriver {
 
   async getRelationsReport(): Promise<RelationsReport> {
     return { total_cards: 0, bridges: [], inconsistencies: [], candidates: [] };
+  }
+
+  // 電腦端專屬檔案連動與磁碟操作存根（fail-loud，阻斷靜默穿透）
+  async writeCardFile(): Promise<never> {
+    throw new ApiError("FILE_OPERATION_ERROR", "純前端靜態環境不支援寫入本機檔案", 400);
+  }
+  async readCardFile(): Promise<never> {
+    throw new ApiError("FILE_OPERATION_ERROR", "純前端靜態環境不支援讀取本機檔案", 400);
+  }
+  async restoreCardFileBackup(): Promise<never> {
+    throw new ApiError("FILE_OPERATION_ERROR", "純前端靜態環境不支援還原實體檔案備份", 400);
+  }
+  async syncSaveToFile(): Promise<never> {
+    throw new ApiError("FILE_OPERATION_ERROR", "純前端靜態環境不支援儲存至本機檔案系統", 400);
+  }
+  async syncOverwrite(): Promise<never> {
+    throw new ApiError("FILE_OPERATION_ERROR", "純前端靜態環境請使用本機 IndexedDB 覆蓋匯入", 400);
+  }
+  async pickSystemFile(): Promise<never> {
+    throw new ApiError("FILE_OPERATION_ERROR", "純前端靜態環境（GitHub Pages）不支援瀏覽選取本機實體檔案", 400);
   }
 }

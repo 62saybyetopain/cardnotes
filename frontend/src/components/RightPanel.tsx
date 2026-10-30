@@ -1,6 +1,7 @@
 // @depends-on ./Editor.tsx (Editor 自動儲存後，onSaved 回傳的 CardDetail 至少含 title/body/updated_at；父層 card 快照必須同步這三項，否則 ContentTab.updateMeta 以舊版本號送出會 409，onReload 重建 Editor 時也會顯示舊內文)
 // @depends-on ../api.ts (patchCard 回傳值含 title/body/updated_at/sources；onSaved 合併進父層 card 快照時也要帶 sources，否則出處欄會被舊值蓋回)
 // @depends-on ./SourcesField.tsx (onSave 失敗時必須 throw，元件靠這個判斷是否已儲存)
+// @depends-on ./MentionPanel.tsx (loadCardTitles 在它的 effect 依賴陣列內，傳入的函式必須是穩定身分（模組層級或 useCallback）；行內箭頭會讓每次渲染都重抓全部卡片標題，且不會有任何錯誤)
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { isSameAxisGroup, tagPath } from "../lib/tree";
@@ -22,11 +23,224 @@ import {
   type Tag,
   type TagResolveResponse,
 } from "../types";
+import { isSymmetricRelation } from "../lib/relations";
+import { MentionPanel } from "./MentionPanel";
+import { RelationGuide } from "./RelationGuide";
 import { Editor } from "./Editor";
 import { FacetPicker } from "./FacetPicker";
 import { Markdown } from "./Markdown";
 import { RelationBox } from "./RelationBox";
 import { SourcesField } from "./SourcesField";
+
+// 原因：MentionPanel 的 effect 把 loadCardTitles 放在依賴陣列，行內箭頭每次渲染都是新身分，會反覆重抓全部標題。
+// api 在呼叫時才解析 driver（不在模組載入時），所以 HTTP／Dexie 切換後仍走對的那一邊。
+const loadAllCardTitles = () => api.listAllCardTitles().then((r) => r.items);
+
+function FileLinkBox(props: {
+  card: CardDetail;
+  onSaved(card: CardDetail): void;
+  onReload(): void;
+  locked: boolean; // 編輯器還有未存入資料庫的內容：此時寫檔會寫出舊版，所以停用操作
+  report(e: unknown, prefix?: string): void;
+  info?(text: string): void;
+}) {
+  const { card, onSaved, onReload, locked, report, info } = props;
+  const [busy, setBusy] = useState(false);
+  const blocked = busy || locked;
+
+  const handleBrowseAndBind = async () => {
+    if (blocked) return;
+    setBusy(true);
+    try {
+      const picked = await api.pickSystemFile({
+        mode: "open",
+        title: "選取要與此卡片綁定同步的本機檔案",
+        initial_path: card.file_path || null,
+      });
+      if (picked.cancelled || !picked.path) return;
+      const updated = await api.patchCard(
+        card.id,
+        { file_path: picked.path },
+        card.updated_at,
+      );
+      onSaved(updated);
+      onReload();
+      info?.(`已綁定本機檔案：${picked.path}`);
+    } catch (e) {
+      report(e, "綁定檔案路徑失敗");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUnbind = async () => {
+    if (!card.file_path || blocked) return;
+    setBusy(true);
+    try {
+      const updated = await api.patchCard(
+        card.id,
+        { file_path: null },
+        card.updated_at,
+      );
+      onSaved(updated);
+      onReload();
+      info?.("已解除檔案綁定");
+    } catch (e) {
+      report(e, "解除檔案綁定失敗");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleWrite = async (force = false) => {
+    if (!card.file_path || busy) return;
+    setBusy(true);
+    try {
+      const res = await api.writeCardFile(card.id, {
+        expected_updated_at: card.updated_at,
+        force,
+      });
+      info?.(`✓ ${res.message}${res.has_backup ? "（已於 cardboard_backups 保留備份）" : ""}`);
+      onReload();
+    } catch (e: any) {
+      if (e?.code === "FILE_CONFLICT") {
+        const ok = window.confirm(`⚠️ ${e.message}\n\n是否仍要強制覆寫？`);
+        if (ok) {
+          setBusy(false);
+          await handleWrite(true);
+          return;
+        }
+      } else {
+        report(e, "寫入檔案失敗");
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRead = async () => {
+    if (!card.file_path || busy) return;
+    const ok = window.confirm("確定要從硬碟檔案重新載入？這將會更新卡片內對應的代碼塊。");
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await api.readCardFile(card.id);
+      onSaved(res.card);
+      onReload();
+      info?.("✓ 已從硬碟檔案載入最新代碼");
+    } catch (e) {
+      report(e, "從檔案讀取失敗");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRestore = async () => {
+    if (!card.file_path || busy) return;
+    const ok = window.confirm("確定要還原上一版備份？這只會還原實體檔案，卡片內文不會變動。");
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await api.restoreCardFileBackup(card.id);
+      // 原因：卡片內文沒變，不需要 onReload 重建 Editor；onSaved 只是同步 file_hash/mtime 快照
+      onSaved(res.card);
+      info?.("✓ 已還原上一版備份至實體檔案（卡片內文未變動，需要時請按「讀入」）");
+    } catch (e) {
+      report(e, "還原備份失敗");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        padding: "6px 8px",
+        marginTop: 6,
+        background: "var(--panel-sub, rgba(255, 255, 255, 0.02))",
+        borderRadius: 6,
+        border: "1px solid var(--line, #334155)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 0 }}>
+          <span style={{ fontSize: 13 }}>📄</span>
+          <span
+            style={{
+              fontSize: 12,
+              fontFamily: "monospace",
+              color: card.file_path ? "var(--text)" : "var(--muted)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={card.file_path || "尚未綁定實體檔案路徑"}
+          >
+            {card.file_path || "未綁定檔案"}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+          <button
+            type="button"
+            style={{ fontSize: 11, padding: "2px 8px" }}
+            disabled={blocked}
+            onClick={() => void handleBrowseAndBind()}
+            title="開啟系統檔案視窗瀏覽選取要綁定的檔案"
+          >
+            {card.file_path ? "📂 變更檔案…" : "📂 瀏覽綁定…"}
+          </button>
+          {card.file_path && (
+            <button
+              type="button"
+              style={{ fontSize: 11, padding: "2px 6px" }}
+              disabled={blocked}
+              onClick={() => void handleUnbind()}
+              title="解除此卡片與本機檔案的綁定"
+            >
+              ✕ 解除
+            </button>
+          )}
+        </div>
+      </div>
+
+      {card.file_path && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 2 }}>
+          <button
+            type="button"
+            className="primary"
+            style={{ fontSize: 11, padding: "3px 8px" }}
+            disabled={blocked}
+            onClick={() => void handleWrite(false)}
+            title="將選定的代碼塊寫入實體檔案"
+          >
+            ⚡ 寫入檔案
+          </button>
+          <button
+            type="button"
+            style={{ fontSize: 11, padding: "3px 8px" }}
+            disabled={blocked}
+            onClick={() => void handleRead()}
+            title="從本機檔案載入並更新對應代碼塊"
+          >
+            🔄 從檔案載入
+          </button>
+          <button
+            type="button"
+            style={{ fontSize: 11, padding: "3px 8px" }}
+            disabled={blocked}
+            onClick={() => void handleRestore()}
+            title="還原上一版備份檔"
+          >
+            ↩ 還原備份
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export interface Filter {
   tagId?: string;
@@ -119,9 +333,23 @@ export function CardEditorPane(props: {
       onClearInitialSmartPaste={onClearInitialSmartPaste}
       onReload={() => (setNonce((n) => n + 1), refetch())}
       onSaved={(c) => {
-        // Editor 自動儲存後，載入時的快照已落後伺服器：同步版本號與內容，
-        // updateMeta 才不會以舊版本送出而 409，onReload 重建 Editor 時也會顯示已儲存的內容
-        setCard((cur) => (cur && cur.id === c.id ? { ...cur, title: c.title, body: c.body, sources: c.sources, updated_at: c.updated_at } : cur));
+        // 同步所有欄位快照（包含 card_type, curation_status, file_path 等），避免儲存後狀態回退
+        setCard((cur) =>
+          cur && cur.id === c.id
+            ? {
+                ...cur,
+                title: c.title,
+                body: c.body,
+                card_type: c.card_type,
+                curation_status: c.curation_status,
+                sources: c.sources,
+                file_path: c.file_path,
+                file_hash: c.file_hash,
+                file_mtime: c.file_mtime,
+                updated_at: c.updated_at,
+              }
+            : cur,
+        );
         onSaved(c);
       }}
       onCardDeleted={onCardDeleted}
@@ -223,8 +451,23 @@ export function RightPanel(p: Props) {
             hideTopToolbar={true}
             onReload={() => (setNonce((n) => n + 1), refetch())}
             onSaved={(c) => {
-              // 同 CardEditorPane：快照要跟上 Editor 自動儲存後的版本與內容
-              setCard((cur) => (cur && cur.id === c.id ? { ...cur, title: c.title, body: c.body, sources: c.sources, updated_at: c.updated_at } : cur));
+              // 同 CardEditorPane：快照要跟上 Editor 自動儲存後的版本與內容（含 card_type, curation_status, file_path）
+              setCard((cur) =>
+                cur && cur.id === c.id
+                  ? {
+                      ...cur,
+                      title: c.title,
+                      body: c.body,
+                      card_type: c.card_type,
+                      curation_status: c.curation_status,
+                      sources: c.sources,
+                      file_path: c.file_path,
+                      file_hash: c.file_hash,
+                      file_mtime: c.file_mtime,
+                      updated_at: c.updated_at,
+                    }
+                  : cur,
+              );
               p.onSaved(c);
             }}
             onCardDeleted={p.onCardDeleted}
@@ -286,7 +529,14 @@ function ContentTab(props: {
   const conceptTags = card.tags.filter((t) => !isSameAxisGroup(t.axis, "location"));
   const allLocations = tags.filter((t) => isSameAxisGroup(t.axis, "location"));
 
+  const [metaCollapsed, setMetaCollapsed] = useState(true);
+  const [editorDirty, setEditorDirty] = useState(false);
+
   const updateMeta = async (patch: { card_type?: CardType; curation_status?: CurationStatus }) => {
+    if (editorDirty) {
+      report(new Error("編輯器尚有未儲存的變更，請稍候自動儲存完成再切換狀態"), "更新卡片狀態失敗");
+      return;
+    }
     try {
       const updated = await api.patchCard(card.id, patch, card.updated_at);
       props.onSaved(updated);
@@ -298,6 +548,11 @@ function ContentTab(props: {
 
   // 失敗時回報後仍 throw，SourcesField 靠它判斷有沒有存成功；成功後比照 updateMeta 重建編輯器以同步版本號
   const updateSources = async (next: string[]) => {
+    if (editorDirty) {
+      const err = new Error("編輯器尚有未儲存的變更，請稍候自動儲存完成再儲存出處");
+      report(err, "儲存出處失敗");
+      throw err;
+    }
     try {
       const updated = await api.patchCard(card.id, { sources: next }, card.updated_at);
       props.onSaved(updated);
@@ -390,8 +645,6 @@ function ContentTab(props: {
       report(e, "刪除卡片失敗");
     }
   };
-
-  const [metaCollapsed, setMetaCollapsed] = useState(true);
 
   return (
     <>
@@ -610,6 +863,16 @@ function ContentTab(props: {
             info={info}
           />
 
+          <FileLinkBox
+            key={`filebox:${card.id}`}
+            locked={editorDirty}
+            card={card}
+            onSaved={props.onSaved}
+            onReload={props.onReload}
+            report={report}
+            info={info}
+          />
+
           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
             <button
               className="danger"
@@ -633,6 +896,7 @@ function ContentTab(props: {
         onReload={props.onReload}
         onLinkAdded={props.onLinkAdded}
         onOpenCard={props.onSelectCard}
+        onDirtyChange={setEditorDirty}
         report={report}
       />
     </>
@@ -949,13 +1213,20 @@ function RelationsTab(props: {
   const [q, setQ] = useState("");
   const dq = useDebounced(q, 250);
   const [found, setFound] = useState<CardSummary[]>([]);
-  const [newRel, setNewRel] = useState<RelationType>("support");
+  const [newRel, setNewRel] = useState<RelationType>("支持");
   const [newStatus, setNewStatus] = useState<LinkStatus>("confirmed");
   const [newReason, setNewReason] = useState("");
+  const [guideFor, setGuideFor] = useState<{ id: string; title: string } | null>(null); // 新增連結時，正在用引導挑類型的對象
+  const [guideEditKey, setGuideEditKey] = useState<string | null>(null); // 修改連結時，開著引導的那一條
   const [editingKey, setEditingKey] = useState<string | null>(null);
-  const [editRel, setEditRel] = useState<RelationType>("extend");
+  const [editRel, setEditRel] = useState<RelationType>("延伸");
   const [editStatus, setEditStatus] = useState<LinkStatus>("confirmed");
   const [editReason, setEditReason] = useState("");
+
+  useEffect(() => {
+    setGuideFor(null);
+    setGuideEditKey(null);
+  }, [card.id]);
 
   useEffect(() => {
     if (!dq.trim()) return void setFound([]);
@@ -969,17 +1240,20 @@ function RelationsTab(props: {
     };
   }, [dq, card.id, report]);
 
-  const link = async (targetId: string) => {
+  // opts 來自連結類型引導：帶入引導選的類型與可信度，swapped 表示使用者把 A、B 對調（連結從對方指向這張卡片）
+  const link = async (targetId: string, opts?: { rel: RelationType; status: LinkStatus; swapped: boolean }) => {
+    const [src, dst] = opts?.swapped ? [targetId, card.id] : [card.id, targetId];
     try {
-      const res = await api.putLink(card.id, targetId, {
-        relation_type: newRel,
-        status: newStatus,
+      const res = await api.putLink(src, dst, {
+        relation_type: opts?.rel ?? newRel,
+        status: opts?.status ?? newStatus,
         reason: newReason.trim(),
       });
       setQ("");
       setNewReason("");
+      setGuideFor(null);
       props.onChanged();
-      props.onLinkAdded?.(card.id, targetId, res);
+      props.onLinkAdded?.(src, dst, res);
     } catch (e) {
       report(e, "建立連結失敗");
     }
@@ -988,7 +1262,7 @@ function RelationsTab(props: {
   const saveEdit = async (l: CardLink) => {
     const src = l.source_id ?? (l.direction === "incoming" ? l.id : card.id);
     const dst = l.target_id ?? (l.direction === "incoming" ? card.id : l.id);
-    const oldRel = l.relation_type ?? "extend";
+    const oldRel = l.relation_type ?? "延伸";
     try {
       const updated = await api.patchLink(src, dst, {
         old_relation_type: oldRel,
@@ -1024,7 +1298,7 @@ function RelationsTab(props: {
       {card.links.length === 0 && <div className="muted">還沒有語意連結</div>}
       <ul className="results">
         {card.links.map((l) => {
-          const rel = l.relation_type ?? "extend";
+          const rel = l.relation_type ?? "延伸";
           const st = l.status ?? "confirmed";
           const key = `${l.source_id ?? l.id}:${l.target_id ?? card.id}:${rel}`;
           const isEditing = editingKey === key;
@@ -1038,7 +1312,11 @@ function RelationsTab(props: {
                       className="facet-badge"
                       style={{ backgroundColor: color, color: "#fff" }}
                     >
-                      {l.direction === "incoming" ? `← ${RELATION_LABELS[rel]}` : `→ ${RELATION_LABELS[rel]}`}
+                      {isSymmetricRelation(rel)
+                        ? `↔ ${RELATION_LABELS[rel]}`
+                        : l.direction === "incoming"
+                          ? `← ${RELATION_LABELS[rel]}`
+                          : `→ ${RELATION_LABELS[rel]}`}
                     </span>
                     {st === "hypothesis" && <span className="facet-badge">待驗證假說</span>}
                     <strong>{l.title || "（無標題）"}</strong>
@@ -1082,8 +1360,28 @@ function RelationsTab(props: {
                           </option>
                         ))}
                       </select>
+                      <button
+                        type="button"
+                        onClick={() => setGuideEditKey(guideEditKey === key ? null : key)}
+                        title="不確定選哪種關係時，回答幾個問題來決定"
+                      >
+                        ❓ 引導
+                      </button>
                     </div>
                   </div>
+                  {guideEditKey === key && (
+                    <RelationGuide
+                      allowSwap={false}
+                      aTitle={l.direction === "incoming" ? l.title : card.title}
+                      bTitle={l.direction === "incoming" ? card.title : l.title}
+                      onPick={(rel, status) => {
+                        setEditRel(rel);
+                        setEditStatus(status);
+                        setGuideEditKey(null);
+                      }}
+                      onCancel={() => setGuideEditKey(null)}
+                    />
+                  )}
                   <div className="field-row">
                     <span className="muted">連接理由：</span>
                     <input
@@ -1104,6 +1402,14 @@ function RelationsTab(props: {
         })}
       </ul>
 
+      <MentionPanel
+        card={card}
+        onChanged={props.onChanged}
+        report={report}
+        info={props.info}
+        onRequestLink={(target) => setGuideFor(target)}
+        loadCardTitles={loadAllCardTitles}
+      />
       <h4>新增有向語意連結（此卡片 → 目標卡片）</h4>
       <div className="resolve-box">
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -1138,12 +1444,23 @@ function RelationsTab(props: {
         {found.map((c) => (
           <li key={c.id}>
             <span className="result-main">{c.title || "（無標題）"}</span>
+            <button onClick={() => setGuideFor({ id: c.id, title: c.title })} title="不確定選哪種關係時，回答幾個問題來決定">
+              ❓ 引導
+            </button>
             <button className="primary" onClick={() => void link(c.id)}>
               建立「{RELATION_LABELS[newRel]}」
             </button>
           </li>
         ))}
       </ul>
+      {guideFor && (
+        <RelationGuide
+          aTitle={card.title}
+          bTitle={guideFor.title}
+          onPick={(rel, status, swapped) => void link(guideFor.id, { rel, status, swapped })}
+          onCancel={() => setGuideFor(null)}
+        />
+      )}
       <h4>所在白板（{card.boards.length}）</h4>
       {card.boards.length === 0 && <div className="muted">不在任何白板上</div>}
       <ul className="results">
