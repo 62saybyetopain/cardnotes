@@ -4,6 +4,7 @@ import Dexie, { type Table } from "dexie";
 import type {
   Axis,
   BoardGroup,
+  BoardNote,
   CardType,
   CurationStatus,
 } from "../../types";
@@ -86,6 +87,7 @@ export class CardboardDatabase extends Dexie {
   boards!: Table<DbBoard, string>;
   board_cards!: Table<DbBoardCard, number>;
   board_groups!: Table<BoardGroup, string>;
+  board_notes!: Table<BoardNote, string>;
   media!: Table<DbMedia, string>;
 
   constructor() {
@@ -115,6 +117,10 @@ export class CardboardDatabase extends Dexie {
             l.status = up.status ?? "confirmed";
           });
       });
+    // v3：新增白板便利貼資料表（只加表，不動既有資料）
+    this.version(3).stores({
+      board_notes: "id, board_id",
+    });
   }
 }
 

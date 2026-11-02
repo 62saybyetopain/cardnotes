@@ -41,6 +41,9 @@ export class HttpDriver implements StorageDriver {
   createBoardGroup = httpApi.createBoardGroup;
   patchBoardGroup = httpApi.patchBoardGroup;
   deleteBoardGroup = httpApi.deleteBoardGroup;
+  createBoardNote = httpApi.createBoardNote;
+  patchBoardNote = httpApi.patchBoardNote;
+  deleteBoardNote = httpApi.deleteBoardNote;
 
   syncExport = httpApi.syncExport;
   syncDiff = httpApi.syncDiff;
@@ -51,6 +54,7 @@ export class HttpDriver implements StorageDriver {
   pickSystemFile = httpApi.pickSystemFile;
   writeCardFile = httpApi.writeCardFile;
   readCardFile = httpApi.readCardFile;
+  listCardFileBackups = httpApi.listCardFileBackups;
   restoreCardFileBackup = httpApi.restoreCardFileBackup;
 
   uploadMedia = httpApi.uploadMedia;
@@ -66,4 +70,34 @@ export class HttpDriver implements StorageDriver {
   putCardRelation = httpApi.putCardRelation;
   deleteCardRelation = httpApi.deleteCardRelation;
   getRelationsReport = httpApi.getRelationsReport;
+
+  listLiterature = httpApi.listLiterature;
+  createLiterature = httpApi.createLiterature;
+  getLiterature = httpApi.getLiterature;
+  patchLiterature = httpApi.patchLiterature;
+  literatureDeletePreview = httpApi.literatureDeletePreview;
+  deleteLiterature = httpApi.deleteLiterature;
+  listLiteratureCollections = httpApi.listLiteratureCollections;
+  createLiteratureCollection = httpApi.createLiteratureCollection;
+  renameLiteratureCollection = httpApi.renameLiteratureCollection;
+  deleteLiteratureCollection = httpApi.deleteLiteratureCollection;
+  addLiteratureToCollection = httpApi.addLiteratureToCollection;
+  removeLiteratureFromCollection = httpApi.removeLiteratureFromCollection;
+  listCardLiterature = httpApi.listCardLiterature;
+  putCardLiterature = httpApi.putCardLiterature;
+  patchLiteratureCitation = httpApi.patchLiteratureCitation;
+  deleteLiteratureCitation = httpApi.deleteLiteratureCitation;
+
+  listDailyStreams = httpApi.listDailyStreams;
+  createDailyStream = httpApi.createDailyStream;
+  patchDailyStream = httpApi.patchDailyStream;
+  unlockDailyStream = httpApi.unlockDailyStream;
+  finishDailyStream = httpApi.finishDailyStream;
+  reopenDailyStream = httpApi.reopenDailyStream;
+  peekDailyStream = httpApi.peekDailyStream;
+  convertDailyStream = httpApi.convertDailyStream;
+  deleteDailyStream = httpApi.deleteDailyStream;
+  bindDailyCard = httpApi.bindDailyCard;
+  unbindDailyCard = httpApi.unbindDailyCard;
+  listDailyChanges = httpApi.listDailyChanges;
 }

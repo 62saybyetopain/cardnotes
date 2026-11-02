@@ -41,6 +41,9 @@ export class HttpDriver implements StorageDriver {
   createBoardGroup = httpApi.createBoardGroup;
   patchBoardGroup = httpApi.patchBoardGroup;
   deleteBoardGroup = httpApi.deleteBoardGroup;
+  createBoardNote = httpApi.createBoardNote;
+  patchBoardNote = httpApi.patchBoardNote;
+  deleteBoardNote = httpApi.deleteBoardNote;
 
   syncExport = httpApi.syncExport;
   syncDiff = httpApi.syncDiff;
@@ -67,4 +70,17 @@ export class HttpDriver implements StorageDriver {
   putCardRelation = httpApi.putCardRelation;
   deleteCardRelation = httpApi.deleteCardRelation;
   getRelationsReport = httpApi.getRelationsReport;
+
+  listDailyStreams = httpApi.listDailyStreams;
+  createDailyStream = httpApi.createDailyStream;
+  patchDailyStream = httpApi.patchDailyStream;
+  unlockDailyStream = httpApi.unlockDailyStream;
+  finishDailyStream = httpApi.finishDailyStream;
+  reopenDailyStream = httpApi.reopenDailyStream;
+  peekDailyStream = httpApi.peekDailyStream;
+  convertDailyStream = httpApi.convertDailyStream;
+  deleteDailyStream = httpApi.deleteDailyStream;
+  bindDailyCard = httpApi.bindDailyCard;
+  unbindDailyCard = httpApi.unbindDailyCard;
+  listDailyChanges = httpApi.listDailyChanges;
 }

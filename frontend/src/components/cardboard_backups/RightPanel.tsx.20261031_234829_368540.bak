@@ -1,6 +1,7 @@
 // @depends-on ./Editor.tsx (Editor 自動儲存後，onSaved 回傳的 CardDetail 至少含 title/body/updated_at；父層 card 快照必須同步這三項，否則 ContentTab.updateMeta 以舊版本號送出會 409，onReload 重建 Editor 時也會顯示舊內文)
 // @depends-on ../api.ts (patchCard 回傳值含 title/body/updated_at/sources；onSaved 合併進父層 card 快照時也要帶 sources，否則出處欄會被舊值蓋回)
 // @depends-on ./SourcesField.tsx (onSave 失敗時必須 throw，元件靠這個判斷是否已儲存)
+// @depends-on ./LiteratureField.tsx (卡片「引用文獻」區塊：獨立於卡片儲存、不經 patchCard，所以不受 editorDirty 限制；dexie 下整個不渲染)
 // @depends-on ./MentionPanel.tsx (loadCardTitles 在它的 effect 依賴陣列內，傳入的函式必須是穩定身分（模組層級或 useCallback）；行內箭頭會讓每次渲染都重抓全部卡片標題，且不會有任何錯誤)
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
@@ -30,6 +31,7 @@ import { Editor } from "./Editor";
 import { FacetPicker } from "./FacetPicker";
 import { Markdown } from "./Markdown";
 import { RelationBox } from "./RelationBox";
+import { LiteratureField } from "./LiteratureField";
 import { SourcesField } from "./SourcesField";
 
 // 原因：MentionPanel 的 effect 把 loadCardTitles 放在依賴陣列，行內箭頭每次渲染都是新身分，會反覆重抓全部標題。
@@ -363,6 +365,7 @@ interface Props {
 
 export function CardEditorPane(props: {
   cardId: string;
+  boardId?: string | null;
   tags: Tag[];
   version: number;
   initialSmartPaste?: string | null;
@@ -375,6 +378,17 @@ export function CardEditorPane(props: {
   report(e: unknown, prefix?: string): void;
   info?(text: string): void;
 }) {
+  const { cardId, boardId, tags, version, initialSmartPaste, onClearInitialSmartPaste, onSaved, onCardDeleted, onLinkAdded, onSelectCard, onTagsChanged, report, info } = props;
+
+  if (cardId.startsWith("note:")) {
+    const noteId = cardId.slice("note:".length);
+    return <NoteEditorPane noteId={noteId} boardId={boardId} report={report} info={info} />;
+  }
+
+  if (cardId.startsWith("lit:")) {
+    const litId = cardId.slice("lit:".length);
+    return <LiteratureEditorPane litId={litId} report={report} info={info} />;
+  }
   const { cardId, tags, version, initialSmartPaste, onClearInitialSmartPaste, onSaved, onCardDeleted, onLinkAdded, onSelectCard, onTagsChanged, report, info } = props;
   const [card, setCard] = useState<CardDetail | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -528,7 +542,13 @@ export function RightPanel(p: Props) {
         {activeTab !== "search" && !(activeTab === "content" && centerEditing) && selectedCardId && !loadError && !card && (
           <div className="empty">載入中…</div>
         )}
-        {activeTab === "content" && !centerEditing && card && (
+        {activeTab === "content" && !centerEditing && selectedCardId?.startsWith("note:") && (
+          <NoteEditorPane noteId={selectedCardId.slice("note:".length)} boardId={boardId} report={report} info={p.info} />
+        )}
+        {activeTab === "content" && !centerEditing && selectedCardId?.startsWith("lit:") && (
+          <LiteratureEditorPane litId={selectedCardId.slice("lit:".length)} report={report} info={p.info} />
+        )}
+        {activeTab === "content" && !centerEditing && card && !selectedCardId?.startsWith("note:") && !selectedCardId?.startsWith("lit:") && (
           <ContentTab
             card={card}
             tags={p.tags}
@@ -938,6 +958,8 @@ function ContentTab(props: {
 
           <SourcesField key={`sources:${card.id}`} sources={card.sources ?? []} onSave={updateSources} />
 
+          <LiteratureField key={`literature:${card.id}`} cardId={card.id} report={report} info={info} />
+
           <RelationBox
             key={`relation:${card.id}`}
             card={card}
@@ -985,6 +1007,156 @@ function ContentTab(props: {
         report={report}
       />
     </>
+  );
+}
+
+function NoteEditorPane(props: {
+  noteId: string;
+  boardId?: string | null;
+  report(e: unknown, prefix?: string): void;
+  info?(text: string): void;
+}) {
+  const { noteId, boardId, report, info } = props;
+  const [text, setText] = useState("");
+  const [color, setColor] = useState("amber");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!boardId) return;
+    let alive = true;
+    api.getBoard(boardId).then((b) => {
+      if (!alive) return;
+      const n = (b.notes ?? []).find((x) => x.id === noteId);
+      if (n) {
+        setText(n.text);
+        setColor(n.color || "amber");
+      }
+      setLoading(false);
+    }).catch((e) => {
+      if (alive) {
+        report(e, "載入靈感筆記失敗");
+        setLoading(false);
+      }
+    });
+    return () => { alive = false; };
+  }, [noteId, boardId, report]);
+
+  const commitText = async (val: string) => {
+    if (!boardId) return;
+    try {
+      await api.patchBoardNote(boardId, noteId, { text: val });
+    } catch (e) {
+      report(e, "儲存靈感筆記內容失敗");
+    }
+  };
+
+  const changeColor = async (c: string) => {
+    if (!boardId) return;
+    setColor(c);
+    try {
+      await api.patchBoardNote(boardId, noteId, { color: c });
+      info?.("已切換顏色");
+    } catch (e) {
+      report(e, "切換顏色失敗");
+    }
+  };
+
+  if (loading) return <div className="empty">載入靈感筆記中…</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, height: "100%", padding: "4px 8px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <strong style={{ fontSize: 14 }}>靈感筆記</strong>
+        <div className="note-color-picker" style={{ display: "inline-flex", gap: 6 }}>
+          {["slate", "blue", "green", "amber", "purple"].map((c) => (
+            <button
+              key={c}
+              type="button"
+              className={`note-color-dot color-${c}${color === c ? " active" : ""}`}
+              onClick={() => void changeColor(c)}
+              title={`切換為 ${c} 色`}
+            />
+          ))}
+        </div>
+      </div>
+      <textarea
+        value={text}
+        rows={16}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => void commitText(text)}
+        placeholder="在此編輯靈感筆記內容…"
+        style={{
+          width: "100%",
+          flex: 1,
+          fontFamily: "inherit",
+          fontSize: 13,
+          lineHeight: 1.6,
+          resize: "vertical",
+          boxSizing: "border-box",
+        }}
+      />
+    </div>
+  );
+}
+
+function LiteratureEditorPane(props: {
+  litId: string;
+  report(e: unknown, prefix?: string): void;
+  info?(text: string): void;
+}) {
+  const { litId, report, info } = props;
+  const [lit, setLit] = useState<import("../types").Literature | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [nonce, setNonce] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    api.getLiterature(litId).then((d) => {
+      if (alive) {
+        setLit(d);
+        setLoading(false);
+      }
+    }).catch((e) => {
+      if (alive) {
+        report(e, "載入文獻失敗");
+        setLoading(false);
+      }
+    });
+    return () => { alive = false; };
+  }, [litId, nonce, report]);
+
+  if (loading) return <div className="empty">載入文獻中…</div>;
+  if (!lit) return <div className="empty">找不到此文獻</div>;
+
+  const asCard: CardDetail = {
+    id: lit.id,
+    title: lit.title,
+    body: lit.body,
+    updated_at: lit.updated_at,
+    created_at: lit.created_at,
+    tags: [],
+    links: [],
+    boards: [],
+    warnings: lit.warnings,
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <Editor
+        key={`${lit.id}:${nonce}`}
+        card={asCard}
+        save={async (patch, expected) => {
+          const res = await api.patchLiterature(lit.id, patch, expected);
+          setLit(res);
+          return { ...asCard, title: res.title, body: res.body, updated_at: res.updated_at };
+        }}
+        allowMention={false}
+        plainPaste={true}
+        onSaved={() => info?.("已更新文獻內文")}
+        onReload={() => setNonce((n) => n + 1)}
+        report={report}
+      />
+    </div>
   );
 }
 
@@ -1303,6 +1475,7 @@ function RelationsTab(props: {
   const [newReason, setNewReason] = useState("");
   const [guideFor, setGuideFor] = useState<{ id: string; title: string } | null>(null); // 新增連結時，正在用引導挑類型的對象
   const [guideEditKey, setGuideEditKey] = useState<string | null>(null); // 修改連結時，開著引導的那一條
+  const [guideTopOpen, setGuideTopOpen] = useState(false); // 還沒選目標卡片時，從上排下拉選單旁開的引導（只填下拉選單，不建立連結）
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editRel, setEditRel] = useState<RelationType>("延伸");
   const [editStatus, setEditStatus] = useState<LinkStatus>("confirmed");
@@ -1311,6 +1484,7 @@ function RelationsTab(props: {
   useEffect(() => {
     setGuideFor(null);
     setGuideEditKey(null);
+    setGuideTopOpen(false);
   }, [card.id]);
 
   useEffect(() => {
@@ -1450,7 +1624,7 @@ function RelationsTab(props: {
                         onClick={() => setGuideEditKey(guideEditKey === key ? null : key)}
                         title="不確定選哪種關係時，回答幾個問題來決定"
                       >
-                        ❓ 引導
+                        ⓘ 引導
                       </button>
                     </div>
                   </div>
@@ -1512,7 +1686,29 @@ function RelationsTab(props: {
               </option>
             ))}
           </select>
+          <button
+            type="button"
+            className={`facet-help-btn${guideTopOpen ? " on" : ""}`}
+            onClick={() => setGuideTopOpen((v) => !v)}
+            title="還沒選目標卡片、不確定選哪種關係時，回答幾個問題來決定"
+            aria-label="查看關係類型判準與引導"
+          >
+            ⓘ 關係判準／引導
+          </button>
         </div>
+        {guideTopOpen && (
+          <RelationGuide
+            allowSwap={false}
+            aTitle={card.title}
+            bTitle="目標卡片"
+            onPick={(rel, status) => {
+              setNewRel(rel);
+              setNewStatus(status);
+              setGuideTopOpen(false);
+            }}
+            onCancel={() => setGuideTopOpen(false)}
+          />
+        )}
         <input
           value={newReason}
           onChange={(e) => setNewReason(e.target.value)}
@@ -1530,7 +1726,7 @@ function RelationsTab(props: {
           <li key={c.id}>
             <span className="result-main">{c.title || "（無標題）"}</span>
             <button onClick={() => setGuideFor({ id: c.id, title: c.title })} title="不確定選哪種關係時，回答幾個問題來決定">
-              ❓ 引導
+              ⓘ 引導
             </button>
             <button className="primary" onClick={() => void link(c.id)}>
               建立「{RELATION_LABELS[newRel]}」

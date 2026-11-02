@@ -1,8 +1,9 @@
 // @depends-on ./Editor.tsx (Editor 自動儲存後，onSaved 回傳的 CardDetail 至少含 title/body/updated_at；父層 card 快照必須同步這三項，否則 ContentTab.updateMeta 以舊版本號送出會 409，onReload 重建 Editor 時也會顯示舊內文)
 // @depends-on ../api.ts (patchCard 回傳值含 title/body/updated_at/sources；onSaved 合併進父層 card 快照時也要帶 sources，否則出處欄會被舊值蓋回)
 // @depends-on ./SourcesField.tsx (onSave 失敗時必須 throw，元件靠這個判斷是否已儲存)
+// @depends-on ./LiteratureField.tsx (卡片「引用文獻」區塊：獨立於卡片儲存、不經 patchCard，所以不受 editorDirty 限制；dexie 下整個不渲染)
 // @depends-on ./MentionPanel.tsx (loadCardTitles 在它的 effect 依賴陣列內，傳入的函式必須是穩定身分（模組層級或 useCallback）；行內箭頭會讓每次渲染都重抓全部卡片標題，且不會有任何錯誤)
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
 import { api } from "../api";
 import { isSameAxisGroup, tagPath } from "../lib/tree";
 import {
@@ -30,11 +31,19 @@ import { Editor } from "./Editor";
 import { FacetPicker } from "./FacetPicker";
 import { Markdown } from "./Markdown";
 import { RelationBox } from "./RelationBox";
+import { LiteratureField } from "./LiteratureField";
 import { SourcesField } from "./SourcesField";
 
 // 原因：MentionPanel 的 effect 把 loadCardTitles 放在依賴陣列，行內箭頭每次渲染都是新身分，會反覆重抓全部標題。
 // api 在呼叫時才解析 driver（不在模組載入時），所以 HTTP／Dexie 切換後仍走對的那一邊。
 const loadAllCardTitles = () => api.listAllCardTitles().then((r) => r.items);
+
+// 靈感筆記（"note:<id>"）與文獻（"lit:<id>"）借用 selectedCardId 傳遞，但不是卡片，不能呼叫 api.getCard／cardTitle
+const isVirtualId = (id: string | null | undefined): boolean => !!id && (id.startsWith("note:") || id.startsWith("lit:"));
+type NotePatch = { text?: string; color?: string };
+// 與 backend schemas.py::NOTE_TEXT_MAX、Board.tsx::NOTE_TEXT_MAX 必須同值：超過後端會回 422
+const NOTE_TEXT_MAX = 2000;
+export type LiteraturePatch = { title?: string; body?: string; author?: string };
 
 function FileLinkBox(props: {
   card: CardDetail;
@@ -357,12 +366,49 @@ interface Props {
   onLinkDeleted?(sourceId: string, targetId: string, relationType?: RelationType): void;
   onTagsChanged(): void;
   onOpenBoard(id: string): void;
+  onNoteChanged?(noteId: string, patch: NotePatch): void;
+  onLiteratureChanged?(litId: string, patch: LiteraturePatch): void;
   report(e: unknown, prefix?: string): void;
   info(text: string): void;
 }
 
-export function CardEditorPane(props: {
+// 型態分派必須放在有 hooks 的元件之外：同一個實例在 cardId 於卡片／便利貼／文獻之間切換時，hook 數量不能改變
+export function CardEditorPane(
+  props: ComponentProps<typeof CardEditorPaneInner> & {
+    onNoteChanged?(noteId: string, patch: NotePatch): void;
+    onLiteratureChanged?(litId: string, patch: LiteraturePatch): void;
+  },
+) {
+  const { onNoteChanged, onLiteratureChanged, ...rest } = props;
+  if (rest.cardId.startsWith("note:")) {
+    return (
+      <NoteEditorPane
+        key={rest.cardId}
+        noteId={rest.cardId.slice("note:".length)}
+        boardId={rest.boardId}
+        onChanged={onNoteChanged}
+        report={rest.report}
+        info={rest.info}
+      />
+    );
+  }
+  if (rest.cardId.startsWith("lit:")) {
+    return (
+      <LiteratureEditorPane
+        key={rest.cardId}
+        litId={rest.cardId.slice("lit:".length)}
+        onChanged={onLiteratureChanged}
+        report={rest.report}
+        info={rest.info}
+      />
+    );
+  }
+  return <CardEditorPaneInner {...rest} />;
+}
+
+function CardEditorPaneInner(props: {
   cardId: string;
+  boardId?: string | null;
   tags: Tag[];
   version: number;
   initialSmartPaste?: string | null;
@@ -376,6 +422,7 @@ export function CardEditorPane(props: {
   info?(text: string): void;
 }) {
   const { cardId, tags, version, initialSmartPaste, onClearInitialSmartPaste, onSaved, onCardDeleted, onLinkAdded, onSelectCard, onTagsChanged, report, info } = props;
+
   const [card, setCard] = useState<CardDetail | null>(null);
   const [loadError, setLoadError] = useState("");
   const [nonce, setNonce] = useState(0);
@@ -468,7 +515,7 @@ export function RightPanel(p: Props) {
   }, [selectedCardId]);
 
   useEffect(() => {
-    if (!selectedCardId) return;
+    if (!selectedCardId || isVirtualId(selectedCardId)) return;
     let alive = true;
     api
       .getCard(selectedCardId)
@@ -525,10 +572,32 @@ export function RightPanel(p: Props) {
             <button onClick={refetch}>重試</button>
           </div>
         )}
-        {activeTab !== "search" && !(activeTab === "content" && centerEditing) && selectedCardId && !loadError && !card && (
+        {activeTab !== "search" && !(activeTab === "content" && centerEditing) && selectedCardId && !isVirtualId(selectedCardId) && !loadError && !card && (
           <div className="empty">載入中…</div>
         )}
-        {activeTab === "content" && !centerEditing && card && (
+        {activeTab === "content" && !centerEditing && selectedCardId?.startsWith("note:") && (
+          <NoteEditorPane
+            key={selectedCardId}
+            noteId={selectedCardId.slice("note:".length)}
+            boardId={boardId}
+            onChanged={p.onNoteChanged}
+            report={report}
+            info={p.info}
+          />
+        )}
+        {activeTab === "content" && !centerEditing && selectedCardId?.startsWith("lit:") && (
+          <LiteratureEditorPane
+            key={selectedCardId}
+            litId={selectedCardId.slice("lit:".length)}
+            onChanged={p.onLiteratureChanged}
+            report={report}
+            info={p.info}
+          />
+        )}
+        {activeTab === "relations" && isVirtualId(selectedCardId) && (
+          <div className="empty">靈感筆記與文獻沒有語意連結。</div>
+        )}
+        {activeTab === "content" && !centerEditing && card && !selectedCardId?.startsWith("note:") && !selectedCardId?.startsWith("lit:") && (
           <ContentTab
             card={card}
             tags={p.tags}
@@ -938,6 +1007,8 @@ function ContentTab(props: {
 
           <SourcesField key={`sources:${card.id}`} sources={card.sources ?? []} onSave={updateSources} />
 
+          <LiteratureField key={`literature:${card.id}`} cardId={card.id} report={report} info={info} />
+
           <RelationBox
             key={`relation:${card.id}`}
             card={card}
@@ -985,6 +1056,170 @@ function ContentTab(props: {
         report={report}
       />
     </>
+  );
+}
+
+function NoteEditorPane(props: {
+  noteId: string;
+  boardId?: string | null;
+  onChanged?(noteId: string, patch: NotePatch): void;
+  report(e: unknown, prefix?: string): void;
+  info?(text: string): void;
+}) {
+  const { noteId, boardId, onChanged, report, info } = props;
+  const [text, setText] = useState("");
+  const [color, setColor] = useState("amber");
+  const [loading, setLoading] = useState(true);
+  // 最後一次載入或儲存成功的內文：失焦時內容沒變就不寫入，避免用過期內文蓋掉白板上剛改的版本
+  const savedTextRef = useRef("");
+
+  useEffect(() => {
+    if (!boardId) return;
+    let alive = true;
+    api.getBoard(boardId).then((b) => {
+      if (!alive) return;
+      const n = (b.notes ?? []).find((x) => x.id === noteId);
+      if (n) {
+        setText(n.text);
+        savedTextRef.current = n.text;
+        setColor(n.color || "amber");
+      } else {
+        report(new Error("找不到這張靈感筆記（可能已被刪除）"), "載入靈感筆記失敗");
+      }
+      setLoading(false);
+    }).catch((e) => {
+      if (alive) {
+        report(e, "載入靈感筆記失敗");
+        setLoading(false);
+      }
+    });
+    return () => { alive = false; };
+  }, [noteId, boardId, report]);
+
+  const commitText = async (val: string) => {
+    if (!boardId || val === savedTextRef.current) return;
+    try {
+      await api.patchBoardNote(boardId, noteId, { text: val });
+      savedTextRef.current = val;
+      onChanged?.(noteId, { text: val });
+    } catch (e) {
+      report(e, "儲存靈感筆記內容失敗");
+    }
+  };
+
+  const changeColor = async (c: string) => {
+    if (!boardId) return;
+    setColor(c);
+    try {
+      await api.patchBoardNote(boardId, noteId, { color: c });
+      onChanged?.(noteId, { color: c });
+      info?.("已切換顏色");
+    } catch (e) {
+      report(e, "切換顏色失敗");
+    }
+  };
+
+  if (loading) return <div className="empty">載入靈感筆記中…</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, height: "100%", padding: "4px 8px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <strong style={{ fontSize: 14 }}>靈感筆記</strong>
+        <div className="note-color-picker" style={{ display: "inline-flex", gap: 6 }}>
+          {["slate", "blue", "green", "amber", "purple"].map((c) => (
+            <button
+              key={c}
+              type="button"
+              className={`note-color-dot color-${c}${color === c ? " active" : ""}`}
+              onClick={() => void changeColor(c)}
+              title={`切換為 ${c} 色`}
+            />
+          ))}
+        </div>
+      </div>
+      <textarea
+        value={text}
+        rows={16}
+        maxLength={NOTE_TEXT_MAX}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => void commitText(text)}
+        placeholder="在此編輯靈感筆記內容…"
+        style={{
+          width: "100%",
+          flex: 1,
+          fontFamily: "inherit",
+          fontSize: 13,
+          lineHeight: 1.6,
+          resize: "vertical",
+          boxSizing: "border-box",
+        }}
+      />
+    </div>
+  );
+}
+
+function LiteratureEditorPane(props: {
+  litId: string;
+  onChanged?(litId: string, patch: LiteraturePatch): void;
+  report(e: unknown, prefix?: string): void;
+  info?(text: string): void;
+}) {
+  const { litId, onChanged, report, info } = props;
+  const [lit, setLit] = useState<import("../types").Literature | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [nonce, setNonce] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    api.getLiterature(litId).then((d) => {
+      if (alive) {
+        setLit(d);
+        setLoading(false);
+      }
+    }).catch((e) => {
+      if (alive) {
+        report(e, "載入文獻失敗");
+        setLoading(false);
+      }
+    });
+    return () => { alive = false; };
+  }, [litId, nonce, report]);
+
+  if (loading) return <div className="empty">載入文獻中…</div>;
+  if (!lit) return <div className="empty">找不到此文獻</div>;
+
+  const asCard: CardDetail = {
+    id: lit.id,
+    title: lit.title,
+    body: lit.body,
+    updated_at: lit.updated_at,
+    created_at: lit.created_at,
+    tags: [],
+    links: [],
+    boards: [],
+    warnings: lit.warnings,
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <Editor
+        key={`${lit.id}:${nonce}`}
+        card={asCard}
+        save={async (patch, expected) => {
+          const res = await api.patchLiterature(lit.id, patch, expected);
+          setLit(res);
+          return { ...asCard, title: res.title, body: res.body, updated_at: res.updated_at };
+        }}
+        allowMention={false}
+        plainPaste={true}
+        onSaved={(c) => {
+          onChanged?.(lit.id, { title: c.title, body: c.body });
+          info?.("已更新文獻內文");
+        }}
+        onReload={() => setNonce((n) => n + 1)}
+        report={report}
+      />
+    </div>
   );
 }
 

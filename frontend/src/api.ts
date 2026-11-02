@@ -3,9 +3,12 @@ import type {
   BoardData,
   BoardGroup,
   BoardLink,
+  BoardLiterature,
+  BoardNote,
   BoardSummary,
   CardDetail,
   CardImpact,
+  CardLiteratureRef,
   CardRelation,
   CardRelationPut,
   CardSummary,
@@ -17,6 +20,10 @@ import type {
   DailyStream,
   DeletePreview,
   LinkStatus,
+  Literature,
+  LiteratureCollection,
+  LiteratureDeleteImpact,
+  LiteratureSummary,
   MediaInfo,
   RelationPattern,
   RelationPatternCreate,
@@ -181,6 +188,27 @@ export const httpApi = {
   ) => request<BoardGroup>("PATCH", `/boards/${board_id}/groups/${group_id}`, patch),
   deleteBoardGroup: (board_id: string, group_id: string) =>
     request<{ deleted: boolean }>("DELETE", `/boards/${board_id}/groups/${group_id}`),
+  createBoardNote: (
+    board_id: string,
+    body: { text?: string; x: number; y: number; w?: number; h?: number; color?: string },
+  ) => request<BoardNote>("POST", `/boards/${board_id}/notes`, body),
+  patchBoardNote: (
+    board_id: string,
+    note_id: string,
+    patch: { text?: string; x?: number; y?: number; w?: number; h?: number; color?: string },
+  ) => request<BoardNote>("PATCH", `/boards/${board_id}/notes/${note_id}`, patch),
+  deleteBoardNote: (board_id: string, note_id: string) =>
+    request<{ deleted: boolean }>("DELETE", `/boards/${board_id}/notes/${note_id}`),
+  // 白板文獻節點：僅電腦端 SQLite。新增方法時 driver.ts／httpDriver.ts／indexedDbDriver.ts 要同步
+  addLiteratureToBoard: (board_id: string, body: { literature_id: string; x: number; y: number; w?: number; h?: number }) =>
+    request<BoardLiterature>("POST", `/boards/${board_id}/literatures`, body),
+  patchBoardLiterature: (
+    board_id: string,
+    literature_id: string,
+    patch: { x?: number; y?: number; w?: number; h?: number },
+  ) => request<BoardLiterature>("PATCH", `/boards/${board_id}/literatures/${literature_id}`, patch),
+  removeLiteratureFromBoard: (board_id: string, literature_id: string) =>
+    request<{ removed: boolean }>("DELETE", `/boards/${board_id}/literatures/${literature_id}`),
   // media
   uploadMedia: (file: File) => {
     const form = new FormData();
@@ -221,6 +249,49 @@ export const httpApi = {
   deleteCardRelation: (card_id: string) =>
     request<{ removed: boolean }>("DELETE", `/cards/${card_id}/relation`),
   getRelationsReport: () => request<RelationsReport>("GET", "/relations/report"),
+  // literature（文獻庫）：僅電腦端 SQLite。新增方法時 driver.ts／httpDriver.ts／indexedDbDriver.ts 要同步，否則 Proxy 回 501
+  listLiterature: (p: { q?: string; collection_id?: string; uncited?: boolean; limit?: number }) =>
+    request<{ items: LiteratureSummary[] }>("GET", `/literature${qs(p)}`),
+  createLiterature: (body: {
+    title?: string;
+    body?: string;
+    author?: string;
+    url?: string;
+    captured_on?: string;
+    collection_id?: string;
+  }) => request<Literature>("POST", "/literature", body),
+  getLiterature: (id: string) => request<Literature>("GET", `/literature/${id}`),
+  patchLiterature: (
+    id: string,
+    patch: { title?: string; body?: string; author?: string; url?: string; captured_on?: string },
+    expected_updated_at: string,
+  ) => request<Literature>("PATCH", `/literature/${id}`, { ...patch, expected_updated_at }),
+  literatureDeletePreview: (id: string) =>
+    request<LiteratureDeleteImpact>("GET", `/literature/${id}/delete-preview`),
+  deleteLiterature: (id: string) => request<{ deleted: boolean }>("DELETE", `/literature/${id}`),
+  listLiteratureCollections: () =>
+    request<{ collections: LiteratureCollection[] }>("GET", "/literature-collections"),
+  createLiteratureCollection: (name: string) =>
+    request<LiteratureCollection>("POST", "/literature-collections", { name }),
+  renameLiteratureCollection: (id: string, name: string) =>
+    request<LiteratureCollection>("PATCH", `/literature-collections/${id}`, { name }),
+  deleteLiteratureCollection: (id: string) =>
+    request<{ deleted: boolean }>("DELETE", `/literature-collections/${id}`),
+  addLiteratureToCollection: (collection_id: string, literature_id: string) =>
+    request<{ existed: boolean }>("PUT", `/literature-collections/${collection_id}/items/${literature_id}`),
+  removeLiteratureFromCollection: (collection_id: string, literature_id: string) =>
+    request<{ removed: boolean }>("DELETE", `/literature-collections/${collection_id}/items/${literature_id}`),
+  listCardLiterature: (card_id: string) =>
+    request<{ citations: CardLiteratureRef[] }>("GET", `/cards/${card_id}/literature`),
+  putCardLiterature: (card_id: string, body: { literature_id: string; locator?: string }) =>
+    request<{ id: string; card_id: string; literature_id: string; locator: string; existed: boolean }>(
+      "PUT",
+      `/cards/${card_id}/literature`,
+      body,
+    ),
+  patchLiteratureCitation: (id: string, locator: string) =>
+    request<{ id: string; locator: string }>("PATCH", `/literature-citations/${id}`, { locator }),
+  deleteLiteratureCitation: (id: string) => request<{ removed: boolean }>("DELETE", `/literature-citations/${id}`),
   // daily（今日總結）：僅電腦端 SQLite。新增方法時 driver.ts／httpDriver.ts 要同步，否則 Proxy 回 501
   listDailyStreams: (day: string) => request<{ items: DailyStream[] }>("GET", `/daily/streams${qs({ day })}`),
   createDailyStream: (day: string) => request<DailyStream>("POST", "/daily/streams", { day }),
@@ -269,4 +340,9 @@ export const api: typeof httpApi = new Proxy(httpApi, {
     return typeof val === "function" ? val.bind(driver) : val;
   },
 });
+
+// @depends-on 考卷複習頁::pushToCardnote（經 window.__cardnoteApi 呼叫 listTags／createTag／resolveTag／uploadMedia／createCard／getCard／patchCard／assignTag，並讀取 ApiError.status 與 CardDetail.warnings；改名或改簽名會讓考卷同步逐張失敗）
+if (typeof window !== "undefined") {
+  (window as any).__cardnoteApi = api;
+}
 

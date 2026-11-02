@@ -1,9 +1,14 @@
+// @depends-on ../api.ts (createBoardNote / patchBoardNote / deleteBoardNote：便利貼三個方法，driver.ts、httpDriver.ts、indexedDbDriver.ts 必須同步)
+// @depends-on 便利貼高度 h：db.py::board_notes.h、schemas.py::BoardNote*／NOTE_DEFAULT_H、boards.py、types.ts::BoardNote.h、indexedDbDriver 預設值必須同為「卡片預設高×3」(420)；缺值（舊 Dexie 資料）一律用 NOTE_DEFAULT_H
+// @depends-on ../styles.css (.note-node / .note-text 等便利貼樣式；便利貼節點 id 一律是 "note:<id>"，所有以 startsWith("group:") 排除非卡片節點的判斷都要一併排除 "note:")
 // @depends-on ../lib/layout.ts (autoLayoutCards, placeCardsAvoidingCollisions, snapDimension, snapToGridValue, GRID_SIZE)
 // @depends-on ../lib/groupFit.ts (fitGroups, groupAtCenter, MovedGroup, GROUP_PAD, GROUP_PAD_TOP：卡片歸屬一律用 groupAtCenter（中心點所在、面積最小的框，一張卡片只屬於一個框），拖曳帶動成員、貼合、亮框、放開歸屬四處必須一致)
 // @depends-on ../styles.css (.react-flow__node-boardGroup.drop-target：拖曳卡片時「放開後會歸入」的亮框樣式，class 由 setDropTargets 掛在節點上)
 // @depends-on ../App.tsx (toolsSlot：右上工具列的 .tools-slide 容器，null 時不渲染「定位／自動對齊」)
 // @depends-on ../styles.css (.tools-slide button / .on：這兩顆按鈕的外觀由容器樣式決定，此處不寫 inline style)
 // @depends-on ../App.tsx (selectedCardId 有兩條寫入路徑：onNodeClick→onOpenCard，與 onSelectionChange→onSelectCard；Board 以 nodes 的 selected 為準去重；onOpenCard 支援 options.smartPasteText)
+// @depends-on ../api.ts (addLiteratureToBoard / patchBoardLiterature / removeLiteratureFromBoard) 與 backend boards.py::BOARD_LITERATURE_SELECT、db.py::BOARD_LITERATURE_DDL、types.ts::BoardLiterature：白板文獻節點是「參照」，只存 literature_id＋座標＋大小；節點 id 一律是 "lit:<literature_id>"，所有以 "group:"／"note:" 排除非卡片節點的判斷都要一併排除 "lit:"
+// @depends-on ./RightPanel.tsx (NoteEditorPane 儲存後經 App.onNoteChanged 呼叫 BoardHandle.updateNote；便利貼節點 data 的 text／color 必須與它寫入資料庫的值一致)
 import "@xyflow/react/dist/style.css";
 import {
   applyNodeChanges,
@@ -60,13 +65,15 @@ import {
   type BoardCard,
   type BoardGroup,
   type BoardLink,
+  type BoardLiterature,
+  type BoardNote,
   type LinkStatus,
   type RelationType,
 } from "../types";
 import { isSymmetricRelation } from "../lib/relations";
 import { CardNode, type CardFlowNode } from "./CardNode";
 import { FloatingEdge } from "./FloatingEdge";
-import { notifyCardTitleUpdated } from "./Markdown";
+import { Markdown, notifyCardTitleUpdated } from "./Markdown";
 
 export interface GroupNodeData extends Record<string, unknown> {
   groupId: string;
@@ -78,7 +85,23 @@ export interface GroupNodeData extends Record<string, unknown> {
   onRemoveGroup: (groupId: string) => void;
 }
 export type GroupFlowNode = Node<GroupNodeData, "boardGroup">;
-type AnyFlowNode = CardFlowNode | GroupFlowNode;
+
+export interface NoteNodeData extends Record<string, unknown> {
+  noteId: string;
+  text: string;
+  color: string;
+  w: number;
+  h: number;
+  autoFocus: boolean;
+  onResizeEnd: (noteId: string, p: { x: number; y: number; width: number; height: number }) => void;
+  onCommitText: (noteId: string, text: string) => void;
+  onCycleColor: (noteId: string, currentColor: string) => void;
+  onRemove: (noteId: string) => void;
+  onPromote: (noteId: string, text: string) => void;
+  onOpen: (noteId: string) => void;
+}
+export type NoteFlowNode = Node<NoteNodeData, "boardNote">;
+type AnyFlowNode = CardFlowNode | GroupFlowNode | NoteFlowNode | LiteratureFlowNode;
 type PositionChange = Extract<NodeChange<AnyFlowNode>, { type: "position" }>;
 
 const GROUP_COLORS = ["slate", "blue", "green", "amber", "purple"] as const;
@@ -149,6 +172,127 @@ function GroupNode({ data, selected }: NodeProps<GroupFlowNode>) {
   );
 }
 
+// 預設寬度與卡片預設寬度一致，高度為卡片預設高度之 3 倍
+const NOTE_TEXT_MAX = 2000;
+const NOTE_DEFAULT_W = DEFAULT_CARD_W;
+const NOTE_DEFAULT_H = DEFAULT_CARD_H * 3;
+const NOTE_MIN_W = 140;
+const NOTE_MIN_H = 100;
+
+// 文獻節點預設尺寸（最小尺寸 180×80 寫在 LiteratureNode 的 NodeResizer 與 litResizeImpl，兩處同值）
+const LIT_DEFAULT_W = DEFAULT_CARD_W;
+const LIT_DEFAULT_H = DEFAULT_CARD_H * 1.5;
+
+export interface LiteratureNodeData extends Record<string, unknown> {
+  litId: string;
+  title: string;
+  snippet: string;
+  author: string;
+  onResizeEnd: (litId: string, p: { x: number; y: number; width: number; height: number }) => void;
+}
+export type LiteratureFlowNode = Node<LiteratureNodeData, "boardLiterature">;
+
+function LiteratureNode({ data, selected }: NodeProps<LiteratureFlowNode>) {
+  return (
+    <div className={`lit-node${selected ? " selected" : ""}`}>
+      <NodeResizer minWidth={180} minHeight={80} isVisible={true} onResizeEnd={(_e, p) => data.onResizeEnd(data.litId, p)} />
+      <div className="lit-node-head">
+        <span>📖 文獻</span>
+        {data.author && <span className="muted">· {data.author}</span>}
+      </div>
+      <div className="lit-node-title" title={data.title || "（無標題）"}>
+        {data.title || "（無標題）"}
+      </div>
+      <div className="lit-node-body">
+        <Markdown source={data.snippet || "（無內文）"} />
+      </div>
+    </div>
+  );
+}
+
+function NoteNode({ data, selected }: NodeProps<NoteFlowNode>) {
+  const areaRef = useRef<HTMLTextAreaElement>(null);
+  const [text, setText] = useState(data.text);
+
+  useEffect(() => {
+    if (document.activeElement !== areaRef.current) setText(data.text);
+  }, [data.text]);
+
+  useEffect(() => {
+    if (data.autoFocus) areaRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const keepFocus = (e: React.MouseEvent) => e.preventDefault();
+
+  return (
+    <div className={`note-node color-${data.color || "amber"}${selected ? " selected" : ""}`}>
+      <NodeResizer minWidth={NOTE_MIN_W} minHeight={NOTE_MIN_H} isVisible={true} onResizeEnd={(_e, p) => data.onResizeEnd(data.noteId, p)} />
+      <div className="note-header">
+        <span className="note-grip" title="按住此處可拖曳便利貼">
+          ⠿
+        </span>
+        <span className="note-actions nodrag">
+          <span className="note-color-picker">
+            {GROUP_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                className={`note-color-dot color-${c}${data.color === c ? " active" : ""}`}
+                onMouseDown={keepFocus}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  data.onCycleColor(data.noteId, c);
+                }}
+                title={`切換為 ${c} 色`}
+                aria-label={`切換為 ${c} 色`}
+              />
+            ))}
+          </span>
+          <button
+            onClick={(e) => (e.stopPropagation(), data.onOpen(data.noteId))}
+            title="在中央編輯視窗開啟"
+            aria-label="中央編輯"
+          >
+            ⤢
+          </button>
+          <button
+            onMouseDown={keepFocus}
+            onClick={(e) => (e.stopPropagation(), data.onPromote(data.noteId, text))}
+            title="升級為卡片（第一行當標題，其餘當內文）"
+            aria-label="升級為卡片"
+          >
+            升級
+          </button>
+          <button
+            onMouseDown={keepFocus}
+            onClick={(e) => (e.stopPropagation(), data.onRemove(data.noteId))}
+            title="刪除此便利貼"
+            aria-label="刪除便利貼"
+          >
+            ✕
+          </button>
+        </span>
+      </div>
+      <textarea
+        ref={areaRef}
+        className="note-text nodrag nowheel"
+        value={text}
+        maxLength={NOTE_TEXT_MAX}
+        placeholder="輸入靈感想法…"
+        aria-label="靈感筆記內容"
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => {
+          if (text !== data.text) data.onCommitText(data.noteId, text);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") e.currentTarget.blur();
+        }}
+      />
+    </div>
+  );
+}
+
 function CrosshairIcon({ size = 14 }: { size?: number }) {
   return (
     <svg
@@ -172,7 +316,7 @@ function CrosshairIcon({ size = 14 }: { size?: number }) {
   );
 }
 
-const nodeTypes = { card: CardNode, boardGroup: GroupNode };
+const nodeTypes = { card: CardNode, boardGroup: GroupNode, boardNote: NoteNode, boardLiterature: LiteratureNode };
 const edgeTypes = { floating: FloatingEdge };
 
 export interface BoardHandle {
@@ -182,6 +326,11 @@ export interface BoardHandle {
   removeLink(sourceId: string, targetId: string, relationType?: RelationType): void;
   addLink(sourceId: string, targetId: string, extra?: Partial<BoardLink>): void;
   createGroup(): Promise<void>;
+  createNote(): Promise<void>;
+  updateNote(noteId: string, patch: { text?: string; color?: string }): void;
+  addLiterature(litId: string): Promise<void>;
+  updateLiterature(litId: string, patch: { title?: string; body?: string; author?: string }): void;
+  removeLiterature(litId: string): void;
 }
 
 interface Props {
@@ -747,6 +896,214 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   };
   const onGroupRemove = useCallback((gid: string) => void removeGroupImpl.current?.(gid), []);
 
+  // ---- 靈感筆記（便利貼）：只屬於這塊白板、純文字；刪除直接生效，不做復原 ----
+  const noteResizeImpl = useRef<((nid: string, p: { x: number; y: number; width: number; height: number }) => Promise<void>) | undefined>(undefined);
+  noteResizeImpl.current = async (nid, p) => {
+    if (!boardId) return;
+    const nodeId = `note:${nid}`;
+    const nextW = snapRef.current ? snapDimension(p.width, NOTE_MIN_W, GRID_SIZE) : p.width;
+    const nextH = snapRef.current ? snapDimension(p.height, NOTE_MIN_H, GRID_SIZE) : p.height;
+    const nextX = snapRef.current ? snapToGridValue(p.x, GRID_SIZE) : p.x;
+    const nextY = snapRef.current ? snapToGridValue(p.y, GRID_SIZE) : p.y;
+    try {
+      await api.patchBoardNote(boardId, nid, { x: nextX, y: nextY, w: nextW, h: nextH });
+      saved.current.set(nodeId, { x: nextX, y: nextY, w: nextW, h: nextH });
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === nodeId && n.type === "boardNote"
+            ? {
+                ...n,
+                position: { x: nextX, y: nextY },
+                width: nextW,
+                height: nextH,
+                style: { width: nextW, height: nextH },
+                data: { ...n.data, w: nextW, h: nextH },
+              }
+            : n,
+        ),
+      );
+    } catch (e) {
+      const g = saved.current.get(nodeId);
+      if (g)
+        setNodes((ns) =>
+          ns.map((n) =>
+            n.id === nodeId && n.type === "boardNote"
+              ? {
+                  ...n,
+                  position: { x: g.x, y: g.y },
+                  width: g.w ?? NOTE_DEFAULT_W,
+                  height: g.h ?? NOTE_DEFAULT_H,
+                  style: { width: g.w ?? NOTE_DEFAULT_W, height: g.h ?? NOTE_DEFAULT_H },
+                  data: { ...n.data, w: g.w ?? NOTE_DEFAULT_W, h: g.h ?? NOTE_DEFAULT_H },
+                }
+              : n,
+          ),
+        );
+      report(e, "儲存便利貼大小失敗，已回復");
+    }
+  };
+  const onNoteResizeEnd = useCallback(
+    (nid: string, p: { x: number; y: number; width: number; height: number }) => void noteResizeImpl.current?.(nid, p),
+    [],
+  );
+
+  // 儲存失敗時不動畫面上的文字（NoteNode 仍保留使用者輸入），下次失焦會再試一次
+  const noteTextImpl = useRef<((nid: string, text: string) => Promise<void>) | undefined>(undefined);
+  noteTextImpl.current = async (nid, text) => {
+    if (!boardId) return;
+    try {
+      const updated = await api.patchBoardNote(boardId, nid, { text });
+      setNodes((ns) =>
+        ns.map((n) => (n.id === `note:${nid}` && n.type === "boardNote" ? { ...n, data: { ...n.data, text: updated.text } } : n)),
+      );
+    } catch (e) {
+      report(e, "儲存便利貼內容失敗，內容仍保留在便利貼上");
+    }
+  };
+  const onNoteCommitText = useCallback((nid: string, text: string) => void noteTextImpl.current?.(nid, text), []);
+
+  const noteColorImpl = useRef<((nid: string, targetColor: string) => Promise<void>) | undefined>(undefined);
+  noteColorImpl.current = async (nid, targetColor) => {
+    if (!boardId) return;
+    try {
+      const updated = await api.patchBoardNote(boardId, nid, { color: targetColor });
+      setNodes((ns) =>
+        ns.map((n) => (n.id === `note:${nid}` && n.type === "boardNote" ? { ...n, data: { ...n.data, color: updated.color } } : n)),
+      );
+    } catch (e) {
+      report(e, "切換便利貼顏色失敗");
+    }
+  };
+  const onNoteCycleColor = useCallback((nid: string, cur: string) => void noteColorImpl.current?.(nid, cur), []);
+
+  const noteRemoveImpl = useRef<((nid: string) => Promise<void>) | undefined>(undefined);
+  noteRemoveImpl.current = async (nid) => {
+    if (!boardId) return;
+    try {
+      await api.deleteBoardNote(boardId, nid);
+      const nodeId = `note:${nid}`;
+      setNodes((ns) => ns.filter((n) => n.id !== nodeId));
+      saved.current.delete(nodeId);
+    } catch (e) {
+      report(e, "刪除便利貼失敗");
+    }
+  };
+  const onNoteRemove = useCallback((nid: string) => void noteRemoveImpl.current?.(nid), []);
+
+  // ---- 白板上的文獻節點：參照（只存 literature_id＋座標＋大小），標題與內容永遠讀文獻庫；Delete 只從白板移除，不刪文獻 ----
+  const litResizeImpl = useRef<((lid: string, p: { x: number; y: number; width: number; height: number }) => Promise<void>) | undefined>(undefined);
+  litResizeImpl.current = async (lid, p) => {
+    if (!boardId) return;
+    const nodeId = `lit:${lid}`;
+    const nextX = snapRef.current ? snapToGridValue(p.x, GRID_SIZE) : p.x;
+    const nextY = snapRef.current ? snapToGridValue(p.y, GRID_SIZE) : p.y;
+    const nextW = snapRef.current ? snapDimension(p.width, 180, GRID_SIZE) : p.width;
+    const nextH = snapRef.current ? snapDimension(p.height, 80, GRID_SIZE) : p.height;
+    try {
+      await api.patchBoardLiterature(boardId, lid, { x: nextX, y: nextY, w: nextW, h: nextH });
+      saved.current.set(nodeId, { x: nextX, y: nextY, w: nextW, h: nextH });
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === nodeId && n.type === "boardLiterature"
+            ? { ...n, position: { x: nextX, y: nextY }, width: nextW, height: nextH, style: { width: nextW, height: nextH } }
+            : n,
+        ),
+      );
+    } catch (e) {
+      const g = saved.current.get(nodeId);
+      if (g)
+        setNodes((ns) =>
+          ns.map((n) =>
+            n.id === nodeId && n.type === "boardLiterature"
+              ? {
+                  ...n,
+                  position: { x: g.x, y: g.y },
+                  width: g.w ?? LIT_DEFAULT_W,
+                  height: g.h ?? LIT_DEFAULT_H,
+                  style: { width: g.w ?? LIT_DEFAULT_W, height: g.h ?? LIT_DEFAULT_H },
+                }
+              : n,
+          ),
+        );
+      report(e, "儲存文獻大小失敗，已回復");
+    }
+  };
+  const onLitResizeEnd = useCallback(
+    (lid: string, p: { x: number; y: number; width: number; height: number }) => void litResizeImpl.current?.(lid, p),
+    [],
+  );
+
+  const toLiteratureNode = useCallback(
+    (l: BoardLiterature): LiteratureFlowNode => {
+      const w = l.w ?? LIT_DEFAULT_W;
+      const h = l.h ?? LIT_DEFAULT_H;
+      return {
+        id: `lit:${l.literature_id}`,
+        type: "boardLiterature",
+        position: { x: l.x, y: l.y },
+        width: w,
+        height: h,
+        style: { width: w, height: h },
+        data: { litId: l.literature_id, title: l.title, snippet: l.snippet, author: l.author, onResizeEnd: onLitResizeEnd },
+      };
+    },
+    [onLitResizeEnd],
+  );
+
+  // 升級為卡片：建卡片 → 寫標題與內文 → 放上白板（原位）→ 刪便利貼。
+  // 中途失敗時便利貼一律保留；若卡片已建立，訊息會告知，避免使用者重試後不知道多了一張。
+  const notePromoteImpl = useRef<((nid: string, text: string) => Promise<void>) | undefined>(undefined);
+  notePromoteImpl.current = async (nid, text) => {
+    if (!boardId) return;
+    const nodeId = `note:${nid}`;
+    const noteNode = nodesRef.current.find((n): n is NoteFlowNode => n.type === "boardNote" && n.id === nodeId);
+    if (!noteNode) return;
+
+    // 方案 A：第一個非空行當標題，其餘當內文；單行時標題＝全文、內文為空
+    const lines = text.replace(/\r\n?/g, "\n").split("\n");
+    const first = lines.findIndex((l) => l.trim() !== "");
+    if (first < 0) {
+      report(new Error("便利貼是空的，沒有內容可以升級"), "無法升級為卡片");
+      return;
+    }
+    const title = lines[first].trim();
+    const body = lines.slice(first + 1).join("\n").replace(/^\n+/, "").trimEnd();
+    // @depends-on backend schemas.py::CardPatch.title（max_length=500）：超過就明確報錯，不截斷內容
+    if (title.length > 500) {
+      report(new Error("第一行超過 500 字，請先在第一行適當位置換行再升級"), "無法升級為卡片");
+      return;
+    }
+
+    let createdId: string | null = null;
+    try {
+      const created = await api.createCard();
+      createdId = created.id;
+      const updated = await api.patchCard(created.id, { title, body }, created.updated_at);
+      const added = await api.addToBoard(boardId, created.id, noteNode.position.x, noteNode.position.y);
+      saved.current.set(created.id, { x: added.x, y: added.y, w: added.w, h: added.h });
+      const cardNode = toNode({ ...added, title: updated.title, body: updated.body, updated_at: updated.updated_at });
+      setNodes((ns) => [...ns, cardNode]);
+      await api.deleteBoardNote(boardId, nid);
+      setNodes((ns) =>
+        ns
+          .filter((m) => m.id !== nodeId)
+          .map((m) => (m.id === created.id ? { ...m, selected: true } : { ...m, selected: false })),
+      );
+      saved.current.delete(nodeId);
+      onSelectCard(created.id);
+      onCountChanged();
+      info("已將便利貼升級為卡片");
+    } catch (e) {
+      report(
+        e,
+        createdId
+          ? `升級中斷：卡片（${createdId.slice(0, 8)}）已建立，便利貼仍保留，請確認是否有重複的卡片`
+          : "升級為卡片失敗，便利貼未變動",
+      );
+    }
+  };
+  const onNotePromote = useCallback((nid: string, text: string) => void notePromoteImpl.current?.(nid, text), []);
+
   // ---- 分組框自動貼合框內卡片，長大碰到其他框時推開該框與其卡片 ----
   // before／after：被移動卡片的舊／新座標。其餘卡片與所有分組框一律取伺服器已確認的 saved，不依賴 React 何時 commit。
   // keepOldMembers=true（自動排版／復原）：舊座標在框內的卡片仍算成員，避免排版把卡片排出舊框範圍後被誤判為「已離開」。
@@ -925,6 +1282,32 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     [onGroupCycleColor, onGroupRemove, onGroupRename, onGroupResizeEnd],
   );
 
+  const toNoteNode = useCallback(
+    (n: BoardNote, autoFocus = false): NoteFlowNode => ({
+      id: `note:${n.id}`,
+      type: "boardNote",
+      position: { x: n.x, y: n.y },
+      width: n.w,
+      height: n.h ?? NOTE_DEFAULT_H,
+      style: { width: n.w, height: n.h ?? NOTE_DEFAULT_H },
+      data: {
+        noteId: n.id,
+        text: n.text,
+        color: n.color || "amber",
+        w: n.w,
+        h: n.h ?? NOTE_DEFAULT_H,
+        autoFocus,
+        onResizeEnd: onNoteResizeEnd,
+        onCommitText: onNoteCommitText,
+        onCycleColor: onNoteCycleColor,
+        onRemove: onNoteRemove,
+        onPromote: onNotePromote,
+        onOpen: (nid) => onOpenCard?.(`note:${nid}`),
+      },
+    }),
+    [onNoteCommitText, onNoteCycleColor, onNotePromote, onNoteRemove, onNoteResizeEnd, onOpenCard],
+  );
+
   // ---- 載入白板 ----
   useEffect(() => {
     setNodes([]);
@@ -946,9 +1329,17 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         groups.forEach((g) => saved.current.set(`group:${g.id}`, { x: g.x, y: g.y, w: g.w, h: g.h }));
         b.cards.forEach((c) => saved.current.set(c.card_id, { x: c.x, y: c.y, w: c.w, h: c.h }));
         const groupNodes = groups.map((g) => toGroupNode(g));
+        const notes = b.notes ?? [];
+        notes.forEach((n) => saved.current.set(`note:${n.id}`, { x: n.x, y: n.y, w: n.w, h: n.h ?? NOTE_DEFAULT_H }));
+        const noteNodes = notes.map((n) => toNoteNode(n));
+        const lits = b.literatures ?? [];
+        lits.forEach((l) =>
+          saved.current.set(`lit:${l.literature_id}`, { x: l.x, y: l.y, w: l.w ?? LIT_DEFAULT_W, h: l.h ?? LIT_DEFAULT_H }),
+        );
+        const litNodes = lits.map((l) => toLiteratureNode(l));
         // 載入完成時，右側面板目前選的卡片如果在這塊白板上，也要同步成選取狀態
         const cardNodes = b.cards.map((c) => ({ ...toNode(c), selected: c.card_id === selectedRef.current }));
-        setNodes([...groupNodes, ...cardNodes]);
+        setNodes([...groupNodes, ...noteNodes, ...litNodes, ...cardNodes]);
         setLinks((b.links ?? []).map(normalizeLink));
         const vp = loadViewport(boardId);
         requestAnimationFrame(() => {
@@ -988,14 +1379,14 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           ? ns.map((n) => (n.type === "boardGroup" && n.selected ? { ...n, selected: false } : n))
           : ns;
       }
+      // 卡片、便利貼、文獻都以 selectedCardId 為準（便利貼／文獻的節點 id 就是 "note:…"／"lit:…"）；只有分組框在選了別的東西時才被清掉
+      const follows = (n: AnyFlowNode) => n.type === "card" || n.type === "boardNote" || n.type === "boardLiterature";
       const needUpdate = ns.some((n) =>
-        n.type === "card"
-          ? !!n.selected !== (n.id === selectedCardId)
-          : Boolean(selectedCardId && n.selected),
+        follows(n) ? !!n.selected !== (n.id === selectedCardId) : Boolean(selectedCardId && n.selected),
       );
       if (!needUpdate) return ns;
       return ns.map((n) => {
-        if (n.type === "card") return { ...n, selected: n.id === selectedCardId };
+        if (follows(n)) return { ...n, selected: n.id === selectedCardId };
         if (selectedCardId && n.selected) return { ...n, selected: false };
         return n;
       });
@@ -1015,7 +1406,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       const cardDrags =
         activeType === "boardGroup"
           ? []
-          : drags.filter((d) => !d.id.startsWith("group:"));
+          : drags.filter((d) => !d.id.startsWith("group:") && !d.id.startsWith("note:") && !d.id.startsWith("lit:"));
 
       if (drags.length > 0 && shiftRef.current) {
         // Shift：以拖曳起點為基準，位移取固定間距的整數倍
@@ -1023,7 +1414,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           if (c.type !== "position" || !c.dragging || !c.position) return c;
           const start = dragStartRef.current.get(c.id);
           if (!start) return c;
-          if (activeType === "card" && c.id.startsWith("group:")) {
+          if ((activeType === "card" || activeType === "boardNote" || activeType === "boardLiterature") && c.id.startsWith("group:")) {
             return { ...c, position: { x: start.x, y: start.y } };
           }
           const qPos = { x: quantizeFromStart(start.x, c.position.x), y: quantizeFromStart(start.y, c.position.y) };
@@ -1113,7 +1504,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           lastSnappedPosRef.current.set(c.id, pos);
           return { ...c, position: pos };
         });
-      } else if (activeType === "card" && drags.length > 0) {
+      } else if ((activeType === "card" || activeType === "boardNote" || activeType === "boardLiterature") && drags.length > 0) {
         // 未開啟自動對齊但主動拖曳卡片時，仍防止誤被選中的分組框跟著移動
         next = changes.map((c) => {
           if (c.type === "position" && c.dragging && c.id.startsWith("group:")) {
@@ -1150,7 +1541,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
 
   const onSelectionChange = useCallback(
     ({ nodes: sel }: { nodes: { id: string; type?: string }[] }) => {
-      const cardSel = sel.filter((n) => !n.id.startsWith("group:"));
+      const cardSel = sel.filter((n) => !n.id.startsWith("group:") && !n.id.startsWith("note:") && !n.id.startsWith("lit:"));
       // App 的選取已變、nodes 還沒同步：這次回報是舊選取，丟棄；nodes 追上後 React Flow 會再回報一次
       if (syncedSelectedRef.current !== selectedRef.current) return;
       // React Flow 的 store 比 nodes state 晚一個 commit 才同步，回報的選取可能是上一刻的過期快照。
@@ -1308,6 +1699,46 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           undefined,
           new Map([[gd.groupId, { old: groupMove.old, owned: new Set(gd.memberIds) }]]),
         );
+      }
+
+      // 便利貼：只存位置（開啟自動對齊時取整到格距），不參與分組框歸屬與避讓
+      for (const nn of dragged.filter((n): n is NoteFlowNode => n.type === "boardNote")) {
+        const nextX = snapRef.current ? snapToGridValue(nn.position.x, GRID_SIZE) : nn.position.x;
+        const nextY = snapRef.current ? snapToGridValue(nn.position.y, GRID_SIZE) : nn.position.y;
+        const prev = saved.current.get(nn.id);
+        if (prev && prev.x === nextX && prev.y === nextY) continue;
+        try {
+          await api.patchBoardNote(boardId, nn.data.noteId, { x: nextX, y: nextY });
+          saved.current.set(nn.id, { x: nextX, y: nextY, w: prev?.w ?? nn.data.w, h: prev?.h ?? nn.data.h });
+          if (nextX !== nn.position.x || nextY !== nn.position.y) {
+            setNodes((ns) => ns.map((n) => (n.id === nn.id ? { ...n, position: { x: nextX, y: nextY } } : n)));
+          }
+        } catch (e) {
+          if (prev) {
+            setNodes((ns) => ns.map((n) => (n.id === nn.id ? { ...n, position: { x: prev.x, y: prev.y } } : n)));
+          }
+          report(e, "儲存便利貼位置失敗，已回到原位");
+        }
+      }
+
+      // 文獻節點：只存位置（開啟自動對齊時取整到格距），不參與分組框歸屬與避讓
+      for (const ln of dragged.filter((n): n is LiteratureFlowNode => n.type === "boardLiterature")) {
+        const nextX = snapRef.current ? snapToGridValue(ln.position.x, GRID_SIZE) : ln.position.x;
+        const nextY = snapRef.current ? snapToGridValue(ln.position.y, GRID_SIZE) : ln.position.y;
+        const prev = saved.current.get(ln.id);
+        if (prev && prev.x === nextX && prev.y === nextY) continue;
+        try {
+          await api.patchBoardLiterature(boardId, ln.data.litId, { x: nextX, y: nextY });
+          saved.current.set(ln.id, { x: nextX, y: nextY, w: prev?.w ?? LIT_DEFAULT_W, h: prev?.h ?? LIT_DEFAULT_H });
+          if (nextX !== ln.position.x || nextY !== ln.position.y) {
+            setNodes((ns) => ns.map((n) => (n.id === ln.id ? { ...n, position: { x: nextX, y: nextY } } : n)));
+          }
+        } catch (e) {
+          if (prev) {
+            setNodes((ns) => ns.map((n) => (n.id === ln.id ? { ...n, position: { x: prev.x, y: prev.y } } : n)));
+          }
+          report(e, "儲存文獻位置失敗，已回到原位");
+        }
       }
 
       const movedCardIds = new Set<string>(
@@ -1506,7 +1937,9 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     if (!boardId) return;
     const selGroups = nodesRef.current.filter((n): n is GroupFlowNode => n.type === "boardGroup" && !!n.selected);
     const selCards = nodesRef.current.filter((n): n is CardFlowNode => n.type === "card" && !!n.selected);
-    if (!selGroups.length && !selCards.length) return;
+    const selNotes = nodesRef.current.filter((n): n is NoteFlowNode => n.type === "boardNote" && !!n.selected);
+    const selLits = nodesRef.current.filter((n): n is LiteratureFlowNode => n.type === "boardLiterature" && !!n.selected);
+    if (!selGroups.length && !selCards.length && !selNotes.length && !selLits.length) return;
 
     if (selGroups.length) {
       const gResults = await Promise.allSettled(
@@ -1520,6 +1953,34 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       if (removedGroupNodes.size) {
         setNodes((ns) => ns.filter((n) => !removedGroupNodes.has(n.id)));
         removedGroupNodes.forEach((id) => saved.current.delete(id));
+      }
+    }
+
+    if (selNotes.length) {
+      // 便利貼直接刪除、不做復原（已確認的設計決定）；失敗的那幾張留在畫面上並大聲報錯
+      const nResults = await Promise.allSettled(selNotes.map((n) => api.deleteBoardNote(boardId, n.data.noteId)));
+      const removedNotes = new Set<string>();
+      nResults.forEach((r, i) => {
+        if (r.status === "fulfilled") removedNotes.add(selNotes[i].id);
+        else report(r.reason, "刪除便利貼失敗");
+      });
+      if (removedNotes.size) {
+        setNodes((ns) => ns.filter((n) => !removedNotes.has(n.id)));
+        removedNotes.forEach((id) => saved.current.delete(id));
+      }
+    }
+
+    if (selLits.length) {
+      // 只從這塊白板移除節點，文獻本身不動（與卡片相同）；失敗的那幾個留在畫面上並大聲報錯
+      const lResults = await Promise.allSettled(selLits.map((l) => api.removeLiteratureFromBoard(boardId, l.data.litId)));
+      const removedLits = new Set<string>();
+      lResults.forEach((r, i) => {
+        if (r.status === "fulfilled") removedLits.add(selLits[i].id);
+        else report(r.reason, "從白板移除文獻失敗");
+      });
+      if (removedLits.size) {
+        setNodes((ns) => ns.filter((n) => !removedLits.has(n.id)));
+        removedLits.forEach((id) => saved.current.delete(id));
       }
     }
 
@@ -2024,8 +2485,97 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           report(e, "建立分組框失敗");
         }
       },
+      async createNote() {
+        if (!boardId) {
+          report(new Error("請先在左側建立或選擇一塊白板"));
+          return;
+        }
+        const b = wrapRef.current?.getBoundingClientRect();
+        const center = b
+          ? rf.screenToFlowPosition({ x: b.left + b.width / 2, y: b.top + b.height / 2 })
+          : { x: 200, y: 150 };
+        const off = (nodesRef.current.filter((n) => n.type === "boardNote").length % 6) * 24;
+        const rawX = center.x - NOTE_DEFAULT_W / 2 + off;
+        const rawY = center.y - 40 + off;
+        const x = snapRef.current ? snapToGridValue(rawX, GRID_SIZE) : Math.round(rawX);
+        const y = snapRef.current ? snapToGridValue(rawY, GRID_SIZE) : Math.round(rawY);
+        try {
+          const n = await api.createBoardNote(boardId, { x, y, w: NOTE_DEFAULT_W, h: NOTE_DEFAULT_H });
+          saved.current.set(`note:${n.id}`, { x: n.x, y: n.y, w: n.w, h: n.h ?? NOTE_DEFAULT_H });
+          setNodes((ns) => [...ns.map((m) => ({ ...m, selected: false })), { ...toNoteNode(n, true), selected: true }]);
+        } catch (e) {
+          report(e, "建立靈感筆記失敗");
+        }
+      },
+      // 右側欄改了便利貼後同步節點顯示（資料庫已由呼叫端寫入，這裡只更新畫面）
+      updateNote(noteId, patch) {
+        setNodes((ns) =>
+          ns.map((n) =>
+            n.id === `note:${noteId}` && n.type === "boardNote" ? { ...n, data: { ...n.data, ...patch } } : n,
+          ),
+        );
+      },
+      // 文獻庫、中央編輯或右側欄改了文獻後同步節點顯示；snippet 與後端的 substr(body, 1, 300) 同長
+      updateLiterature(litId, patch) {
+        setNodes((ns) =>
+          ns.map((n) =>
+            n.id === `lit:${litId}` && n.type === "boardLiterature"
+              ? {
+                  ...n,
+                  data: {
+                    ...n.data,
+                    ...(patch.title !== undefined ? { title: patch.title } : {}),
+                    ...(patch.body !== undefined ? { snippet: patch.body.slice(0, 300) } : {}),
+                    ...(patch.author !== undefined ? { author: patch.author } : {}),
+                  },
+                }
+              : n,
+          ),
+        );
+      },
+      // 文獻已被刪除（後端由外鍵連鎖移除節點）：只清畫面，不再呼叫 API
+      removeLiterature(litId) {
+        setNodes((ns) => ns.filter((n) => n.id !== `lit:${litId}`));
+        saved.current.delete(`lit:${litId}`);
+      },
+      async addLiterature(litId: string) {
+        if (!boardId) {
+          report(new Error("請先在左側建立或選擇一塊白板"));
+          return;
+        }
+        if (nodesRef.current.some((n) => n.id === `lit:${litId}`)) {
+          info("這份文獻已經在這塊白板上");
+          return;
+        }
+        try {
+          const b = wrapRef.current?.getBoundingClientRect();
+          const center = b
+            ? rf.screenToFlowPosition({ x: b.left + b.width / 2, y: b.top + b.height / 2 })
+            : { x: 200, y: 150 };
+          const off = (nodesRef.current.filter((n) => n.type === "boardLiterature").length % 6) * 24;
+          const x = snapRef.current
+            ? snapToGridValue(center.x - LIT_DEFAULT_W / 2 + off, GRID_SIZE)
+            : Math.round(center.x - LIT_DEFAULT_W / 2 + off);
+          const y = snapRef.current
+            ? snapToGridValue(center.y - 60 + off, GRID_SIZE)
+            : Math.round(center.y - 60 + off);
+          const added = await api.addLiteratureToBoard(boardId, {
+            literature_id: litId,
+            x,
+            y,
+            w: LIT_DEFAULT_W,
+            h: LIT_DEFAULT_H,
+          });
+          saved.current.set(`lit:${litId}`, { x: added.x, y: added.y, w: added.w ?? LIT_DEFAULT_W, h: added.h ?? LIT_DEFAULT_H });
+          // 不改選取：從文獻庫放上白板時選取會讓右側欄同時開出同一份文獻的第二個編輯器
+          setNodes((ns) => [...ns, toLiteratureNode(added)]);
+          info("已將文獻放上白板");
+        } catch (e) {
+          report(e, "加入文獻至白板失敗");
+        }
+      },
     }),
-    [boardId, info, onCountChanged, onSelectCard, report, rf, toGroupNode, toNode],
+    [boardId, info, onCountChanged, onOpenCard, onSelectCard, report, rf, toGroupNode, toLiteratureNode, toNode, toNoteNode],
   );
 
   const cardCount = nodes.filter((n) => n.type === "card").length;
@@ -2390,8 +2940,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         onNodeClick={(e, node) => {
           const target = e.target as HTMLElement;
           if (target.closest(".media-size-bar") || target.closest(".nodrag")) return;
-          if (node.type === "card") {
-            setLastClickedCardId(node.id);
+          if (node.type === "card" || node.type === "boardNote" || node.type === "boardLiterature") {
+            if (node.type === "card") setLastClickedCardId(node.id);
             if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
               onSelectCard(node.id);
             }
@@ -2403,7 +2953,9 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         onNodeDoubleClick={(e, node) => {
           const target = e.target as HTMLElement;
           if (target.closest(".media-size-bar") || target.closest(".nodrag")) return;
-          if (node.type === "card") onOpenCard?.(node.id);
+          if (node.type === "card" || node.type === "boardNote" || node.type === "boardLiterature") {
+            onOpenCard?.(node.id);
+          }
         }}
         onEdgeClick={(_e, edge) => {
           const l = (edge.data as { link?: BoardLink } | undefined)?.link;

@@ -240,6 +240,17 @@ export interface BoardGroup {
   created_at?: string;
 }
 
+export interface BoardNote {
+  id: string;
+  board_id: string;
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  color: string;
+  created_at?: string;
+}
+
 export interface Tag {
   id: string;
   name: string;
@@ -346,6 +357,7 @@ export interface BoardData {
   cards: BoardCard[];
   links: BoardLink[];
   groups?: BoardGroup[];
+  notes?: BoardNote[];
 }
 export interface MediaInfo {
   id: string;
@@ -391,6 +403,8 @@ export interface SyncPackage {
   boards: { id: string; name: string }[];
   board_cards: { board_id: string; card_id: string; x?: number; y?: number; w?: number; h?: number }[];
   board_groups?: BoardGroup[];
+  // 沒有此欄＝舊版匯出；覆蓋匯入時要保留本機原有的便利貼，不可當成「清空」
+  board_notes?: BoardNote[];
   // 電腦端雲端備份才有：卡片引用的圖片清單，iPad 據此下載缺少的圖片
   media?: SyncMediaEntry[];
 }
@@ -573,3 +587,39 @@ export interface RelationsReport {
   inconsistencies: RelationInconsistency[];
   candidates: RelationCandidate[];
 }
+
+// 今日總結（日誌）。值必須與後端 schemas.py 的 DailyStatus／DailyChangeKind 一致
+export type DailyStatus = "recalling" | "comparing" | "done";
+export type DailyChangeKind = "new" | "updated";
+
+export interface DailyStream {
+  id: string;
+  day: string; // 用戶端本地日期 YYYY-MM-DD
+  position: number;
+  title: string;
+  status: DailyStatus;
+  recall_text: string;
+  review_text: string;
+  peeked_at: string | null;
+  unlocked_at: string | null;
+  converted_card_id: string | null;
+  created_at: string;
+  updated_at: string;
+  cards: { id: string; title: string }[];
+}
+
+export interface DailyChange {
+  id: string;
+  title: string;
+  body: string;
+  card_type: CardType;
+  created_at: string;
+  updated_at: string;
+  kind: DailyChangeKind;
+}
+
+export interface DailyChangesResponse {
+  items: DailyChange[];
+  truncated: boolean;
+}
+

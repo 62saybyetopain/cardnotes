@@ -240,6 +240,32 @@ export interface BoardGroup {
   created_at?: string;
 }
 
+export interface BoardNote {
+  id: string;
+  board_id: string;
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h?: number; // 後端一定有值；只有舊的 Dexie 資料沒有，前端視為預設高度
+  color: string;
+  created_at?: string;
+}
+
+// 白板上的文獻節點（參照）：只有 x/y/w/h/z 是白板自己的，title/author/snippet 來自文獻庫現況
+export interface BoardLiterature {
+  literature_id: string;
+  x: number;
+  y: number;
+  w: number | null;
+  h: number | null;
+  z: number;
+  title: string;
+  author: string;
+  snippet: string;
+  updated_at: string;
+}
+
 export interface Tag {
   id: string;
   name: string;
@@ -346,6 +372,8 @@ export interface BoardData {
   cards: BoardCard[];
   links: BoardLink[];
   groups?: BoardGroup[];
+  notes?: BoardNote[];
+  literatures?: BoardLiterature[]; // Dexie 沒有文獻，不會有此欄
 }
 export interface MediaInfo {
   id: string;
@@ -391,6 +419,8 @@ export interface SyncPackage {
   boards: { id: string; name: string }[];
   board_cards: { board_id: string; card_id: string; x?: number; y?: number; w?: number; h?: number }[];
   board_groups?: BoardGroup[];
+  // 沒有此欄＝舊版匯出；覆蓋匯入時要保留本機原有的便利貼，不可當成「清空」
+  board_notes?: BoardNote[];
   // 電腦端雲端備份才有：卡片引用的圖片清單，iPad 據此下載缺少的圖片
   media?: SyncMediaEntry[];
 }
@@ -572,6 +602,60 @@ export interface RelationsReport {
   bridges: BridgeStat[];
   inconsistencies: RelationInconsistency[];
   candidates: RelationCandidate[];
+}
+
+// 文獻庫（僅電腦端）。欄位必須與後端 literature.py 的回傳一致
+export interface LiteratureSummary {
+  id: string;
+  title: string;
+  author: string;
+  url: string;
+  captured_on: string; // YYYY-MM-DD；空字串＝未填
+  updated_at: string;
+  snippet: string;
+  cited_card_count: number;
+}
+
+export interface LiteratureCitation {
+  id: string;
+  card_id: string;
+  card_title: string;
+  locator: string; // 空字串＝整份引用
+}
+
+export interface Literature {
+  id: string;
+  title: string;
+  body: string;
+  author: string;
+  url: string;
+  captured_on: string;
+  created_at: string;
+  updated_at: string;
+  citations: LiteratureCitation[];
+  collections: { id: string; name: string }[];
+  warnings: Warning[];
+}
+
+export interface LiteratureCollection {
+  id: string;
+  name: string;
+  item_count: number;
+}
+
+export interface CardLiteratureRef {
+  id: string; // 引用本身的 id（同一份文獻可被同一張卡片引用多個位置）
+  literature_id: string;
+  title: string;
+  author: string;
+  locator: string;
+}
+
+export interface LiteratureDeleteImpact {
+  card_count: number;
+  citation_count: number;
+  board_count: number;
+  board_names: string[];
 }
 
 // 今日總結（日誌）。值必須與後端 schemas.py 的 DailyStatus／DailyChangeKind 一致

@@ -23,6 +23,8 @@ interface Props {
   onSelectBoard(id: string): void;
   onBoardsChanged(): void;
   onFilter(f: Filter): void;
+  onOpenLiterature(): void;
+  literatureOpen?: boolean;
   onTagsChanged(): void;
   report(e: unknown, prefix?: string): void;
 }
@@ -46,7 +48,8 @@ type IconName =
   | "sliders"
   | "merge"
   | "arrow-up-right"
-  | "more";
+  | "more"
+  | "book";
 
 const FOLDER_PATH = "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z";
 
@@ -138,6 +141,12 @@ const ICON_SHAPES: Record<IconName, ReactNode> = {
       <circle cx="12" cy="12" r="1" />
       <circle cx="19" cy="12" r="1" />
       <circle cx="5" cy="12" r="1" />
+    </>
+  ),
+  book: (
+    <>
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
     </>
   ),
 };
@@ -608,6 +617,19 @@ export function LeftPanel(p: Props) {
         </div>
       </section>
 
+      {getPreferredDriverType() !== "dexie" && (
+        <section>
+          <div className="section-head">
+            <h3>文獻庫</h3>
+          </div>
+          <div className={`row nav-row${p.literatureOpen ? " on" : ""}`}>
+            <button className="label" onClick={p.onOpenLiterature} title="完整引用的原文資料；卡片可掛文獻作為出處">
+              <Icon name="book" /> 文獻庫
+            </button>
+          </div>
+        </section>
+      )}
+
       <section style={{ paddingBottom: 4 }}>
         <div className="section-head">
           <h3>標籤</h3>
@@ -878,6 +900,32 @@ export function LeftPanel(p: Props) {
           ))
         )}
       </details>
+
+      <section>
+        <div className="section-head">
+          <h3>考卷複習</h3>
+        </div>
+        <div className="row nav-row">
+          <button
+            type="button"
+            className="label"
+            onClick={() => window.open(`${import.meta.env.BASE_URL}exam/index.html`, "cardnote-exam")}
+            title="開啟考卷複習視窗"
+          >
+            <Icon name="book"/> 開啟考卷複習
+          </button>
+        </div>
+        <div className="row nav-row">
+          <button
+            type="button"
+            className="label"
+            onClick={() => window.open(`${import.meta.env.BASE_URL}exam/index.html#import`, "cardnote-exam")}
+            title="直接開啟匯入考卷頁面"
+          >
+            <Icon name="plus"/> 匯入考卷
+          </button>
+        </div>
+      </section>
 
       <section>
         <div className="section-head">
@@ -1266,7 +1314,7 @@ function CleanupDialog(props: {
           <div>
             <p>
               {result.dry_run
-                ? `找到 ${result.orphans.length} 個未被任何卡片內文引用（且建立超過 24 小時）的媒體檔案：`
+                ? `找到 ${result.orphans.length} 個未被任何卡片或文獻內文引用（且建立超過 24 小時）的媒體檔案：`
                 : `已刪除 ${result.orphans.length} 個孤兒媒體檔案：`}
             </p>
             <ul className="plain">
@@ -1304,3 +1352,4 @@ function CleanupDialog(props: {
     </div>
   );
 }
+

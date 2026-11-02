@@ -4,9 +4,12 @@ import type {
   BoardData,
   BoardGroup,
   BoardLink,
+  BoardLiterature,
+  BoardNote,
   BoardSummary,
   CardDetail,
   CardImpact,
+  CardLiteratureRef,
   CardRelation,
   CardRelationPut,
   CardSummary,
@@ -16,6 +19,10 @@ import type {
   CurationStatus,
   DeletePreview,
   LinkStatus,
+  Literature,
+  LiteratureCollection,
+  LiteratureDeleteImpact,
+  LiteratureSummary,
   MediaInfo,
   RelationPattern,
   RelationPatternCreate,
@@ -107,6 +114,13 @@ export interface StorageDriver {
   createBoardGroup(board_id: string, body: { label?: string; x: number; y: number; w?: number; h?: number; color?: string }): Promise<BoardGroup>;
   patchBoardGroup(board_id: string, group_id: string, patch: { label?: string; x?: number; y?: number; w?: number; h?: number; color?: string }): Promise<BoardGroup>;
   deleteBoardGroup(board_id: string, group_id: string): Promise<{ deleted: boolean }>;
+  createBoardNote(board_id: string, body: { text?: string; x: number; y: number; w?: number; h?: number; color?: string }): Promise<BoardNote>;
+  patchBoardNote(board_id: string, note_id: string, patch: { text?: string; x?: number; y?: number; w?: number; h?: number; color?: string }): Promise<BoardNote>;
+  deleteBoardNote(board_id: string, note_id: string): Promise<{ deleted: boolean }>;
+  // 白板文獻節點（僅電腦端）：Dexie 端寫入丟 UNSUPPORTED_ON_DEXIE
+  addLiteratureToBoard(board_id: string, body: { literature_id: string; x: number; y: number; w?: number; h?: number }): Promise<BoardLiterature>;
+  patchBoardLiterature(board_id: string, literature_id: string, patch: { x?: number; y?: number; w?: number; h?: number }): Promise<BoardLiterature>;
+  removeLiteratureFromBoard(board_id: string, literature_id: string): Promise<{ removed: boolean }>;
 
   // 同步、檔案與選取操作
   syncExport(): Promise<SyncPackage>;
@@ -143,5 +157,23 @@ export interface StorageDriver {
   putCardRelation(card_id: string, body: CardRelationPut): Promise<{ relation: CardRelation }>;
   deleteCardRelation(card_id: string): Promise<{ removed: boolean }>;
   getRelationsReport(): Promise<RelationsReport>;
+
+  // 文獻庫（僅電腦端）：Dexie 端讀取回空、寫入丟 UNSUPPORTED_ON_DEXIE
+  listLiterature(p: { q?: string; collection_id?: string; uncited?: boolean; limit?: number }): Promise<{ items: LiteratureSummary[] }>;
+  createLiterature(body: { title?: string; body?: string; author?: string; url?: string; captured_on?: string; collection_id?: string }): Promise<Literature>;
+  getLiterature(id: string): Promise<Literature>;
+  patchLiterature(id: string, patch: { title?: string; body?: string; author?: string; url?: string; captured_on?: string }, expected_updated_at: string): Promise<Literature>;
+  literatureDeletePreview(id: string): Promise<LiteratureDeleteImpact>;
+  deleteLiterature(id: string): Promise<{ deleted: boolean }>;
+  listLiteratureCollections(): Promise<{ collections: LiteratureCollection[] }>;
+  createLiteratureCollection(name: string): Promise<LiteratureCollection>;
+  renameLiteratureCollection(id: string, name: string): Promise<LiteratureCollection>;
+  deleteLiteratureCollection(id: string): Promise<{ deleted: boolean }>;
+  addLiteratureToCollection(collection_id: string, literature_id: string): Promise<{ existed: boolean }>;
+  removeLiteratureFromCollection(collection_id: string, literature_id: string): Promise<{ removed: boolean }>;
+  listCardLiterature(card_id: string): Promise<{ citations: CardLiteratureRef[] }>;
+  putCardLiterature(card_id: string, body: { literature_id: string; locator?: string }): Promise<{ id: string; card_id: string; literature_id: string; locator: string; existed: boolean }>;
+  patchLiteratureCitation(id: string, locator: string): Promise<{ id: string; locator: string }>;
+  deleteLiteratureCitation(id: string): Promise<{ removed: boolean }>;
 }
 

@@ -346,6 +346,65 @@ summary .add { float: right; border: 0; background: transparent; }
 .card-body .md img, .card-body .md video { max-width: 100%; max-height: 180px; object-fit: contain; border-radius: 6px; }
 .card-error { border-color: var(--danger); color: var(--danger); }
 
+/* 白板文獻卡片（LiteratureNode）：扁平風、無陰影、支援全功能編輯與縮放 */
+.react-flow__node-boardLiterature {
+  border-radius: 12px;
+  display: flex;
+}
+.lit-node {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 80px;
+  box-sizing: border-box;
+  background: color-mix(in srgb, var(--panel) 80%, var(--bg));
+  border: 1.5px solid color-mix(in srgb, var(--accent) 55%, var(--line));
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  transition: border-color 0.15s ease;
+}
+.lit-node:hover {
+  border-color: var(--accent);
+}
+.lit-node.selected {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  box-shadow: none;
+}
+.lit-node-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 4px;
+  flex-shrink: 0;
+}
+.lit-node-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.lit-node-body {
+  flex: 1;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.9;
+  line-height: 1.45;
+  width: 100%;
+}
+
 /* 白板視覺分組框（Frame / Group）：僅表達空間群集，位於卡片下層 */
 .react-flow__node-boardGroup {
   border-radius: 14px;
@@ -394,6 +453,45 @@ summary .add { float: right; border: 0; background: transparent; }
 .group-node:hover .group-actions, .group-node.selected .group-actions { display: inline-flex; }
 .group-actions button { padding: 1px 5px; font-size: 11px; background: var(--panel); }
 .link-direction-preview { padding: 8px 10px; border-radius: 6px; background: var(--bg); font-size: 13px; text-align: center; }
+
+/* 白板靈感筆記（便利貼）：純文字、固定尺寸（預設寬同卡片、高為卡片 3 倍）、四邊四角都能縮放。
+   @depends-on components/Board.tsx（NoteNode 的 class 名稱；顏色名沿用分組框的 slate/blue/green/amber/purple） */
+.react-flow__node-boardNote { border-radius: 8px; display: flex; }
+.note-node {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.12);
+  display: flex;
+  flex-direction: column;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.note-node.color-blue { border-color: #3b82f6; background: color-mix(in srgb, #3b82f6 14%, var(--card)); }
+.note-node.color-green { border-color: #10b981; background: color-mix(in srgb, #10b981 14%, var(--card)); }
+.note-node.color-amber { border-color: #f59e0b; background: color-mix(in srgb, #f59e0b 16%, var(--card)); }
+.note-node.color-purple { border-color: #8b5cf6; background: color-mix(in srgb, #8b5cf6 14%, var(--card)); }
+.note-node.selected { box-shadow: 0 0 0 2px var(--accent), 0 6px 16px rgba(0, 0, 0, 0.16); }
+.note-header { display: flex; justify-content: space-between; align-items: center; height: 22px; padding: 0 6px; cursor: grab; color: var(--muted); font-size: 11px; user-select: none; }
+.note-actions { display: none; gap: 2px; }
+.note-node:hover .note-actions, .note-node.selected .note-actions { display: inline-flex; }
+.note-actions button { padding: 0 5px; font-size: 11px; background: var(--panel); }
+/* 顏色小圓點：白板便利貼與右側欄 NoteEditorPane 共用（.note-color-picker 為共同祖先） */
+.note-color-picker { display: inline-flex; align-items: center; gap: 5px; }
+.note-color-picker .note-color-dot { width: 12px; height: 12px; min-height: 0; padding: 0; flex-shrink: 0; border-radius: 50%; border: 1.5px solid var(--line); }
+.note-color-picker .note-color-dot:hover { border-color: var(--text); }
+.note-color-picker .note-color-dot.color-slate { background: var(--muted); }
+.note-color-picker .note-color-dot.color-blue { background: #3b82f6; }
+.note-color-picker .note-color-dot.color-green { background: #10b981; }
+.note-color-picker .note-color-dot.color-amber { background: #f59e0b; }
+.note-color-picker .note-color-dot.color-purple { background: #8b5cf6; }
+.note-color-picker .note-color-dot.active { border-color: var(--text); outline: 1.5px solid var(--text); outline-offset: 1px; }
+.note-text { display: block; width: 100%; flex: 1; min-height: 0; resize: none; overflow: auto; border: 0; background: transparent; padding: 0 10px 8px; font: inherit; font-size: 13px; line-height: 1.5; color: var(--text); }
+.note-text:focus { outline: none; }
+
 
 /* 視圖切換與全域概念地圖（Concept Graph View） */
 .view-switch { display: inline-flex; background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 2px; gap: 2px; }
@@ -865,5 +963,19 @@ summary .add { float: right; border: 0; background: transparent; }
 .stream-textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .stream-actions button { display: inline-flex; align-items: center; gap: 6px; }
 .stream-kbd { margin-left: 2px; padding: 0 5px; font-size: 11px; border: 1px solid color-mix(in srgb, currentColor 40%, transparent); border-radius: 4px; }
+
+/* 文獻庫（僅電腦端）
+   @depends-on components/LiteratureLibrary.tsx（class 名稱）
+   @depends-on App.tsx（工具列在此視圖仍顯示，標題列右側留白避免被擋住） */
+.lit-view { position: absolute; inset: 0; z-index: 3; background: var(--bg); display: flex; flex-direction: column; overflow: hidden; }
+.lit-head { display: flex; align-items: center; gap: 10px; padding: 8px 14px; padding-right: 340px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.app.left-closed .lit-head { padding-left: 88px; }
+.lit-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 320px minmax(0, 1fr); }
+.lit-list { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); background: var(--sidebar); }
+.lit-list-tools { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-bottom: 1px solid var(--line); }
+.lit-list-scroll { flex: 1; overflow: auto; padding: 8px; }
+.lit-detail { overflow: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.lit-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); }
+.lit-read { padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); user-select: text; }
 
 

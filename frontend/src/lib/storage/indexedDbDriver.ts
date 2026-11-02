@@ -7,6 +7,7 @@ import type {
   BoardData,
   BoardGroup,
   BoardLink,
+  BoardNote,
   BoardSummary,
   CardDetail,
   CardImpact,
@@ -753,10 +754,11 @@ export class IndexedDbDriver implements StorageDriver {
   }
 
   async deleteBoard(id: string): Promise<{ deleted: boolean }> {
-    await db.transaction("rw", [db.boards, db.board_cards, db.board_groups], async () => {
+    await db.transaction("rw", [db.boards, db.board_cards, db.board_groups, db.board_notes], async () => {
       await db.boards.delete(id);
       await db.board_cards.where("board_id").equals(id).delete();
       await db.board_groups.where("board_id").equals(id).delete();
+      await db.board_notes.where("board_id").equals(id).delete();
     });
     return { deleted: true };
   }
@@ -804,12 +806,14 @@ export class IndexedDbDriver implements StorageDriver {
       });
 
     const groups = await db.board_groups.where("board_id").equals(id).toArray();
+    const notes = await db.board_notes.where("board_id").equals(id).toArray();
     return {
       id: b.id,
       name: b.name,
       cards,
       links,
       groups,
+      notes,
     };
   }
 
@@ -878,6 +882,55 @@ export class IndexedDbDriver implements StorageDriver {
     return { deleted: true };
   }
 
+  // @depends-on backend schemas.py::BoardNoteCreate（預設寬度 220、預設高度 420、預設顏色 amber 兩端必須一致）
+  async createBoardNote(
+    board_id: string,
+    body: { text?: string; x: number; y: number; w?: number; h?: number; color?: string },
+  ): Promise<BoardNote> {
+    const b = await db.boards.get(board_id);
+    if (!b) throw new ApiError("NOT_FOUND", "白板不存在", 404, { board_id });
+    const n: BoardNote = {
+      id: newId(),
+      board_id,
+      text: body.text ?? "",
+      x: body.x,
+      y: body.y,
+      w: body.w ?? 220,
+      h: body.h ?? 420,
+      color: body.color || "amber",
+      created_at: utcNow(),
+    };
+    await db.board_notes.add(n);
+    return n;
+  }
+
+  async patchBoardNote(
+    board_id: string,
+    note_id: string,
+    patch: { text?: string; x?: number; y?: number; w?: number; h?: number; color?: string },
+  ): Promise<BoardNote> {
+    const cur = await db.board_notes.get(note_id);
+    if (!cur || cur.board_id !== board_id) throw new ApiError("NOT_FOUND", "便利貼不存在", 404, { note_id });
+    const next: BoardNote = {
+      ...cur,
+      text: patch.text !== undefined ? patch.text : cur.text,
+      x: patch.x !== undefined ? patch.x : cur.x,
+      y: patch.y !== undefined ? patch.y : cur.y,
+      w: patch.w !== undefined ? patch.w : cur.w,
+      h: patch.h !== undefined ? patch.h : cur.h,
+      color: patch.color !== undefined ? patch.color : cur.color,
+    };
+    await db.board_notes.put(next);
+    return next;
+  }
+
+  async deleteBoardNote(board_id: string, note_id: string): Promise<{ deleted: boolean }> {
+    const cur = await db.board_notes.get(note_id);
+    if (!cur || cur.board_id !== board_id) throw new ApiError("NOT_FOUND", "便利貼不存在", 404, { note_id });
+    await db.board_notes.delete(note_id);
+    return { deleted: true };
+  }
+
   // ---- 同步：匯出 JSON 封包 ----
   async syncExport(): Promise<SyncPackage> {
     const rawCards = await db.cards.toArray();
@@ -924,6 +977,7 @@ export class IndexedDbDriver implements StorageDriver {
     }));
 
     const board_groups = await db.board_groups.toArray();
+    const board_notes = await db.board_notes.toArray();
 
     return {
       version: 1,
@@ -936,6 +990,7 @@ export class IndexedDbDriver implements StorageDriver {
       boards,
       board_cards,
       board_groups,
+      board_notes,
     };
   }
 
@@ -963,8 +1018,11 @@ export class IndexedDbDriver implements StorageDriver {
 
     await db.transaction(
       "rw",
-      [db.cards, db.tags, db.tag_aliases, db.card_tags, db.links, db.boards, db.board_cards, db.board_groups],
+      [db.cards, db.tags, db.tag_aliases, db.card_tags, db.links, db.boards, db.board_cards, db.board_groups, db.board_notes],
       async () => {
+        // 便利貼：封包沒帶 board_notes（舊版匯出）時，清空前先留下本機的，避免覆蓋同步悄悄刪光便利貼
+        const keptNotes = Array.isArray(pkg.board_notes) ? null : await db.board_notes.toArray();
+
         // 1. 清空本地全部資料表
         await db.cards.clear();
         await db.tags.clear();
@@ -974,6 +1032,7 @@ export class IndexedDbDriver implements StorageDriver {
         await db.boards.clear();
         await db.board_cards.clear();
         await db.board_groups.clear();
+        await db.board_notes.clear();
 
         // 2. 依拓撲順序重灌標籤與別名（同時正規化舊版 domain -> location）
         const pendingTags = [...(pkg.tags ?? [])];
@@ -1081,6 +1140,23 @@ export class IndexedDbDriver implements StorageDriver {
               h: bg.h,
               color: bg.color ?? "slate",
               created_at: bg.created_at || utcNow(),
+            });
+          }
+        }
+
+        // 8. 便利貼：只保留所屬白板存在者（封包有帶用封包的，沒帶用上面留下的本機資料）
+        for (const n of pkg.board_notes ?? keptNotes ?? []) {
+          if (importedBoardIds.has(n.board_id)) {
+            await db.board_notes.put({
+              id: n.id,
+              board_id: n.board_id,
+              text: n.text ?? "",
+              x: n.x,
+              y: n.y,
+              w: n.w,
+              h: n.h,
+              color: n.color ?? "amber",
+              created_at: n.created_at || utcNow(),
             });
           }
         }
@@ -1448,6 +1524,71 @@ export class IndexedDbDriver implements StorageDriver {
   }
   async pickSystemFile(): Promise<never> {
     throw new ApiError("FILE_OPERATION_ERROR", "純前端靜態環境（GitHub Pages）不支援瀏覽選取本機實體檔案", 400);
+  }
+
+  // ---- 文獻庫（僅電腦端 SQLite，不納入 Dexie 與同步封包）----
+  // @depends-on ./driver.ts::StorageDriver
+  // assumption: 網頁／iPad 版沒有文獻功能（LiteratureField 在 dexie 下不渲染、文獻庫視圖只在電腦版掛載）；讀取回空、寫入大聲報錯
+  // if broken: 若未來要在網頁版支援，需新增 Dexie 資料表與同步封包欄位，並移除這些存根
+  private literatureUnsupported(): never {
+    throw new ApiError("UNSUPPORTED_ON_DEXIE", "此功能僅電腦端可用", 400);
+  }
+  async listLiterature(): Promise<{ items: never[] }> {
+    return { items: [] };
+  }
+  async listLiteratureCollections(): Promise<{ collections: never[] }> {
+    return { collections: [] };
+  }
+  async listCardLiterature(_card_id: string): Promise<{ citations: never[] }> {
+    return { citations: [] };
+  }
+  async createLiterature(): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async getLiterature(_id: string): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async patchLiterature(): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async literatureDeletePreview(_id: string): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async deleteLiterature(_id: string): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async createLiteratureCollection(_name: string): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async renameLiteratureCollection(): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async deleteLiteratureCollection(_id: string): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async addLiteratureToCollection(): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async removeLiteratureFromCollection(): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async putCardLiterature(): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async patchLiteratureCitation(): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async deleteLiteratureCitation(_id: string): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async addLiteratureToBoard(): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async patchBoardLiterature(): Promise<never> {
+    return this.literatureUnsupported();
+  }
+  async removeLiteratureFromBoard(): Promise<never> {
+    return this.literatureUnsupported();
   }
 }
 

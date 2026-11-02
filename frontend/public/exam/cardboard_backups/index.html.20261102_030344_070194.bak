@@ -1,0 +1,1169 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>考卷複習</title>
+<script>
+/* 原因：主題要在畫面出現前就決定，否則會先閃一下錯的顏色。優先序：自己存過的選擇 > 從卡片軟體開啟時沿用它的主題 > 系統偏好。 */
+(function(){var t=null;try{t=localStorage.getItem('exam-theme')}catch(e){}
+if(t!=='light'&&t!=='dark'){try{var o=window.opener&&window.opener.document.documentElement.getAttribute('data-theme');if(o==='light'||o==='dark')t=o}catch(e){}}
+if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';
+document.documentElement.setAttribute('data-theme',t)})();
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+/* 原因：色彩 token 沿用卡片軟體（深色為預設、淺色用 data-theme="light"），讓兩個網頁看起來是同一套；舊變數名稱留作別名，因為程式裡的行內樣式（提示條、msg）還在用。 */
+:root,[data-theme="dark"]{--bg:#17181a;--panel:#1f2023;--line:#34363a;--text:#e6e6e6;--muted:#9a9ea6;--accent:#6c9bff;--accent-soft:#24304a;--danger:#ff7b6b;--warn:#e0b24f;--card:#26272b;--sidebar:#1f2023;--ok:#34d399;--code-bg:rgba(15,23,42,.55);color-scheme:dark}
+[data-theme="light"]{--bg:#ebe9e3;--sidebar:#e2dfd8;--panel:#f5f3ee;--card:#faf8f4;--line:#cfccc2;--text:#2c2a26;--muted:#625f58;--accent:#1d4ed8;--accent-soft:#d8e2f6;--danger:#b91c1c;--warn:#92400e;--ok:#15803d;--code-bg:#ebe8e0;color-scheme:light}
+:root{--ink:var(--text);--sub:var(--muted);--paper:var(--bg);--red:var(--danger);--grn:var(--ok);--blue:var(--accent);--sel:var(--accent-soft);box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;overscroll-behavior-y:none}
+#app{max-width:720px;margin:0 auto;padding:16px 16px 64px}
+
+/* 標題列：標題靠左撐開，按鈕與切換鈕靠右 */
+header{display:flex;align-items:center;gap:8px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+header>:first-child{flex:1;min-width:0}
+h1,h2{margin:20px 0 8px;font-size:13px;font-weight:600;color:var(--muted)}
+header h1,header h2{margin:0;font-size:16px;font-weight:700;color:var(--accent);letter-spacing:.02em}
+
+/* 按鈕、輸入框：與卡片軟體相同的 panel 底、6px 圓角、hover 變 accent 邊 */
+button,.btn{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:3px 9px;cursor:pointer}
+button:hover,.btn:hover{border-color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.btn{display:inline-block;margin:6px 0}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.pri{background:var(--accent);color:#fff;border-color:var(--accent)}
+.ghost{border:0;background:transparent;color:var(--muted);padding:0 4px}
+.ghost:hover{color:var(--accent)}
+.icon-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;padding:0;flex-shrink:0}
+.ui-icon{flex-shrink:0}
+input,textarea{width:100%;font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:5px 8px;margin:4px 0}
+input:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
+input.num{width:4.5em}
+input[type=file]{border:0;background:none;padding:4px 0;box-shadow:none}
+textarea{min-height:64px;resize:vertical}
+label{display:block;margin:12px 0 4px;font-weight:500}
+details{margin:6px 0}
+summary{cursor:pointer;color:var(--muted)}
+.mk{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+
+/* 作答／檢討／彙整 三步驟：沿用卡片軟體 tabs 的選取樣式 */
+nav{display:flex;gap:4px;margin:0 0 14px;overflow-x:auto}
+nav button{flex:1;white-space:nowrap}
+nav .on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
+.mk>button.on{background:var(--accent-soft);border-color:var(--accent);font-weight:600}
+
+/* 考卷清單 */
+.row{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;padding:10px 12px;margin:0 0 6px;background:var(--card);border:1px solid var(--line);border-radius:10px;cursor:pointer;transition:border-color .15s ease}
+.row:hover{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
+.row span{color:var(--muted);flex:1;font-size:12px}
+
+/* 題目卡：比照卡片軟體的卡片；題組文章比照文獻卡片（扁平、無陰影、accent 邊） */
+article{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:12px;padding:12px 14px;margin:0 0 12px;box-shadow:0 4px 16px rgba(0,0,0,.08),0 1px 3px rgba(0,0,0,.05)}
+article.ng{border-left-color:var(--danger)}
+article.ps{background:color-mix(in srgb,var(--panel) 80%,var(--bg));border:1.5px solid color-mix(in srgb,var(--accent) 55%,var(--line));box-shadow:none}
+.stem{white-space:pre-wrap;margin:0 0 8px;font-size:15px;line-height:1.6}
+pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:8px;overflow-x:auto;margin:0 0 8px;font:12px/1.5 ui-monospace,"SF Mono",Menlo,monospace}
+.fig{display:block;max-width:100%;margin:8px 0;background:#fff;border-radius:6px;cursor:zoom-in}
+.miss,.wr{color:var(--danger);font-size:13px;margin:4px 0}
+
+/* 選項：選取＝accent 柔底、正解＝綠、我選錯＝紅 */
+.opt{display:flex;gap:10px;width:100%;text-align:left;margin:4px 0;border:1px solid var(--line);border-radius:8px;padding:6px 12px;background:var(--panel)}
+.opt b{min-width:1.2em}
+.opt.sel{background:var(--accent-soft);border-color:var(--accent)}
+.opt.k{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,var(--card))}
+.opt.m{border-color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,var(--card))}
+.lt{width:auto;min-width:3em;justify-content:center}
+.mk .o.on{background:color-mix(in srgb,var(--ok) 22%,var(--panel));border-color:var(--ok);font-weight:600}
+.mk .x.on{background:color-mix(in srgb,var(--danger) 20%,var(--panel));border-color:var(--danger);font-weight:600}
+
+.tbl{overflow-x:auto;margin:0 0 8px}
+table{border-collapse:collapse;width:100%}
+td,th{padding:6px 8px;border:1px solid var(--line);text-align:left}
+th{background:var(--panel)}
+.hi{color:var(--danger);font-weight:700}
+.empty,.hint,small{color:var(--muted)}
+.empty{padding:16px 4px}
+#lb{position:fixed;inset:0;z-index:9;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;overflow:auto;padding:calc(16px + env(safe-area-inset-top,0px)) 16px calc(16px + env(safe-area-inset-bottom,0px));cursor:zoom-out}
+#lb img{max-width:100%;max-height:100%;background:#fff}
+.ck{display:inline-flex;align-items:center;gap:4px;margin:0;font-weight:400}
+.ck input{width:auto;margin:0}
+button.chip{background:var(--accent-soft);border:0;border-radius:12px;padding:1px 10px;font-size:12px}
+.ed small,.tg small{display:block;margin-top:6px}
+.tg{margin-top:8px}
+progress{width:100%;height:8px;accent-color:var(--danger)}
+.br{display:grid;grid-template-columns:minmax(6em,30%) 1fr auto auto;gap:8px;align-items:center;margin:6px 0}
+.br span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* 彙整：科目＞章節＞概念三層（上一輪加的） */
+details.sj{margin:14px 0;padding-top:6px;border-top:1px solid var(--line)}
+details.sj>summary{font-size:15px;font-weight:700;color:var(--text)}
+details.ch{margin:6px 0 6px 12px;padding-left:12px;border-left:2px solid var(--accent)}
+details.ch>summary{color:var(--text)}
+.cn{margin:2px 0 2px 8px;font-size:13px;color:var(--muted)}
+.cn.hi{color:var(--danger)}
+/* 依類別抽題的樹（上一輪加的） */
+.cat-s{margin:6px 0;padding:6px 0;border-top:1px solid var(--line)}
+.cat-c{display:flex;flex-wrap:wrap;gap:4px 14px;margin:4px 0 0 22px}
+
+/* 觸控裝置：與卡片軟體一樣加大點擊熱區 */
+@media (pointer:coarse){button:not(.ghost):not(.chip),.btn{min-height:38px}.stem{font-size:16px}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+/*PARSE_START*/
+const uid=()=>Math.random().toString(36).slice(2,9);
+// 原因：原寫法直接刪掉 <sub>/<sup>，41₁₆ 變成「4116」；數字轉成 Unicode 上下標，其他內容以 _()、^() 保留，才不會悄悄改變題意。
+const SUBD='₀₁₂₃₄₅₆₇₈₉',SUPD='⁰¹²³⁴⁵⁶⁷⁸⁹';
+const nrm=s=>String(s).normalize('NFC').replace(/[\u2E80-\u2FDF]/g,c=>c.normalize('NFKC'))
+  .replace(/<sub>([^<]*)<\/sub>/gi,(m,t)=>/^\d+$/.test(t)?[...t].map(d=>SUBD[d]).join(''):'_('+t+')')
+  .replace(/<sup>([^<]*)<\/sup>/gi,(m,t)=>/^\d+$/.test(t)?[...t].map(d=>SUPD[d]).join(''):'^('+t+')')
+  .replace(/<\/?(?:sub|sup)>/gi,'');
+const jn=(a,b)=>/[A-Za-z0-9]$/.test(a)&&/^[A-Za-z0-9]/.test(b)?a+' '+b:a+b;
+const base=s=>String(s||'').split('/').pop();
+const linesOf=b=>b.lines?b.lines.map(l=>nrm((l.spans||[]).map(s=>s.content||'').join(''))):(b.blocks||[]).flatMap(linesOf);
+const spansOf=b=>[...(b.lines||[]).flatMap(l=>l.spans||[]),...(b.blocks||[]).flatMap(spansOf)];
+const po=(p,q)=>(p.passages||[]).find(x=>x.id===q.pid);
+
+function fromMineru(j, scopePrefix){
+  const out=[];
+  j.pdf_info.forEach((pg,pi)=>pg.para_blocks.forEach(b=>{
+    if(pi>0&&b.bbox&&b.bbox[3]<=62&&(b.type==='title'||b.type==='text'))return;
+    if(b.type==='image'||b.type==='table'){
+      (b.blocks||[]).forEach(s=>{
+        if(/caption|footnote/.test(s.type)){const ls=linesOf(s);if(ls.length)out.push({t:'text',ls})}
+        else spansOf(s).forEach(sp=>{
+          if(sp.image_path||sp.html){
+            const rawId=base(sp.image_path);
+            const scopedId=rawId ? (scopePrefix ? scopePrefix+'__'+rawId : rawId) : '';
+            out.push({t:b.type==='image'?'img':'tbl',id:scopedId,html:sp.html||''});
+          }
+        });
+      });
+    }else if(b.type==='code')out.push({t:'code',v:linesOf(b).join('\n')});
+    else out.push({t:'text',ls:linesOf(b)});
+  }));
+  return out;
+}
+
+function fromText(t, scopePrefix){
+  const out=[];
+  for(let l of nrm(t).split(/\r?\n/)){
+    l=l.trim().replace(/^#+\s*/,'');if(!l)continue;
+    let m;
+    if(/^<table/i.test(l))out.push({t:'tbl',id:'',html:l});
+    else if((m=l.match(/^!\[[^\]]*\]\(([^)]*)\)/))){
+      const rawId=base(m[1]);
+      const scopedId=rawId ? (scopePrefix ? scopePrefix+'__'+rawId : rawId) : '';
+      out.push({t:'img',id:scopedId,html:''});
+    }
+    else out.push({t:'text',ls:[l]});
+  }
+  return out;
+}
+
+const IMPORTERS=[
+  {id:'mineru',label:'MinerU layout.json',detect:b=>!!(b.json&&b.json.pdf_info),blocks:(b,pre)=>fromMineru(b.json,pre)},
+  {id:'text',label:'文字／Markdown',detect:b=>!!b.text,blocks:(b,pre)=>fromText(b.text,pre)}
+];
+
+function keyFromHtml(h,k){
+  for(const r of h.match(/<tr[^>]*>.*?<\/tr>/gis)||[]){
+    const c=[...r.matchAll(/<t[dh][^>]*>(.*?)<\/t[dh]>/gis)].map(m=>m[1].replace(/<[^>]*>/g,'').trim());
+    for(let i=0;i+1<c.length;i+=2)if(/^\d{1,3}$/.test(c[i])&&/^[A-Ha-h]{1,8}$/.test(c[i+1]))k[+c[i]]=c[i+1].toUpperCase();
+  }
+}
+function parseKey(t){
+  const k={};
+  if(/^\s*\{/.test(t)){try{const o=JSON.parse(t);for(const n in o)k[+n]=String(o[n]).toUpperCase();return k}catch(e){}}
+  const re=/(\d{1,3})\s*[.、．:：)）\-—]?\s*([A-Ha-h]{1,8})(?![A-Za-z])/g;let m;
+  while((m=re.exec(t)))k[+m[1]]=m[2].toUpperCase();
+  if(!Object.keys(k).length)[...t.replace(/[^A-Za-z]/g,'').toUpperCase()].forEach((c,i)=>k[i+1]=c);
+  return k;
+}
+function splitOpts(s){
+  for(const mk of [k=>new RegExp('[(（]'+k+'[)）]'),k=>new RegExp('(?:^|\\n)\\s*'+k+'\\s*[.、．]')]){
+    const pos=[];let from=0;
+    for(const k of 'ABCDEFGH'){
+      const m=mk(k).exec(s.slice(from));if(!m)break;
+      pos.push([k,from+m.index,from+m.index+m[0].length]);from+=m.index+m[0].length;
+    }
+    if(pos.length>=2)return{stem:s.slice(0,pos[0][1]).trim(),opts:pos.map((p,i)=>({k:p[0],v:s.slice(p[2],pos[i+1]?pos[i+1][1]:undefined).trim()}))};
+  }
+  return{stem:s.trim(),opts:[]};
+}
+function assemble(blocks,keyText){
+  const qs=[],ps=[],kh=[];let cur=null,pc=null,last=0,inKey=false;
+  const noise=/公告試題僅供參考|^【?以下空白】?$|第\s*\d+\s*頁\s*共\s*\d+\s*頁/;
+  const push=(t,s,cont)=>{const a=t.blocks,l=a[a.length-1];if(l&&l.t==='text')l.v=cont?jn(l.v,s):l.v+'\n'+s;else a.push({t:'text',v:s})};
+  for(const b of blocks){
+    if(b.t!=='text'){
+      if(inKey){if(b.html)kh.push(b.html)}else{const g=cur||pc;if(g)g.blocks.push(b)}
+      continue;
+    }
+    let first=true;
+    for(let s of b.ls){
+      s=s.trim();if(!s||noise.test(s))continue;
+      const f=first;first=false;let m;
+      if(/參考答案/.test(s)){inKey=true;cur=null;continue}
+      if(inKey)continue;
+      if((m=s.match(/^▲.*?第\s*(\d+)\s*[-–—~～至到]\s*(\d+)\s*題/))){pc={id:'p'+m[1]+'-'+m[2],from:+m[1],to:+m[2],blocks:[]};ps.push(pc);cur=null;continue}
+      m=s.match(/^(\d{1,3})\s*[.．、](?!\d)\s*(.*)$/);
+      if(m&&(+m[1]===1||(+m[1]>last&&+m[1]<=last+3))){
+        last=+m[1];cur={no:last,blocks:[{t:'text',v:m[2]}]};
+        if(pc&&last>pc.to)pc=null;
+        if(pc&&last>=pc.from)cur.pid=pc.id;
+        qs.push(cur);continue;
+      }
+      const g=cur||pc;if(g)push(g,s,!f);
+    }
+  }
+  const runs=[];let r=[];
+  qs.forEach(q=>{if(r.length&&q.no<=r[r.length-1].no){runs.push(r);r=[]}r.push(q)});runs.push(r);
+  const keep=runs.sort((a,b)=>b.length-a.length)[0]||[];
+  const key={};kh.forEach(h=>keyFromHtml(h,key));if(keyText)Object.assign(key,parseKey(keyText));
+  const questions=keep.map(q=>{
+    const{stem,opts}=splitOpts(q.blocks.filter(b=>b.t==='text').map(b=>b.v).join('\n'));
+    let done=0;const bl=[];
+    q.blocks.forEach(b=>{if(b.t!=='text')bl.push(b);else if(!done){done=1;if(stem)bl.push({t:'text',v:stem})}});
+    return{no:q.no,pid:q.pid,blocks:bl,options:opts,key:key[q.no]||''};
+  });
+  const used=new Set(questions.map(q=>q.pid));
+  return{questions,passages:ps.filter(p=>used.has(p.id)),keyMax:Math.max(0,...Object.keys(key).map(Number))};
+}
+function validate(p){
+  const is=[],E=(no,m)=>is.push({lv:'e',no,m}),W=(no,m)=>is.push({lv:'w',no,m});
+  const nos=p.questions.map(q=>q.no),mx=Math.max(0,...nos),seen={};
+  nos.forEach(n=>{if(seen[n])E(n,'題號重複');seen[n]=1});
+  for(let n=1;n<=mx;n++)if(!seen[n])E(n,'缺少這個題號');
+// 原因：題幹內的「1. 2. 3.」會被當成新題，後面整段題目併進前一題，切出的題數比答案表少卻不會有任何缺號警告。
+if(p.keyMax>mx)E(mx+1,'答案表有 '+p.keyMax+' 題，但只切出 '+mx+' 題：後面的題目可能被併進第 '+mx+' 題，請檢查');
+  const cnt={};p.questions.forEach(q=>{if(q.options.length)cnt[q.options.length]=(cnt[q.options.length]||0)+1});
+  const mode=+(Object.entries(cnt).sort((a,b)=>b[1]-a[1])[0]||[4])[0];
+  const have=new Set(p.have||[]);
+  const miss=(no,bl)=>bl.forEach(b=>{if(b.id&&!b.html&&!have.has(b.id))W(no,'圖片檔缺失：'+b.id.slice(0,16))});
+  p.questions.forEach(q=>{
+    if(!q.options.length)W(q.no,'選項無法自動切出，改以原始內容顯示、用字母按鈕作答');
+    else if(q.options.length!==mode)W(q.no,'選項數為 '+q.options.length+'，多數題為 '+mode);
+    if(!q.key)W(q.no,'缺少答案');
+    else if(q.options.length&&![...q.key].every(c=>q.options.some(o=>o.k===c)))E(q.no,'答案 '+q.key+' 不在選項內');
+    miss(q.no,q.blocks);
+  });
+  p.passages.forEach(x=>miss(x.from,x.blocks));
+  p.issues=is;return is;
+}
+
+function importBundle(b,name,paperId){
+  const pid=paperId||uid();
+  const imp=IMPORTERS.find(i=>i.detect(b));if(!imp)throw Error('找不到可用的格式。請選 MinerU 的 layout.json（或 zip），或貼上文字。');
+  const res=assemble(imp.blocks(b,pid),b.key);
+  if(!res.questions.length)throw Error('找不到題目。題號請用「1.」「1、」開頭。');
+  const p={id:pid,name,created:new Date().toISOString(),stage:1,graded:false,source:imp.id,keyMax:res.keyMax,have:Object.keys(b.images||{}),passages:res.passages,
+    questions:res.questions.map(q=>({...q,mine:'',st:'',sub:'',chap:'',cons:[],guess:false,cause:'',why:'',right:'',fix:'',optNotes:{}}))};
+  validate(p);return p;
+}
+/*PARSE_END*/
+
+/* ---------- storage: IndexedDB (state + image blobs) ---------- */
+const S={papers:[],points:{},tree:[],th:3,url:'',cf:'',cardMap:{},mediaMap:{},cur:null,view:'list'};
+const CAUSES=['概念不清','記憶缺漏','題意誤讀','選項陷阱','粗心','計算錯誤'];
+let PENDING=null;const U={},MEM={};
+
+// 原因：作答／檢討頁沒有 #msg，錯誤會被吞；錯誤另外顯示在固定提示條（點一下關閉），任何頁面與捲動位置都看得到。
+const msg=(t,isErr)=>{
+  const m=document.querySelector('#msg');
+  if(m){m.textContent=t;m.style.color=isErr?'var(--red)':'inherit';m.style.fontWeight=isErr?'700':'normal'}
+  let o=document.querySelector('#toast');
+  if(!t){if(o)o.remove();return}
+  if(m&&!isErr)return;
+  if(!o){o=document.createElement('div');o.id='toast';o.style.cssText='position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:10;padding:10px 12px;border-radius:8px;background:var(--card);border:1px solid var(--line);cursor:pointer';o.onclick=()=>o.remove();document.body.appendChild(o)}
+  o.textContent=t;o.style.color=isErr?'var(--red)':'var(--ink)';o.style.fontWeight=isErr?'700':'400';
+  clearTimeout(msg.tm);if(!isErr)msg.tm=setTimeout(()=>o.remove(),4000);
+};
+
+const reportDbErr=e=>{
+  console.error("IndexedDB error", e);
+  const isQuota=e&&(e.name==='QuotaExceededError'||e.code===22||(e.message&&/quota/i.test(e.message)));
+  msg(isQuota?'儲存失敗（瀏覽器儲存空間已滿）：請先回清單頁匯出備份，刪除舊考卷後再重新載入。':'本機資料庫儲存失敗：'+(e&&e.message||e),true);
+};
+
+const db=new Promise((res,rej)=>{try{const r=indexedDB.open('exam-review',1);r.onupgradeneeded=()=>{r.result.createObjectStore('kv');r.result.createObjectStore('assets')};r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)}catch(e){rej(e)}});
+db.catch(reportDbErr);
+
+const tx=(st,mode,fn)=>db.then(d=>new Promise((res,rej)=>{
+  const t=d.transaction(st,mode),r=fn(t.objectStore(st));
+  t.oncomplete=()=>res(r.result);
+  t.onerror=()=>rej(t.error);
+  // 原因：容量不足通常只在 commit 時觸發 abort；不補這行 Promise 永遠不結算，錯誤被吞。
+  t.onabort=()=>rej(t.error||new Error('交易被中止'));
+}));
+const aGet=id=>tx('assets','readonly',s=>s.get(id)),aSet=(id,b)=>tx('assets','readwrite',s=>s.put(b,id)).catch(reportDbErr);
+
+let LOADED=false,REV=0;
+// 原因：save() 每次整包覆蓋。(1)載入沒成功就存，會用空資料蓋掉舊資料；(2)另一個分頁已寫入較新版本時再存，會蓋掉對方的作答。兩者都拒絕並大聲報錯。
+const save=()=>{
+  if(!LOADED){msg('資料尚未成功載入，已拒絕儲存以免覆蓋舊資料，請重新整理',true);return Promise.resolve()}
+  return db.then(d=>new Promise((res,rej)=>{
+    const t=d.transaction('kv','readwrite'),s=t.objectStore('kv'),g=s.get('state');
+    let conflict=false,next=0;
+    g.onsuccess=()=>{
+      const cur=g.result;
+      if(cur&&(cur.rev||0)!==REV){conflict=true;t.abort();return}
+      next=REV+1;
+      s.put({rev:next,papers:S.papers,points:S.points,tree:S.tree,shuf:S.shuf,n1:S.n1,n2:S.n2,th:S.th,cf:S.cf,cardMap:S.cardMap,mediaMap:S.mediaMap},'state');
+    };
+    t.oncomplete=()=>{REV=next;res()}; // 原因：容量不足在 commit 才 abort；REV 若在 request 成功時就前進，失敗後每次存檔都會誤報「另一個分頁已更新」。
+    t.onabort=()=>{
+      if(conflict){msg('偵測到另一個分頁已更新資料，為避免覆蓋已停止儲存。請先回清單頁按「匯出備份」保留本頁內容，再關閉其他分頁並重新整理。',true);res()}
+      else rej(t.error||new Error('交易被中止'));
+    };
+  })).catch(reportDbErr);
+};
+
+function fix(){
+  // 原因：舊版把「沒作答」判成錯並存了下來，單靠補丁 A 清不掉；非手動標記、沒作答卻是錯的紀錄，一律還原成未判，並明確提示筆數。
+  let n=0;
+  S.papers.forEach(p=>{if(p.stage>2)p.stage=2;p.questions.forEach(q=>{q.sub=q.sub||'';q.chap=q.chap||'';q.cons=q.cons||[];q.guess=!!q.guess;if(!q.mine&&!q.manual&&q.st==='x'){q.st='';n++}})});
+  if(n)msg('已修正 '+n+' 題「沒作答卻被判錯」的紀錄，這些題不再計入統計',false);
+}
+async function load(){try{const v=await tx('kv','readonly',s=>s.get('state'));if(v){Object.assign(S,v);REV=v.rev||0;fix()}LOADED=true;try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}}catch(e){reportDbErr(e);}}
+async function loadAssets(p){
+  const ids=new Set();[...p.questions,...p.passages].forEach(x=>x.blocks.forEach(b=>{if(b.id)ids.add(b.id)}));
+  orph(p).forEach(id=>ids.add(id)); // 原因：未使用的圖也要先載入，補圖面板才有縮圖可看。
+  for(const id of ids){
+    if(U[id])continue;
+    const b=MEM[id]||await aGet(id).catch(()=>null);
+    if(b){MEM[id]=b;U[id]=URL.createObjectURL(b)}
+  }
+}
+
+/* ---------- helpers ---------- */
+const $=s=>document.querySelector(s);
+/* ---------- theme ---------- */
+// 原因：主題由 <html data-theme> 決定（與卡片軟體同一套寫法）；選擇存在 localStorage，存不進去要明說，不然使用者以為會記住。
+const THEME_KEY='exam-theme';
+const themeNow=()=>document.documentElement.getAttribute('data-theme')==='light'?'light':'dark';
+function setTheme(t,persist){
+  document.documentElement.setAttribute('data-theme',t);
+  if(persist){try{localStorage.setItem(THEME_KEY,t)}catch(e){msg('無法記住主題設定（瀏覽器禁止本機儲存），重新整理後會恢復',true)}}
+}
+const ICON={
+  sun:'<svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+  moon:'<svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>'
+};
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const P=()=>S.papers.find(p=>p.id===S.cur);
+const norm=s=>[...String(s).toUpperCase().replace(/\s/g,'')].sort().join('');
+const cid=(p,q)=>'exam:'+p.id+':q'+q.no;
+const qtext=q=>q.blocks.filter(b=>b.t==='text'||b.t==='code').map(b=>b.v).join('\n');
+const LET=p=>{const s=new Set();p.questions.forEach(q=>q.options.forEach(o=>s.add(o.k)));return s.size?[...s].sort():[...'ABCD']};
+const safe=h=>h.replace(/<(?!\/?(?:table|thead|tbody|tr|td|th)\b)[^>]*>/gi,'').replace(/<(table|thead|tbody|tr|td|th)\b([^>]*)>/gi,(m,t,a)=>'<'+t+(a.match(/(?:row|col)span="\d+"/g)||[]).map(x=>' '+x).join('')+'>');
+function blk(b,pre){
+  if(b.t==='text')return'<p class="stem">'+(pre||'')+esc(b.v)+'</p>';
+  if(b.t==='code')return'<pre>'+esc(b.v)+'</pre>';
+  if(U[b.id])return'<img class="fig" data-a="zoom" data-src="'+U[b.id]+'" src="'+U[b.id]+'" alt="">';
+  if(b.html)return'<div class="tbl">'+safe(b.html)+'</div>';
+  return'<p class="miss">圖片缺失：'+esc((b.id||'').slice(0,16))+'</p>';
+}
+function blks(a,pre){let u=pre||'';return a.map(b=>{const h=blk(b,u);if(b.t==='text')u='';return h}).join('')+u}
+const wr=(p,q)=>{const w=(p.issues||[]).filter(i=>i.no===q.no);return w.length?'<p class="wr">⚠ '+esc(w.map(i=>i.m).join('；'))+'</p>':''};
+
+/* ---------- stats and tags ---------- */
+const tnode=sub=>S.tree.find(s=>s.n===sub);
+const chapsOf=sub=>(tnode(sub)||{c:[]}).c.map(c=>c.n);
+const allCons=()=>[...new Set(S.tree.flatMap(s=>s.c.flatMap(c=>c.k)))];
+const homeOf=n=>{for(const s of S.tree)for(const c of s.c)if(c.k.includes(n))return{sub:s.n,chap:c.n};return{}};
+function ensure(sub,chap,con){
+  let s=tnode(sub);if(sub&&!s){s={n:sub,c:[]};S.tree.push(s)}
+  if(!s||!chap)return;
+  let c=s.c.find(x=>x.n===chap);if(!c){c={n:chap,k:[]};s.c.push(c)}
+  if(con&&!allCons().includes(con))c.k.push(con);
+}
+function setTag(p,i,f,v){
+  // 原因：原版會把後面「沒概念、值相同」的題全部連動代入，Q1 填完整份考卷就都被標成同一個章節，統計失真；改成每題只改自己。
+  const q=p.questions[i];
+  q[f]=v;if(f==='sub')q.chap='';
+  if(f==='sub')ensure(v);else ensure(q.sub,v);
+}
+const qidOf=(p,q)=>q.qid||cid(p,q);
+const twins=(p,q)=>{const id=qidOf(p,q),r=[];S.papers.forEach(x=>x.questions.forEach(y=>{if(y!==q&&qidOf(x,y)===id)r.push([x,y])}));return r};
+function syncEdit(p,q,f,v){
+  const tw=twins(p,q),oo=o=>o.o||o.k;
+  if(f.startsWith('eb:')){const j=+f.slice(3);q.blocks[j].v=v;tw.forEach(([x,y])=>{if(y.blocks[j])y.blocks[j].v=v})}
+  else if(f.startsWith('pb:')){
+    const j=+f.slice(3),ps=po(p,q),pk=ps.oid||p.id+':'+ps.id;ps.blocks[j].v=v;
+    S.papers.forEach(x=>x.passages.forEach(z=>{if(z!==ps&&(z.oid||x.id+':'+z.id)===pk&&z.blocks[j])z.blocks[j].v=v}));
+  }else if(f.startsWith('eo:')){
+    const o=q.options.find(z=>z.k===f.slice(3));o.v=v;
+    tw.forEach(([x,y])=>{const m=y.options.find(z=>oo(z)===oo(o));if(m)m.v=v});
+  }else if(f==='key'){
+    const ks=[...v.trim().toUpperCase()],orig=ks.map(k=>{const o=q.options.find(z=>z.k===k);return o?oo(o):k});
+    q.key=ks.sort().join('');
+    tw.forEach(([x,y])=>{y.key=orig.map(ol=>{const m=y.options.find(z=>oo(z)===ol);return m?m.k:ol}).sort().join('')});
+  }
+  new Set([p,...tw.map(a=>a[0])]).forEach(x=>{validate(x);if(f==='key'&&(x===p||x.graded))grade(x)});
+}
+const tagsOf=q=>JSON.stringify([q.sub,q.chap,q.cons]);
+function withSync(p,fn){
+  const b=p.questions.map(tagsOf);fn();
+  p.questions.forEach((q,i)=>{if(tagsOf(q)!==b[i])twins(p,q).forEach(([x,y])=>{y.sub=q.sub;y.chap=q.chap;y.cons=[...q.cons]})});
+}
+function renameTag(t,sub,old,nw){
+  nw=(nw||'').trim();if(!nw||nw===old)return;
+  const qs=S.papers.flatMap(p=>p.questions);
+  if(t==='s'){
+    qs.forEach(q=>{if(q.sub===old)q.sub=nw});
+    const a=tnode(old),b=tnode(nw);
+    if(!b)a.n=nw;
+    else{a.c.forEach(c=>{const d=b.c.find(x=>x.n===c.n);if(d)d.k.push(...c.k.filter(k=>!d.k.includes(k)));else b.c.push(c)});S.tree=S.tree.filter(x=>x!==a)}
+  }else if(t==='c'){
+    qs.forEach(q=>{if(q.sub===sub&&q.chap===old)q.chap=nw});
+    const s=tnode(sub),a=s.c.find(x=>x.n===old),b=s.c.find(x=>x.n===nw);
+    if(!b)a.n=nw;
+    else{b.k.push(...a.k.filter(k=>!b.k.includes(k)));s.c=s.c.filter(x=>x!==a)}
+  }else{
+    qs.forEach(q=>{if(q.cons.includes(old))q.cons=[...new Set(q.cons.map(k=>k===old?nw:k))]});
+    const had=allCons().includes(nw);
+    S.tree.forEach(s=>s.c.forEach(c=>{const i=c.k.indexOf(old);if(i<0)return;if(had)c.k.splice(i,1);else c.k[i]=nw}));
+    if(S.points[old]!=null){S.points[nw]=[S.points[nw],S.points[old]].filter(Boolean).join('\n');delete S.points[old]}
+  }
+}
+function groups(){
+  const m={};
+  [...S.papers].sort((a,b)=>a.created<b.created?-1:1).forEach(p=>p.questions.forEach(q=>{const k=q.qid||cid(p,q);(m[k]=m[k]||{id:k,all:[]}).all.push({p,q})}));
+  return Object.values(m).map(g=>{g.att=g.all.filter(x=>x.q.st);g.canon=g.all[0].q;g.first=g.att[0];g.last=g.att[g.att.length-1];return g}).filter(g=>g.att.length);
+}
+function agg(){
+  const a={s:{},c:{},k:{},u:0,cause:{}};
+  const add=(o,k,q)=>{const r=o[k]=o[k]||{n:0,w:0,g:0};r.n++;if(q.st==='x')r.w++;else if(q.guess)r.g++};
+  groups().forEach(g=>{
+    const f=g.first.q,t=g.canon;
+    if(!t.cons.length)a.u++;
+    if(t.sub)add(a.s,t.sub,f);
+    if(t.chap)add(a.c,t.sub+'\u0001'+t.chap,f);
+    t.cons.forEach(k=>add(a.k,k,f));
+    if(f.st==='x'){const c=f.cause||'未填';a.cause[c]=(a.cause[c]||0)+1}
+  });
+  return a;
+}
+const weak=g=>g.last.q.st==='x'||!!g.last.q.guess;
+const everWeak=g=>g.att.some(x=>x.q.st==='x'||x.q.guess);
+function pick(k){
+  const n1=S.n1??15,n2=S.n2??10,gs=groups().filter(g=>!k||g.canon.cons.includes(k));
+  const a=gs.filter(weak).sort((x,y)=>y.last.p.created.localeCompare(x.last.p.created)).slice(0,n1);
+  const rest=gs.filter(g=>everWeak(g)&&!a.includes(g));
+  for(let i=rest.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[rest[i],rest[j]]=[rest[j],rest[i]]}
+  const b=rest.slice(0,n2+Math.max(0,n1-a.length));
+  return[...a,...b].sort((x,y)=>{const u=x.all[0].p.created,v=y.all[0].p.created;return u===v?x.canon.no-y.canon.no:u<v?-1:1});
+}
+const compose=k=>{const picks=pick(k);return picks.length?build(picks,'錯題重做・'+(k||'全部')):null};
+const resit=p=>build(p.questions.map(q=>({id:q.qid||cid(p,q),last:{p,q},canon:q,all:[{p,q}],from:q.from})),'重做・'+p.name);
+function build(picks,label){
+  const d=new Date().toLocaleDateString('zh-TW',{month:'numeric',day:'numeric'});
+  const np={id:uid(),name:label+'・'+d,created:new Date().toISOString(),stage:1,graded:false,source:'compose',
+    have:[...new Set(S.papers.flatMap(p=>p.have||[]))],passages:[],questions:[]};
+  const pm={};
+  picks.forEach(g=>{
+    const{p,q}=g.last,t=g.canon,o=g.all[0];
+    const c=JSON.parse(JSON.stringify(q));
+    Object.assign(c,{no:np.questions.length+1,qid:g.id,sub:t.sub,chap:t.chap,cons:[...t.cons],mine:'',st:'',manual:false,guess:false,cause:'',why:'',right:'',fix:'',optNotes:{},from:g.from||(o.p.name+' 第 '+t.no+' 題')});
+    if(S.shuf!==false&&c.options.length>1&&!c.options.some(x=>/以上皆|以上均|皆是|皆非|皆正確|皆錯誤|皆不|上述|同上|選項|[(（][A-H][)）]/.test(x.v))){
+      const idx=c.options.map((_,i)=>i),old=c.options,m={};
+      for(let i=idx.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[idx[i],idx[j]]=[idx[j],idx[i]]}
+      c.options=idx.map((oi,ni)=>{m[old[oi].k]=old[ni].k;return{k:old[ni].k,v:old[oi].v,o:old[oi].o||old[oi].k}});
+      c.key=[...c.key].map(x=>m[x]||x).sort().join('');
+    }
+    const ps=po(p,q);
+    if(ps){
+      const key=p.id+':'+ps.id;
+      if(!pm[key]){pm[key]=JSON.parse(JSON.stringify(ps));pm[key].id='c'+np.passages.length+uid();pm[key].from=c.no;pm[key].oid=ps.oid||p.id+':'+ps.id;np.passages.push(pm[key])}
+      pm[key].to=c.no;c.pid=pm[key].id;
+    }else delete c.pid;
+    np.questions.push(c);
+  });
+  validate(np);return np;
+}
+const ids=bl=>bl.filter(b=>b.id).map(b=>b.id);
+const tg=(sub,chap,cons)=>[...(chap?[{axis:'location',name:chap,facet:sub||null}]:sub?[{axis:'location',name:sub,facet:null}]:[]),...cons.map(n=>({axis:'concept',name:n}))];
+const tblText=h=>(h.match(/<tr[^>]*>.*?<\/tr>/gis)||[]).map(r=>[...r.matchAll(/<t[dh][^>]*>(.*?)<\/t[dh]>/gis)].map(m=>m[1].replace(/<[^>]*>/g,'').trim()).join(' ｜ ')).join('\n');
+const mdBlocks=(bl,have)=>bl.map(b=>b.t==='text'?b.v:b.t==='code'?'```\n'+b.v+'\n```':(b.id&&have.has(b.id))?'![](exam-asset:'+b.id+')':b.html?tblText(b.html):'（圖片缺失）').join('\n\n');
+
+function buildCards(){
+  const now=new Date().toISOString(),cards=[],a=agg();
+  groups().forEach(g=>{
+    const hasWrong = g.att.some(x=>x.q.st==='x');
+    const hasGuess = g.att.some(x=>x.q.guess);
+    const hasNotes = g.att.some(x=>x.q.cause||x.q.why||x.q.right||x.q.fix||Object.values(x.q.optNotes||{}).some(Boolean));
+    if(!hasWrong && !hasGuess && !hasNotes) return;
+
+    const t=g.canon, o=g.all[0], nw=g.att.filter(x=>x.q.st==='x').length;
+    const p=o.p, ps=po(p,t);
+
+    // 原因：重做卷的選項會被打亂，optNotes 與 mine 用的是「當次顯示的字母」，卡片卻以原卷選項顯示；先轉回原始字母（o.o||o.k）再對回原卷選項，筆記與作答才不會貼錯選項。
+    const oo=o=>o.o||o.k, toOrig=(qq,ks)=>[...ks].map(k=>{const o=qq.options.find(z=>z.k===k);return o?oo(o):k});
+    let cause='', why='', right='', fix='';
+    const mergedOptNotes={};
+    for(const att of g.att){
+      if(att.q.cause) cause=att.q.cause;
+      if(att.q.why) why=att.q.why;
+      if(att.q.right) right=att.q.right;
+      if(att.q.fix) fix=att.q.fix;
+      Object.entries(att.q.optNotes||{}).forEach(([k,v])=>{if(v&&v.trim())mergedOptNotes[toOrig(att.q,k)[0]]=v.trim()});
+    }
+
+    const opts=t.options.map(x=>x.k+'. '+x.v).join('\n');
+    const notes=t.options.filter(x=>mergedOptNotes[oo(x)]).map(x=>x.k+'：'+mergedOptNotes[oo(x)]).join('\n');
+    const front=qtext(t)+(opts?'\n'+opts:''),ref=o.p.name+' 第 '+t.no+' 題';
+    const lastQ=g.last.q;
+    const mineC=toOrig(lastQ,lastQ.mine||'').map(ol=>{const o=t.options.find(z=>oo(z)===ol);return o?o.k:ol}).sort().join('');
+    const back=['正解：'+(t.key||'?')+'（最新作答：'+(mineC||'未答')+'）',
+      '作答 '+g.att.length+' 次、錯 '+nw+' 次'+(g.att.some(x=>x.q.guess)?'（含猜對紀錄）':''),
+      cause&&'錯因：'+cause,
+      why&&'我為什麼選錯：'+why,
+      right&&'正確的理由：'+right,
+      fix&&'下次判斷：'+fix,
+      notes&&'選項筆記：\n'+notes
+    ].filter(Boolean).join('\n');
+
+    const ctx=ps?ps.blocks.filter(b=>b.t==='text').map(b=>b.v).join('\n'):'';
+    const have=new Set([...(p.have||[]),...Object.keys(MEM)]);
+    const body=(ps?'**題組**\n\n'+mdBlocks(ps.blocks,have)+'\n\n':'')+'**題目**\n\n'+mdBlocks(t.blocks,have)+(t.options.length?'\n\n'+t.options.map(x=>'- '+x.k+'. '+x.v).join('\n'):'')+'\n\n**解析**\n\n'+back.split('\n').join('\n\n');
+
+    cards.push({
+      id:g.id,
+      type:'wrong-question',
+      card_type:'question',
+      curation_status:'inbox',
+      title:ref,
+      front,
+      back,
+      context:ctx,
+      body,
+      assets:[...ids(t.blocks),...(ps?ids(ps.blocks):[])],
+      tags:tg(t.sub,t.chap,t.cons),
+      sources:[ref],
+      created_at:o.p.created,
+      updated_at:now
+    });
+  });
+
+  Object.keys(a.k).forEach(t=>{
+    if(!S.points[t])return;
+    const h=homeOf(t);
+    cards.push({
+      id:'exam:point:'+t,
+      type:'key-point',
+      card_type:'concept',
+      curation_status:'inbox',
+      title:t+'：常錯重點',
+      front:t+'常錯在哪？',
+      back:S.points[t],
+      context:'',
+      body:S.points[t],
+      assets:[],
+      tags:tg(h.sub,h.chap,[t]),
+      sources:['錯題彙整'],
+      created_at:now,
+      updated_at:now
+    });
+  });
+  return cards;
+}
+
+const tn=t=>(t.facet?t.facet+'/':'')+t.name;
+// 原因：考卷名、概念名含逗號或「: 」時，未加引號的 YAML 會被拆成多項或解析失敗；JSON 字串是合法的 YAML 雙引號字串。
+const toMd=c=>c.map(x=>'---\nid: '+JSON.stringify(x.id)+'\ncard_type: '+x.card_type+'\ntitle: '+JSON.stringify(x.title)+'\ntags: ['+x.tags.map(t=>JSON.stringify(tn(t))).join(', ')+']\nsources: ['+x.sources.map(s=>JSON.stringify(s)).join(', ')+']\n---\n\n'+x.body.replace(/exam-asset:([^)\s]+)/g,'images/$1')+'\n').join('\n');
+function show(t){
+  $('#out').value=t;$('#out').hidden=false; // 原因：輸出框預設隱藏，Markdown／JSON 匯出時才顯示。
+  try{navigator.clipboard.writeText(t).then(()=>msg('已複製到剪貼簿'),()=>msg('請手動全選複製'))}catch(e){msg('請手動全選複製')}
+}
+const getAsset=async id=>MEM[id]||await aGet(id).catch(()=>null);
+
+/* ---- card app bridge ---- */
+let EXT={subs:[],chaps:{},cons:[]};
+const cn=()=>{try{return window.opener&&window.opener.__cardnoteApi||null}catch(e){return null}};
+const tagList=async api=>{const r=await api.listTags();return Array.isArray(r)?r:(r.tags||r.items||[])};
+const isLoc=t=>t.axis==='location'||t.axis==='domain';
+const same=(a,b)=>String(a).trim().toLowerCase()===String(b).trim().toLowerCase();
+
+async function loadExt(){
+  const api=cn();if(!api)return;
+  try{
+    const tags=await tagList(api),roots=tags.filter(t=>isLoc(t)&&!t.parent_id);
+    EXT={subs:roots.map(t=>t.name),chaps:{},cons:tags.filter(t=>t.axis==='concept').map(t=>t.name)};
+    roots.forEach(r=>{EXT.chaps[r.name]=tags.filter(t=>isLoc(t)&&t.parent_id===r.id).map(t=>t.name)});
+    render();
+  }catch(e){}
+}
+
+async function pushToCardnote(cards,ctx){
+  const api=cn();if(!api)throw Error('請從卡片軟體左側欄開啟本頁（需與卡片軟體同源）');
+  const rep=[],out={c:0,u:0,s:0,e:0},F=window.opener.File;
+  const tags=await tagList(api);
+  const mkLoc=async(name,pid)=>{
+    let t=tags.find(x=>isLoc(x)&&(x.parent_id||null)===(pid||null)&&same(x.name,name));
+    if(!t){t=await api.createTag(name,'location',pid||null);tags.push(t);rep.push('新建'+(pid?'抽屜：':'櫃子：')+name)}
+    return t;
+  };
+  const conIds={};
+  const mkCon=async name=>{
+    if(conIds[name])return conIds[name];
+    let t=tags.find(x=>x.axis==='concept'&&(same(x.name,name)||(x.aliases||[]).some(a=>same(a,name))));
+    if(!t){
+      const r=await api.resolveTag(name,'concept');
+      if(r.tag&&(r.status==='exact_tag'||r.status==='exact_alias'))t=r.tag;
+      else if(r.status==='ambiguous'&&r.candidates&&r.candidates[0])t=r.candidates[0];
+      else{
+        t=await api.createTag(name,'concept',null);tags.push(t); // 原因：維度輸入框已移除，不再傳這個參數，免得舊值在看不見的地方影響新標籤。
+        rep.push('新建概念：'+name+(r.candidates&&r.candidates.length?'（相似的既有標籤：'+r.candidates.map(c=>c.name).join('、')+'，可到卡片軟體合併）':''));
+      }
+    }
+    return conIds[name]=t.id;
+  };
+  const up=async id=>{
+    if(S.mediaMap[id])return S.mediaMap[id];
+    const b=await ctx.getAsset(id);if(!b)return null;
+    const m=await api.uploadMedia(new F([await b.arrayBuffer()],id,{type:b.type||'image/jpeg'}));
+    return S.mediaMap[id]=m.id;
+  };
+
+  for(const c of cards){
+    try{
+      let body=c.body;
+      for(const id of new Set([...body.matchAll(/exam-asset:([^)\s]+)/g)].map(m=>m[1]))){
+        const mid=await up(id);
+        if(!mid)throw Error('圖片 '+id.slice(-24)+' 本機找不到，這張卡未寫入'); // 原因：原本把壞掉的內文當成功寫進卡片；此時還沒有任何遠端寫入，改成失敗可安全重試。
+body=body.split('![](exam-asset:'+id+')').join('![](media:'+mid+')');
+      }
+      const tagIds=[];
+      for(const t of c.tags){
+        if(t.axis==='location'){const root=t.facet?await mkLoc(t.facet,null):null;tagIds.push((await mkLoc(t.name,root&&root.id)).id)}
+        else tagIds.push(await mkCon(t.name));
+      }
+      const rec=S.cardMap[c.id];
+      // 原因：getCard 任何錯誤都當成「卡片不存在」，斷線時會重複建卡；只有明確的 404 才視為不存在，其餘算這張失敗。（假設錯誤物件有 status 或 message 含 404，請依你的 API 實際回傳調整）
+      let cur=null;if(rec&&rec.id){try{cur=await api.getCard(rec.id)}catch(e){if(e&&(e.status===404||/404|not.?found/i.test(e.message||'')))cur=null;else throw e}}
+      let id;
+      if(cur){
+        const titleModified = rec.title !== undefined && cur.title !== rec.title;
+        const bodyModified = rec.body !== undefined && cur.body !== rec.body;
+        if(titleModified || bodyModified){
+          out.s++;
+          rep.push('略過（卡片內文已在卡片軟體被修改）：'+c.title);
+          continue;
+        }
+        const u=await api.patchCard(cur.id,{title:c.title,body,sources:c.sources},cur.updated_at);
+        id=u.id;const have=new Set((u.tags||cur.tags||[]).map(t=>t.id));
+        for(const t of tagIds)if(!have.has(t))await api.assignTag(id,t);
+        out.u++;
+        S.cardMap[c.id]={id,ua:u.updated_at,title:c.title,body};
+      }else{
+        const d=await api.createCard(tagIds);
+        const u=await api.patchCard(d.id,{title:c.title,body,card_type:c.card_type,curation_status:c.curation_status,sources:c.sources},d.updated_at);
+        id=u.id;out.c++;
+        S.cardMap[c.id]={id,ua:u.updated_at,title:c.title,body};
+      }
+    await save(); // 原因：cardMap 原本只在迴圈結束後存，中途關頁會丟紀錄，下次同步就重複建卡。
+    }catch(e){out.e++;rep.push('失敗：'+c.title+'：'+(e&&e.message||e))}
+  }
+  save();loadExt();
+  if(window.opener){
+    try{window.opener.dispatchEvent(new CustomEvent("cardnote:refresh"))}catch(e){}
+    try{window.opener.postMessage({type:"CARDNOTE_EXAM_SYNC"},"*")}catch(e){}
+  }
+  const o=$('#out');if(o&&rep.length){o.value=rep.join('\n');o.hidden=false} // 原因：同步記錄有內容才顯示，沒內容就不要冒出空框。
+  msg('完成：新增 '+out.c+'、更新 '+out.u+'、略過 '+out.s+(out.e?'、失敗 '+out.e:'')+(rep.length?'（詳見下方記錄）':''), out.e>0);
+}
+
+const SINKS={
+  markdown:{label:'Markdown',run:async c=>show(toMd(c))},
+  json:{label:'JSON',run:async c=>show(JSON.stringify({schema:'exam-review.cards/v3',cards:c},null,2))},
+  cardnote:{label:'寫入卡片軟體',run:(c,ctx)=>pushToCardnote(c,ctx)}
+};
+async function sink(s){
+  const c=buildCards();msg('');
+  try{
+  await SINKS[s].run(c,{getAsset});
+  const n=new Set(c.flatMap(x=>x.assets)).size;
+  if(s!=='cardnote'&&n)msg('文字匯出不含圖片：這批卡片引用 '+n+' 張圖，內文只留下 images/ 連結。要帶圖請用「寫入卡片軟體」。',true);
+}catch(e){msg('失敗：'+e.message, true)}
+}
+
+/* ---------- import UI (Batch folder & ZIP support) ---------- */
+async function collect(list){
+  const items=[];
+  for(const f of list){
+    if(/\.zip$/i.test(f.name)){
+      if(!window.JSZip)throw Error('JSZip 載入失敗，請改選解壓後的檔案');
+      const z=await JSZip.loadAsync(f);
+      const zipPkg=f.name.replace(/\.zip$/i,'');
+      for(const e of Object.values(z.files)){
+        if(!e.dir)items.push({name:e.name.split('/').pop(),relPath:e.name,blob:await e.async('blob'),pkg:zipPkg});
+      }
+    }else{
+      const p=f.webkitRelativePath||f.name;
+      items.push({name:p.split('/').pop(),relPath:p,blob:f,pkg:''});
+    }
+  }
+
+  // 辨識所有題卷錨點（layout.json 或非答案之 markdown/txt）
+  const anchors=[];
+  for(let i=0;i<items.length;i++){
+    const it=items[i];
+    if(it.name.endsWith('.json')){
+      try{
+        const j=JSON.parse(await it.blob.text());
+        if(j&&j.pdf_info)anchors.push({type:'json',json:j,item:it});
+      }catch(e){}
+    // 原因：母資料夾裡的 README.md 會被當成考卷錨點，且 ancDir 前綴會吃掉全部子資料夾的檔案。
+    }else if(/\.(md|txt)$/i.test(it.name)&&!/答案|ans|key|^readme/i.test(it.name)){
+      anchors.push({type:'text',item:it});
+    }
+  }
+
+  // 原因：設計是「一個資料夾＝一份考卷」。layout.json 與 full.md 同在一個資料夾時會匯入兩份；每個資料夾只留一個錨點，優先 layout.json。
+  const dirOf=a=>a.item.pkg+'|'+a.item.relPath.slice(0,a.item.relPath.lastIndexOf('/')+1);
+  const rank=a=>a.type==='json'?(/^layout\.json$/i.test(a.item.name)?0:1):2;
+  const best={};
+  anchors.forEach(a=>{const k=dirOf(a);if(!best[k]||rank(a)<rank(best[k]))best[k]=a});
+  anchors.splice(0,anchors.length,...Object.values(best));
+  if(!anchors.length){
+    // 回退至傳統純文字處理
+    const b={name:items[0]?items[0].name.replace(/\.\w+$/,''):'未命名考卷',images:{},text:null,json:null,key:''};
+    for(const it of items){
+      if(/\.(jpe?g|png|gif|webp|svg|bmp)$/i.test(it.name))b.images[it.name]=it.blob;
+      else if(/\.(md|txt)$/i.test(it.name)){
+        const tx=await it.blob.text();
+        if(/答案|ans|key/i.test(it.name))b.key=(b.key?b.key+'\n':'')+tx;
+        else if(!b.text||tx.length>b.text.length)b.text=tx;
+      }
+    }
+    return [b];
+  }
+
+  const bundles=[];
+  for(const anc of anchors){
+    const it=anc.item;
+    const ancDir=it.relPath.includes('/') ? it.relPath.slice(0,it.relPath.lastIndexOf('/')+1) : '';
+    const paperName=ancDir ? ancDir.replace(/\/$/,'').split('/').pop() : it.name.replace(/\.\w+$/,'');
+    const b={name:it.pkg||paperName,images:{},text:null,json:anc.type==='json'?anc.json:null,key:''};
+    if(anc.type==='text')b.text=await it.blob.text();
+
+    for(const file of items){
+      const matchPkg = anc.item.pkg ? file.pkg === anc.item.pkg : !file.pkg;
+      // 原因：zip 根目錄放 layout.json、圖片在 images/ 時 ancDir 為空，舊寫法只收不含 "/" 的檔案，images/ 底下全被排除。
+      const matchDir = !ancDir || file.relPath.startsWith(ancDir);
+      if(!matchPkg || !matchDir) continue;
+
+      if(/\.(jpe?g|png|gif|webp|svg|bmp)$/i.test(file.name)){
+        b.images[file.name]=file.blob;
+      }else if(/\.(md|txt)$/i.test(file.name)&&/答案|ans|key/i.test(file.name)){
+        const ktx=await file.blob.text();
+        b.key=(b.key?b.key+'\n':'')+ktx;
+      }
+    }
+    bundles.push(b);
+  }
+  return bundles;
+}
+
+async function create(){
+  const bundles = Array.isArray(PENDING) ? PENDING : PENDING ? [PENDING] : [{name:$('#nm').value.trim()||'未命名考卷',images:{},text:$('#pt').value.trim()||null,json:null,key:$('#kt').value.trim()}];
+  if(!bundles.length)return msg('沒有可匯入的試卷內容', true);
+  const nm=$('#nm').value.trim(),kt=$('#kt').value.trim();
+  // 原因：(1)一份失敗不該中止整批，成功的要照樣存檔並顯示，失敗的逐份大聲列出；(2)不再改動 PENDING（圖片鍵改存在副本），重試才不會疊上第二層前綴；(3)先確認解析成功再寫圖，並確認圖片真的寫入成功，失敗就不加入該份考卷。
+  const made=[],failed=[];
+  for(const src of bundles){
+    const name=(bundles.length===1&&nm)||src.name||'未命名考卷';
+    const key=[...new Set([src.key,bundles.length===1?kt:''].filter(Boolean))].join('\n');
+    const pid=uid(),scoped={};
+    for(const raw in src.images)scoped[pid+'__'+raw]=src.images[raw];
+    try{
+      const p=importBundle({...src,images:scoped,key},name,pid);
+      await Promise.all(Object.entries(scoped).map(([id,blob])=>tx('assets','readwrite',s=>s.put(blob,id)).then(()=>{MEM[id]=blob})));
+      made.push(p);
+    }catch(e){failed.push('「'+name+'」：'+(e&&e.message||e))}
+  }
+  if(!made.length)return msg('匯入失敗（共 '+failed.length+' 份）：'+failed.join('；'),true);
+  S.papers.unshift(...made);
+  const one=made.length===1&&!failed.length;
+  S.cur=one?made[0].id:null;S.view=one?'paper':'list';PENDING=null;
+  if(one)await loadAssets(made[0]);
+  const r0=REV;await save();render();scrollTo(0,0);
+if(REV===r0)return; // 原因：存檔失敗時 save() 已顯示原因，這裡不能再蓋上「成功匯入」。
+  msg('成功匯入 '+made.length+' 份考卷'+(failed.length?'；失敗 '+failed.length+' 份：'+failed.join('；'):''),failed.length>0);
+}
+
+/* ---------- backup & restore ---------- */
+let RS=null;
+async function backup(){
+  // 原因：原寫法 JSZip 沒載入就直接 return、找不到圖片就跳過，使用者以為備份完整；改成缺什麼就說什麼。
+  if(!window.JSZip)return msg('JSZip 載入失敗，無法備份。請確認網路連線與檔頭的 script 網址。',true);
+  try{
+    const z=new JSZip(),lost=[];
+    z.file('exam.json',JSON.stringify({v:1,papers:S.papers,points:S.points,tree:S.tree,th:S.th,n1:S.n1,n2:S.n2,shuf:S.shuf,cf:S.cf,cardMap:S.cardMap,mediaMap:S.mediaMap}));
+    for(const id of new Set(S.papers.flatMap(p=>p.have||[]))){const b=await getAsset(id);if(b)z.file('images/'+id,b);else lost.push(id)}
+    const blob=await z.generateAsync({type:'blob'}),a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);a.download='exam-review-backup-'+new Date().toISOString().slice(0,10)+'.zip';
+    document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+    msg(lost.length?'備份已下載，但有 '+lost.length+' 張圖片本機找不到、未包含（例：'+lost.slice(0,3).join('、')+'）':'備份已下載（'+S.papers.length+' 份考卷）',lost.length>0);
+  }catch(e){msg('備份失敗：'+(e&&e.message||e),true)}
+}
+async function restore(file){
+  const z=await JSZip.loadAsync(file),f=z.file('exam.json');
+  if(!f)throw Error('不是考卷備份檔（缺少 exam.json）');
+  const d=JSON.parse(await f.async('string'));
+  // 原因：原寫法先覆蓋 state 再寫圖且不等待；中途失敗就變成「資料換了、圖片缺了」。改成圖片全部寫入成功後才覆蓋，任何一步失敗都不動目前資料。
+  const imgs=[];
+  for(const e of Object.values(z.files)){
+    if(e.dir||!e.name.startsWith('images/'))continue;
+    imgs.push([e.name.slice(7),await e.async('blob')]);
+  }
+  for(const [id,b] of imgs){await tx('assets','readwrite',s=>s.put(b,id));MEM[id]=b}
+  Object.assign(S,{papers:d.papers||[],points:d.points||{},tree:d.tree||[],th:d.th||3,n1:d.n1,n2:d.n2,shuf:d.shuf,cf:d.cf||'',cardMap:d.cardMap||{},mediaMap:d.mediaMap||{},cur:null,view:'list'});
+  fix();const r0=REV;await save();
+if(REV===r0)throw Error('還原內容只在畫面上，沒有存進本機資料庫（原因見上一則錯誤），重新整理會恢復成舊資料');
+}
+
+/* ---------- views ---------- */
+const rb=(t,sub,o)=>'<button class="ghost" data-a="ren" data-t="'+t+'" data-sub="'+esc(sub)+'" data-o="'+esc(o)+'">✎</button>';
+const rnE=(t,sub,o)=>S.ren&&S.ren.t===t&&S.ren.sub===sub&&S.ren.o===o?'<div class="mk"><input id="rn" value="'+esc(o)+'"><button class="pri" data-a="rok">確定</button><button data-a="rcx">取消</button></div><small>改成已存在的名稱就會合併</small>':'';
+const renOpen=(sub,ch)=>!!S.ren&&((S.ren.t==='c'&&S.ren.sub===sub&&S.ren.o===ch.n)||(S.ren.t==='k'&&ch.k.includes(S.ren.o)));
+const dl=(id,a)=>'<datalist id="'+id+'">'+[...new Set(a)].filter(Boolean).map(x=>'<option value="'+esc(x)+'">').join('')+'</datalist>';
+const stepper=n=>'<nav>'+['作答','檢討','彙整'].map((t,i)=>'<button data-a="st" data-n="'+(i+1)+'" class="'+(n===i+1?'on':'')+'">'+(i+1)+' '+t+'</button>').join('')+'</nav>';
+function vList(){
+  return'<header><h1>考卷複習</h1><div class="mk"><button data-a="ana">分析</button><button class="pri" data-a="imp">匯入考卷</button></div></header>'+
+  (S.papers.length?S.papers.map(p=>{
+    const w=p.questions.filter(q=>q.st==='x').length;
+    return'<div class="row" data-a="open" data-id="'+p.id+'"><b>'+esc(p.name)+'</b><span>'+p.questions.length+' 題・'+['','作答中','檢討中'][p.stage]+(p.stage>1?'・錯 '+w:'')+'</span><button class="ghost" data-a="redo" data-id="'+p.id+'">再做一次</button><button class="ghost" data-a="del" data-id="'+p.id+'">'+(S.delc===p.id?'再按一次確認刪除':'刪除')+'</button></div>';
+  }).join('')+'<p><button data-a="sum">錯題彙整與匯出</button></p>':'<p class="empty">還沒有考卷。先匯入題目與答案，就能開始作答。</p>')+'<div class="mk"><button data-a="bk">匯出備份（zip）</button><label class="btn">選擇備份檔還原<input type="file" accept=".zip" data-restore hidden></label></div>'+(RS?'<p>已選：'+esc(RS.name)+' <button class="pri" data-a="rsok">確認覆蓋目前資料並還原</button></p><span id="msg"></span>':'<span id="msg"></span>');
+}
+
+const vImport=()=>'<header><h2>匯入考卷</h2><button data-a="home">返回</button></header>'+
+'<label>考卷名稱（批次匯入時由各子資料夾自動命名）<input id="nm" placeholder="單份留空則用檔名"></label>'+
+'<label>檔案：選取母資料夾（自動掃描子資料夾）、MinerU 的 zip，或 layout.json 加圖片，或文字／Markdown</label>'+
+'<input type="file" multiple data-pick accept=".zip,.json,.md,.txt,image/*"> <label class="btn">選整個母資料夾（支援批次）<input type="file" webkitdirectory data-pick hidden></label>'+
+'<p class="hint" id="sel">尚未選擇檔案</p>'+
+'<label>或貼上單份純文字</label><textarea id="pt" rows="6" placeholder="1. 題目 (A) … (B) … (C) … (D) …"></textarea>'+
+'<label>答案（選填；檔案內已含答案表時會自動讀取）</label><textarea id="kt" rows="2" placeholder="1.A 2.C 3.B 或 ACB"></textarea>'+
+'<button class="pri" data-a="create">建立並開始作答</button> <span id="msg"></span>';
+
+const iss=p=>{
+  const a=p.issues||[];if(!a.length)return'<p class="hint">自動檢查：沒有發現問題。</p>';
+  const e=a.filter(i=>i.lv==='e').length;
+  return'<details><summary>自動檢查：'+e+' 個錯誤、'+(a.length-e)+' 個提醒</summary>'+a.map(i=>'<div>'+(i.lv==='e'?'✗':'⚠')+' 第 '+i.no+' 題：'+esc(i.m)+'</div>').join('')+'<label class="btn">補匯入圖片<input type="file" multiple accept="image/*" data-supp hidden></label></details>';
+};
+// 原因：MinerU 的圖片檔名是雜湊值，人無法知道哪張該放哪題；列出「檔案在、但沒有任何題目使用」的圖片（排除表格 HTML 內嵌的），讓人看縮圖後指定題號。
+const orph=p=>{
+  if(p.source==='compose')return[];
+  const used=new Set(),html=[];
+  [...p.questions,...p.passages].forEach(x=>x.blocks.forEach(b=>{if(b.id)used.add(b.id);if(b.html)html.push(b.html)}));
+  const src=html.join(''),raw=id=>id.includes('__')?id.slice(id.indexOf('__')+2):id;
+  return(p.have||[]).filter(id=>!used.has(id)&&!src.includes(raw(id)));
+};
+const orphUI=p=>{
+  const o=orph(p);if(!o.length)return'';
+  return'<details open><summary>未被使用的圖片 '+o.length+' 張（檔案在，但沒有放進任何題目）</summary>'+o.map(id=>'<div class="tg">'+(U[id]?'<img class="fig" data-a="zoom" data-src="'+U[id]+'" src="'+U[id]+'" alt="">':'<p class="miss">圖片讀取失敗：'+esc(id.slice(-24))+'</p>')+'<div class="mk">加到第 <input class="num" type="number" min="1" max="'+p.questions.length+'"> 題 <button data-a="useorph" data-id="'+esc(id)+'">加入</button></div></div>').join('')+'</details>';
+};
+const ta=(f,i,v,ph)=>'<textarea data-f="'+f+'" data-i="'+i+'" placeholder="'+ph+'">'+esc(v)+'</textarea>';
+const ref=q=>q.from?'<small>'+esc(q.from)+'</small>':'';
+const eb=i=>'<button class="ghost" data-a="edit" data-i="'+i+'">✎ 編輯</button>';
+function editPanel(p,q,i,k){
+  const ps=po(p,q),first=ps&&(!p.questions[i-1]||p.questions[i-1].pid!==q.pid);
+  const et=(f,v,l)=>'<small>'+l+'</small><textarea data-f="'+f+'" data-i="'+i+'">'+esc(v)+'</textarea>';
+  return'<div class="ed">'+(first?ps.blocks.map((b,j)=>b.t==='text'||b.t==='code'?et('pb:'+j,b.v,'題組文字'):'').join(''):'')+
+  q.blocks.map((b,j)=>b.t==='text'||b.t==='code'?et('eb:'+j,b.v,'題幹'):'').join('')+
+  q.options.map(o=>'<small>選項 '+o.k+'</small><input data-f="eo:'+o.k+'" data-i="'+i+'" value="'+esc(o.v)+'">').join('')+
+  (k?'<small>正解（字母）</small><input data-f="key" data-i="'+i+'" value="'+esc(q.key)+'">':'')+
+  // 原因：MinerU 漏切的圖沒有位址可對，改成直接把截圖或相簿圖接在這一題後面（接在最後；選項整張被漏掉時，可截圖整個選項區）。
+  '<small>補圖片（接在題目最後）</small><input type="file" accept="image/*" multiple data-addimg data-i="'+i+'">'+
+  q.blocks.map((b,j)=>b.u?'<button class="ghost" data-a="rmimg" data-i="'+i+'" data-j="'+j+'">✕ 移除補入的圖片 '+(j+1)+'</button>':'').join('')+'</div>';
+}
+const tagBox=(q,i)=>'<div class="tg"><input list="subs" data-f="sub" data-i="'+i+'" value="'+esc(q.sub)+'" placeholder="科目（只用來分類）">'+
+  '<input list="ch'+i+'" data-f="chap" data-i="'+i+'" value="'+esc(q.chap)+'" placeholder="章節">'+dl('ch'+i,[...chapsOf(q.sub),...(EXT.chaps[q.sub]||[])])+
+  (q.cons.length?'<div class="mk">'+q.cons.map(k=>'<button class="chip" data-a="rmcon" data-i="'+i+'" data-k="'+esc(k)+'">'+esc(k)+' ✕</button>').join('')+'</div>':'')+
+  '<input list="cons" data-f="con" data-i="'+i+'" value="" '+(q.chap?'':'disabled ')+'placeholder="'+(q.chap?'＋概念（知識點），Enter 加入':'先選章節，才能加概念')+'"></div>';
+
+function rev(p,q,i){
+  const ps=po(p,q),w=q.st==='x',hasAnyNotes=q.cause||q.why||q.right||q.fix||Object.values(q.optNotes||{}).some(Boolean);
+  const showDirectly=w||q.guess;
+  const notesFields='<input list="causes" data-f="cause" data-i="'+i+'" value="'+esc(q.cause)+'" placeholder="錯因（可選或自填）">'+
+    ta('why',i,q.why,'我為什麼會選這個？')+ta('right',i,q.right,'正確的理由（題目哪裡該注意、選項為何對或錯）')+ta('fix',i,q.fix,'一句話：下次怎麼判斷')+
+    (q.options.length?'<details'+(Object.values(q.optNotes||{}).some(Boolean)?' open':'')+'><summary>選項筆記（選填）</summary>'+q.options.map(o=>'<input data-f="o:'+o.k+'" data-i="'+i+'" value="'+esc(q.optNotes[o.k]||'')+'" placeholder="選項 '+o.k+' 為什麼對／錯">').join('')+'</details>':'');
+
+  return'<article class="'+(w?'ng':'')+'">'+(ps?'<details><summary>題組文章</summary>'+blks(ps.blocks)+'</details>':'')+ref(q)+blks(q.blocks,'<b>'+q.no+'.</b> ')+wr(p,q)+
+  q.options.map(o=>'<div class="opt '+(q.key.includes(o.k)?'k':q.mine.includes(o.k)?'m':'')+'"><b>'+o.k+'</b>'+esc(o.v)+'</div>').join('')+
+  '<div class="mk"><span>我的 <b>'+esc(q.mine||'—')+'</b> 正解 <b>'+esc(q.key||'無')+'</b></span>'+
+  '<button class="o '+(q.st==='o'?'on':'')+'" data-a="mark" data-i="'+i+'" data-v="o">對</button>'+
+  '<button class="x '+(w?'on':'')+'" data-a="mark" data-i="'+i+'" data-v="x">錯</button>'+
+  '<label class="ck"><input type="checkbox" data-f="guess" data-i="'+i+'"'+(q.guess?' checked':'')+'>猜的</label>'+eb(i)+'</div>'+tagBox(q,i)+
+  (showDirectly ? notesFields : '<details'+(hasAnyNotes?' open':'')+'><summary>＋加入學習／訂正筆記（選填）</summary>'+notesFields+'</details>')+
+  (S.edit===p.id+':'+i?editPanel(p,q,i,1):'')+'</article>';
+}
+
+function vPaper(){
+  const p=P(),qs=p.questions,L=LET(p);
+  const h='<header><h2>'+esc(p.name)+'</h2><button data-a="home">返回</button></header>'+stepper(p.stage)+iss(p)+orphUI(p);
+  if(p.stage===1)return h+'<p class="hint">正解已隱藏。憑記憶作答，完成後按「對答案」進入檢討。</p>'+qs.map((q,i)=>{
+    const ps=po(p,q),first=ps&&(!qs[i-1]||qs[i-1].pid!==q.pid);
+    return(first?'<article class="ps"><small>題組：第 '+ps.from+'–'+ps.to+' 題</small>'+blks(ps.blocks)+'</article>':'')+
+    '<article>'+ref(q)+blks(q.blocks,'<b>'+q.no+'.</b> ')+wr(p,q)+
+    (q.options.length?q.options.map(o=>'<button class="opt '+(q.mine.includes(o.k)?'sel':'')+'" data-a="pick" data-i="'+i+'" data-k="'+o.k+'"><b>'+o.k+'</b>'+esc(o.v)+'</button>').join(''):
+    '<div class="mk">'+L.map(k=>'<button class="opt lt '+(q.mine.includes(k)?'sel':'')+'" data-a="pick" data-i="'+i+'" data-k="'+k+'"><b>'+k+'</b></button>').join('')+'</div>')+
+    eb(i)+(S.edit===p.id+':'+i?editPanel(p,q,i,0):'')+'</article>';
+  }).join('')+'<button class="pri" data-a="st" data-n="2">對答案</button>';
+  const c=s=>qs.filter(q=>q.st===s).length,fl=S.filt||'x',nx=c('x'),nu=qs.filter(q=>!q.cons.length).length;
+  const list=qs.map((q,i)=>[q,i]).filter(([q])=>fl==='all'||(fl==='x'?q.st==='x':!q.cons.length));
+  return h+dl('subs',[...S.tree.map(s=>s.n),...EXT.subs])+dl('cons',[...allCons(),...EXT.cons])+dl('causes',CAUSES)+
+  // 原因：沒作答的題不計入統計，要明說，免得又被當成「全對」或「全錯」而沒發現。
+  (qs.some(q=>!q.mine&&!q.st)?'<p class="wr">有 '+qs.filter(q=>!q.mine&&!q.st).length+' 題沒作答，不會計入統計；要算錯請手動按「錯」。</p>':'')+
+  '<p>對 '+c('o')+'・錯 '+nx+'・未判 '+c('')+'</p><div class="mk">'+[['x','錯題 '+nx],['all','全部 '+qs.length],['u','未標概念 '+nu]].map(([v,t])=>'<button class="'+(fl===v?'on':'')+'" data-a="filt" data-v="'+v+'">'+t+'</button>').join('')+'</div>'+
+  '<p class="hint">每一題都要標單元／概念（含答對的），彙整才算得出錯率。每題各自標記，不會連動到其他題。 <button class="ghost" data-a="cleartags">'+(S.delc==='t'+p.id?'再按一次確認清除':'清除本卷所有標籤')+'</button></p>'+
+  (list.length?list.map(([q,i])=>rev(p,q,i)).join(''):'<p class="empty">這個篩選下沒有題目。</p>')+'<button class="pri" data-a="st" data-n="3">前往彙整</button>';
+}
+
+function vSum(){
+  const a=agg(),c=buildCards(),W=r=>r?r.w+r.g:0;
+  const fm=r=>r?'錯 '+r.w+(r.g?'・猜 '+r.g:'')+' / 考 '+r.n:'未考';
+  return'<header><h2>錯題彙整</h2><div class="mk"><button data-a="ana">分析</button><button data-a="home">返回</button></div></header>'+(P()?stepper(3):'')+
+  '<p>弱點門檻 <input class="num" type="number" min="1" data-f="th" value="'+S.th+'"> 次以上（錯題加猜對，跨所有考卷）</p>'+
+  (a.u?'<p class="wr">還有 '+a.u+' 題已批改但沒標概念，不會算進概念統計。</p>':'')+
+  (S.tree.length?S.tree.map(s=>'<details open class="sj"><summary><b>'+esc(s.n)+'</b> <small>'+fm(a.s[s.n])+'</small> '+rb('s','',s.n)+'</summary>'+rnE('s','',s.n)+s.c.map(ch=>
+    '<details class="ch"'+(ch.k.some(k=>W(a.k[k])>=S.th)||renOpen(s.n,ch)?' open':'')+'><summary>'+esc(ch.n)+' <small>'+fm(a.c[s.n+'\u0001'+ch.n])+'</small> '+rb('c',s.n,ch.n)+'</summary>'+rnE('c',s.n,ch.n)+ch.k.map(k=>{
+      const r=a.k[k],hi=W(r)>=S.th;
+      return'<div class="cn '+(hi?'hi':'')+'">'+esc(k)+' <small>'+fm(r)+'</small> '+rb('k','',k)+'</div>'+rnE('k','',k)+(hi?'<textarea data-f="pt" data-g="'+esc(k)+'" placeholder="這個概念常錯在哪、下次怎麼判斷">'+esc(S.points[k]||'')+'</textarea>':'');
+    }).join('')+'</details>').join('')+'</details>').join(''):'<p class="empty">還沒有標籤。在「檢討」為題目標上科目、章節和概念後，這裡會出現樹狀統計。</p>')+
+  '<h2>匯出成卡片</h2><p><small>錯題卡 '+c.filter(x=>x.type==='wrong-question').length+' 張、重點卡 '+c.filter(x=>x.type==='key-point').length+' 張。科目＝櫃子、章節＝抽屜（location 軸），概念＝concept 標籤；同名標籤會重用。</small></p>'+
+  '<div class="mk">'+Object.entries(SINKS).map(([k,s])=>'<button data-a="sink" data-s="'+k+'">'+s.label+'</button>').join('')+'</div>'+
+  '<p><small>'+(cn()?'已連線到卡片軟體，可直接寫入。':'未偵測到卡片軟體：請從卡片軟體左側欄開啟本頁。')+'</small></p>'+
+  // 原因：輸出框平常是空的、看起來像沒用的填空區；改成隱藏，匯出或同步有內容時才顯示。
+  '<textarea id="out" rows="8" readonly hidden></textarea><span id="msg"></span>';
+}
+
+// 原因：原本科目、章節、概念各自獨立，勾了章節會把其他科目整科排除，也抽不到沒分章節的題。改成科目與章節是一棵樹（勾科目＝整科，勾章節＝只抽那幾章），並用一行白話寫出目前條件與符合題數。
+const SEP='│';
+const cat=()=>S.cat||(S.cat={y:[],l:[],k:[],n:10,all:false});
+const yearOf=p=>(String(p.name).match(/(\d{2,3})\s*(?:學年度|年度|學年)/)||[])[1]||'';
+const leafOf=g=>(g.canon.sub||'')+SEP+(g.canon.chap||'');
+const catHit=(g,f,skip)=>(skip==='y'||!f.y.length||f.y.includes(yearOf(g.all[0].p)))&&
+  (skip==='l'||!f.l.length||f.l.includes(leafOf(g)))&&
+  (skip==='k'||!f.k.length||g.canon.cons.some(x=>f.k.includes(x)));
+const catLabel=c=>[...c.y.map(y=>(y||'無')+'年度'),...new Set(c.l.map(x=>x.split(SEP)[0]||'未標科目')),...c.k].join('、').slice(0,24)||'全部';
+function catLeaves(gs){
+  // 科目、章節依「彙整」樹的順序排，沒在樹裡的（例如未標科目、未分章節）排最後。
+  const order=S.tree.map(s=>s.n),m={},rk=(o,x)=>o.indexOf(x)<0?999:o.indexOf(x);
+  gs.forEach(g=>{const s=g.canon.sub||'',c=g.canon.chap||'';(m[s]=m[s]||new Set()).add(c)});
+  return Object.keys(m).sort((a,b)=>rk(order,a)-rk(order,b)).map(s=>{
+    const t=tnode(s),o=t?t.c.map(x=>x.n):[];
+    return{s,cs:[...m[s]].sort((a,b)=>rk(o,a)-rk(o,b))};
+  });
+}
+function catSec(gs){
+  const c=cat(),pool=gs.filter(g=>c.all||everWeak(g)),hit=pool.filter(g=>catHit(g,c));
+  const n=(d,fn)=>pool.filter(g=>catHit(g,c,d)&&fn(g)).length;
+  const lv=catLeaves(gs),yrs=[...new Set(gs.map(g=>yearOf(g.all[0].p)))].sort(),cons=[...new Set(gs.flatMap(g=>g.canon.cons))];
+  const chk=(d,v,label,k)=>'<label class="ck"><input type="checkbox" data-f="cat" data-d="'+d+'" data-v="'+esc(v)+'"'+(c[d].includes(v)?' checked':'')+'>'+esc(label)+' <small>'+k+'</small></label>';
+  const tree=lv.map(({s,cs})=>{
+    const ks=cs.map(x=>s+SEP+x),sel=ks.filter(k=>c.l.includes(k)).length,part=sel>0&&sel<ks.length;
+    return'<div class="cat-s"><label class="ck"><input type="checkbox" data-f="catsub" data-v="'+esc(s)+'"'+(sel===ks.length?' checked':'')+(part?' data-ind="1"':'')+'><b>'+esc(s||'（未標科目）')+'</b> <small>'+n('l',g=>(g.canon.sub||'')===s)+' 題'+(part?'・已選 '+sel+'/'+ks.length+' 章':'')+'</small></label>'+
+      '<div class="cat-c">'+cs.map((x,i)=>chk('l',ks[i],x||'（未分章節）',n('l',g=>leafOf(g)===ks[i]))).join('')+'</div></div>';
+  }).join('');
+  const sc=lv.map(({s,cs})=>{const sel=cs.filter(x=>c.l.includes(s+SEP+x));return sel.length?(s||'未標科目')+(sel.length===cs.length?'（整科）':'：'+sel.map(x=>x||'未分章節').join('、')):''}).filter(Boolean);
+  const rule='年度：'+(c.y.length?c.y.map(y=>(y||'無')+' 年度').join('或'):'不限')+'　科目章節：'+(sc.length?sc.join('；'):'不限')+'　概念：'+(c.k.length?c.k.join('或'):'不限');
+  return'<h2>依類別抽題組卷</h2>'+
+  '<p><small>勾選要練習的類別，系統從符合的題目中隨機抽題。年度、科目章節、概念三組條件要同時成立；同一組裡勾多個，符合其中一個即可；整組都沒勾＝不限。數字是在其他條件下符合的題數。</small></p>'+
+  '<p><b>抽題範圍</b></p><div class="mk">'+[[false,'只抽錯過或猜對過的',gs.filter(everWeak).length],[true,'全部題目（含一直答對的）',gs.length]].map(([v,t,k])=>'<button class="'+(c.all===v?'on':'')+'" data-a="catpool" data-v="'+v+'">'+t+' '+k+'</button>').join('')+'</div>'+
+  '<p><b>年度</b></p><div class="mk">'+yrs.map(y=>chk('y',y,y?y+' 年度':'（無年度）',n('y',g=>yearOf(g.all[0].p)===y))).join('')+'</div>'+
+  '<p><b>科目與章節</b> <small>勾科目＝整科；展開勾章節＝只抽那幾章</small></p>'+(tree||'<small>還沒有標科目</small>')+
+  (cons.length?'<p><b>概念</b></p><div class="mk">'+cons.map(k=>chk('k',k,k,n('k',g=>g.canon.cons.includes(k)))).join('')+'</div>':'')+
+  '<p class="hint">目前條件：'+esc(rule)+'</p>'+
+  '<p>抽 <input class="num" type="number" min="1" data-f="catn" value="'+c.n+'"> 題　<small>符合 '+hit.length+' 題'+(hit.length&&hit.length<c.n?'，題數不足，會全部抽出':'')+'</small></p>'+
+  '<div class="mk"><button class="pri" data-a="catcompose"'+(hit.length?'':' disabled')+'>組成考卷（'+Math.min(c.n,hit.length)+' 題）</button><button data-a="catclear">清除勾選</button></div>';
+}
+
+function vAna(){
+  const hd='<header><h2>分析</h2><div class="mk"><button data-a="sum">彙整</button><button data-a="home">返回</button></div></header>';
+  const gs=groups(),a=agg();
+  if(!gs.length)return hd+'<p class="empty">還沒有批改過的題目。在作答頁按「對答案」後，這裡會顯示跨考卷的統計。</p>';
+  const pct=(w,n)=>n?Math.round(100*w/n):0,fs=gs.map(g=>g.first.q);
+  const nw=fs.filter(q=>q.st==='x').length,ng=fs.filter(q=>q.st!=='x'&&q.guess).length;
+  const stillX=gs.filter(g=>g.last.q.st==='x').length,still=gs.filter(weak).length,ever=gs.filter(everWeak).length;
+  const row=(l,r,btn)=>{const wk=r.w+r.g;return'<div class="br"><span title="'+esc(l)+'">'+esc(l)+'</span><progress max="100" value="'+pct(wk,r.n)+'"></progress><b>'+r.w+(r.g?'+'+r.g:'')+'/'+r.n+'（'+pct(wk,r.n)+'%）</b>'+(btn||'')+'</div>'};
+  const srt=o=>Object.entries(o).sort((x,y)=>{const[p,q]=[x[1],y[1]],rp=pct(p.w+p.g,p.n),rq=pct(q.w+q.g,q.n);return(S.sort==='rate'?(rq-rp)||(q.n-p.n):((q.w+q.g)-(p.w+p.g))||(rq-rp))});
+  const sec=(t,o,fn,max)=>'<h2>'+t+'</h2>'+(Object.keys(o).length?srt(o).slice(0,max||99).map(fn).join(''):'<p class="empty">還沒有資料。</p>');
+  const rep=gs.map(g=>({g,n:g.att.length,w:g.att.filter(x=>x.q.st==='x').length})).filter(x=>x.n>=2&&x.w).sort((x,y)=>pct(y.w,y.n)-pct(x.w,x.n)||y.n-x.n);
+  const cs=Object.entries(a.cause).sort((x,y)=>y[1]-x[1]);
+  return hd+
+  '<p>已批改 '+gs.length+' 題（同一題只算一次）：首次作答錯 '+nw+' 題（'+pct(nw,gs.length)+'%）、猜對 '+ng+' 題；最近一次仍答錯 '+stillX+' 題、猜對 '+(still-stillX)+' 題。</p>'+
+  '<p>組卷：最近弱點 <input class="num" type="number" min="0" data-f="n1" value="'+(S.n1??15)+'"> 題（最近一次仍答錯或猜對，共 '+still+' 題可選）＋ 隨機抽 <input class="num" type="number" min="0" data-f="n2" value="'+(S.n2??10)+'"> 題（曾經錯過或猜對，共 '+ever+' 題）</p>'+
+  '<button class="pri" data-a="compose" data-k=""'+(ever?'':' disabled')+'>組成考卷</button> <span id="msg"></span>'+
+  '<br><label class="ck"><input type="checkbox" data-f="shuf"'+(S.shuf!==false?' checked':'')+'>打亂選項順序（避免記住位置）</label>'+
+  '<p><small>比例都以每題「首次作答」計算，重做不重複計入；數字是「錯＋猜對／考過」。排序：</small></p>'+
+  '<div class="mk">'+[['cnt','錯題數'],['rate','錯誤率']].map(([v,t])=>'<button class="'+((S.sort||'cnt')===v?'on':'')+'" data-a="sort" data-v="'+v+'">'+t+'</button>').join('')+'</div>'+
+  sec('科目',a.s,([k,r])=>row(k,r))+
+  sec('章節',a.c,([k,r])=>row(k.replace('\u0001',' / '),r),20)+
+  sec('概念（知識點）',a.k,([k,r])=>row(k,r,'<button class="ghost" data-a="compose" data-k="'+esc(k)+'">抽出</button>'),30)+
+  '<h2>錯誤原因</h2><p><small>占首次作答錯題的比例</small></p>'+(cs.length?cs.map(([k,v])=>row(k,{w:v,g:0,n:nw})).join(''):'<p class="empty">還沒有錯題。</p>')+
+  '<h2>同一題反覆錯</h2>'+(rep.length?rep.map(({g,n,w})=>{
+    const t=g.canon,ex=(t.blocks.find(b=>b.t==='text')||{v:''}).v.slice(0,36);
+    return'<div class="br"><span title="'+esc(g.all[0].p.name+' 第 '+t.no+' 題')+'">'+esc(g.all[0].p.name+' 第 '+t.no+' 題')+'</span><progress max="100" value="'+pct(w,n)+'"></progress><b>錯 '+w+'/'+n+' 次・最近'+(g.last.q.st==='x'?'錯':'對')+'</b></div><small>'+esc(ex)+'…</small>';
+  }).join(''):'<p class="empty">還沒有重做過而且錯過的題目。用上面的按鈕把錯題組成考卷再做一次，就會累積這份紀錄。</p>')+catSec(gs);
+}
+
+function render(){
+  $('#app').innerHTML=S.view==='import'?vImport():S.view==='sum'?vSum():S.view==='ana'?vAna():S.view==='paper'&&P()?vPaper():vList();
+  document.querySelectorAll('input[data-ind]').forEach(e=>{e.indeterminate=true});
+  // 原因：深淺切換鈕放進每個畫面標題列的最右邊；統一在這裡加，免得五個 view 各寫一份。
+  const h=document.querySelector('#app header');
+  if(h){
+    const light=themeNow()==='light',b=document.createElement('button');
+    b.className='icon-btn';b.dataset.a='theme';b.title=light?'切換成深色模式':'切換成淺色模式';b.setAttribute('aria-label',b.title);
+    b.innerHTML=light?ICON.moon:ICON.sun;h.appendChild(b);
+  }
+}
+function grade(p){
+  p.questions.forEach(q=>{if(q.key&&!q.manual)q.st=!q.mine?'':norm(q.mine)===norm(q.key)?'o':'x'});
+  p.graded=true;
+}
+
+/* ---------- events ---------- */
+document.addEventListener('click',async e=>{
+  const t=e.target.closest('[data-a]');if(!t)return;
+  const d=t.dataset,p=P(),q=p&&p.questions[d.i],y=scrollY;
+  if(d.a==='ren')e.preventDefault();
+  if(d.a!=='del'&&d.a!=='cleartags')S.delc=null; // 原因：「清除標籤」也要兩段確認，其他任何動作都該取消確認狀態。
+  if(d.a==='sink')return sink(d.s);
+  if(d.a==='create')return create();
+  // 原因：切主題不必存資料、也不該跳回頁首，只重畫並保留捲動位置。
+  if(d.a==='theme'){setTheme(themeNow()==='light'?'dark':'light',true);render();scrollTo(0,y);return}
+  if(d.a==='zoom'){const o=document.createElement('div');o.id='lb';o.dataset.a='unzoom';o.innerHTML='<img src="'+d.src+'" alt="">';document.body.appendChild(o);return}
+  if(d.a==='unzoom'){t.remove();return}
+  switch(d.a){
+    case'imp':S.view='import';PENDING=null;break;
+    case'bk':await backup();return;
+    case'rsok':{try{await restore(RS);RS=null}catch(err){render();msg(err.message, true);return}break}
+    case'home':S.view='list';S.cur=null;break;
+    case'sum':S.view='sum';break;
+    case'open':S.cur=d.id;S.view='paper';await loadAssets(P());break;
+    case'del':if(S.delc===d.id){S.papers=S.papers.filter(x=>x.id!==d.id);S.delc=null}else S.delc=d.id;break;
+    case'redo':{const np=resit(S.papers.find(x=>x.id===d.id));S.papers.unshift(np);S.cur=np.id;S.view='paper';await loadAssets(np);break}
+    case'ren':S.ren={t:d.t,sub:d.sub,o:d.o};break;
+    case'rcx':S.ren=null;break;
+    case'rok':{const r=S.ren;renameTag(r.t,r.sub,r.o,$('#rn').value);S.ren=null;break}
+    case'catpool':cat().all=d.v==='true';break;
+    case'catclear':{const c=cat();c.y=[];c.l=[];c.k=[];break}
+    case'catcompose':{
+      // 原因：題目由類別條件自動隨機抽，不逐題自選；組成後依考卷時間與題號排序。
+      const c=cat(),pool=groups().filter(g=>(c.all||everWeak(g))&&catHit(g,c));
+      if(!pool.length){msg('沒有符合的題目',true);return}
+      for(let i=pool.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[pool[i],pool[j]]=[pool[j],pool[i]]}
+      const picks=pool.slice(0,c.n).sort((x,y)=>{const u=x.all[0].p.created,v=y.all[0].p.created;return u===v?x.canon.no-y.canon.no:u<v?-1:1});
+      const np=build(picks,'抽題・'+catLabel(c));
+      S.papers.unshift(np);S.cur=np.id;S.view='paper';await loadAssets(np);break}
+    case'st':{
+      const n=+d.n;
+      if(n===3){S.view='sum';break}
+      S.view='paper';if(n===2&&!p.graded)grade(p);p.stage=n;break;
+    }
+    case'ana':S.view='ana';break;
+    case'sort':S.sort=d.v;break;
+    case'compose':{const np=compose(d.k);if(!np){msg('沒有符合的題目', true);return}S.papers.unshift(np);S.cur=np.id;S.view='paper';await loadAssets(np);break}
+    case'edit':{const k=p.id+':'+d.i;S.edit=S.edit===k?null:k;break}
+    case'filt':S.filt=d.v;break;
+    case'rmcon':withSync(p,()=>{q.cons=q.cons.filter(x=>x!==d.k)});break;
+    case'pick':{
+      const multi=/多選|複選|不只一|所有/.test(qtext(q));
+      let s=q.mine?q.mine.split(''):[];
+      s=s.includes(d.k)?s.filter(x=>x!==d.k):multi?[...s,d.k]:[d.k];
+      q.mine=s.sort().join('');p.graded=false;break;
+    }
+    // 原因：補圖是「指定題號」而非「對檔名」；同一題的重做卷（twins）一併補上，匯出卡片與備份才拿得到。
+    case'useorph':{
+      const n=+t.parentElement.querySelector('input').value,qq=p.questions.find(x=>x.no===n);
+      if(!qq){msg('請先輸入有效的題號',true);return}
+      [[p,qq],...twins(p,qq)].forEach(([x,y])=>{y.blocks.push({t:'img',id:d.id,html:'',u:1});if(!x.have.includes(d.id))x.have.push(d.id)});
+      break}
+    case'rmimg':{
+      const b=q.blocks[+d.j];if(!b||!b.u)break;
+      [[p,q],...twins(p,q)].forEach(([x,y])=>{y.blocks=y.blocks.filter(z=>z.id!==b.id)});
+      break}
+    case'cleartags':
+      if(S.delc==='t'+p.id){withSync(p,()=>p.questions.forEach(z=>{z.sub='';z.chap='';z.cons=[]}));S.delc=null}else S.delc='t'+p.id;
+      break;
+    case'mark':q.st=d.v;q.manual=1;break;
+  }
+  save();render();
+  if(['pick','mark','edit','rmcon','rmimg','catpool','catclear'].includes(d.a))scrollTo(0,y);else scrollTo(0,0);
+});
+
+document.addEventListener('change',async e=>{
+  const t=e.target;
+  if(t.dataset.restore!==undefined){RS=t.files[0]||null;render();return}
+  if(t.dataset.pick!==undefined){
+    try{
+      PENDING=await collect(t.files);
+    }catch(err){return msg(err.message, true)}
+    const cnt=Array.isArray(PENDING)?PENDING.length:PENDING?1:0;
+    const names=Array.isArray(PENDING)?PENDING.map(b=>b.name).join('、'):PENDING?PENDING.name:'';
+    $('#sel').textContent='已解析 '+cnt+' 份試卷：'+names;
+    return;
+  }
+  if(t.dataset.supp!==undefined){
+    const p=P();
+    // 原因：舊卷圖片 ID 沒有前綴、組卷沿用原卷前綴，一律用 p.id 當前綴永遠對不上；改依區塊裡實際的 ID 比對檔名，對不上就報錯而不是靜默。
+    for(const f of t.files){
+      const hit=new Set();
+      [...p.questions,...p.passages].forEach(x=>x.blocks.forEach(b=>{if(b.id&&(b.id===f.name||b.id.endsWith('__'+f.name)))hit.add(b.id)}));
+      if(!hit.size){msg('找不到對應的圖片位置：'+f.name,true);continue}
+      for(const id of hit){MEM[id]=f;aSet(id,f);if(!p.have.includes(id))p.have.push(id)}
+    }
+    validate(p);await loadAssets(p);save();render();return;
+  }
+  // 原因：補入的圖先寫進 IndexedDB 並確認成功才接到題目，失敗就報錯、不留空殼；檔名只留副檔名，避免空白與中文讓卡片匯出的 exam-asset: 連結斷掉。
+  if(t.dataset.addimg!==undefined){
+    const p=P(),q=p&&p.questions[t.dataset.i];if(!q)return;
+    const tw=twins(p,q);
+    for(const f of t.files){
+      const id=p.id+'__u'+uid()+((f.name.match(/\.\w+$/)||['.png'])[0]);
+      try{await tx('assets','readwrite',s=>s.put(f,id))}catch(err){reportDbErr(err);break}
+      MEM[id]=f;
+      [[p,q],...tw].forEach(([x,y])=>{y.blocks.push({t:'img',id,html:'',u:1});if(!x.have.includes(id))x.have.push(id)});
+    }
+    t.value='';validate(p);tw.forEach(([x])=>validate(x));await loadAssets(p);await save();render();return;
+  }
+  const f=t.dataset.f;if(!f)return;
+  const p=P(),q=p&&p.questions[t.dataset.i];
+  if(f==='pt')S.points[t.dataset.g]=t.value;
+  else if(f==='th')S.th=Math.max(1,+t.value||3);
+  else if(f==='cat'){const a=cat()[t.dataset.d],v=t.dataset.v,i=a.indexOf(v);if(t.checked&&i<0)a.push(v);else if(!t.checked&&i>=0)a.splice(i,1)}
+  else if(f==='catsub'){
+    // 勾科目＝把它底下全部章節一起勾起來或取消；半選狀態點一下＝全選。
+    const c=cat(),s=t.dataset.v,ks=catLeaves(groups()).filter(x=>x.s===s).flatMap(x=>x.cs.map(ch=>s+SEP+ch));
+    c.l=t.checked?[...new Set([...c.l,...ks])]:c.l.filter(k=>!ks.includes(k));
+  }
+  else if(f==='catn')cat().n=Math.max(1,Math.floor(+t.value)||1);
+  else if(f==='n1'||f==='n2')S[f]=Math.max(0,Math.floor(+t.value)||0);
+  else if(f==='shuf')S.shuf=t.checked;
+  else if(f==='guess')q.guess=t.checked;
+  else if(f==='sub'||f==='chap')withSync(p,()=>setTag(p,+t.dataset.i,f,t.value.trim()));
+  else if(f==='con'){const v=t.value.trim();if(v&&!q.cons.includes(v))withSync(p,()=>{ensure(q.sub,q.chap,v);q.cons.push(v)})}
+  else if(f.startsWith('o:'))q.optNotes[f.slice(2)]=t.value;
+  else if(/^(eb|pb|eo):/.test(f)||f==='key')syncEdit(p,q,f,t.value);
+  else q[f]=t.value;
+  save();if(['th','sub','chap','con','key','cat','catsub','catn'].includes(f)||/^(eb|pb|eo):/.test(f))render();
+});
+
+window.ExamReview={buildCards,SINKS,IMPORTERS,render,state:()=>S,pushToCardnote};
+// 原因：handler 或 render 丟例外時畫面不更新、使用者看不到任何訊息；至少讓它大聲報錯。
+addEventListener('error',e=>msg('未預期的錯誤：'+(e.message||e),true));
+addEventListener('unhandledrejection',e=>msg('未預期的錯誤：'+((e.reason&&e.reason.message)||e.reason),true));
+load().then(()=>{if(location.hash==='#import')S.view='import';render();loadExt()});
+render();
+</script>
+</body>
+</html>

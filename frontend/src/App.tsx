@@ -6,6 +6,8 @@
 // @depends-on ./styles.css (.tools-dock / .tools-slide 及其內部 button 樣式)
 // @depends-on ./components/DailyReview.tsx (DailyReview：只在 viewMode === "daily" 掛載；此視圖不渲染右側面板，grid 欄位與 right-closed 都改看 showRight)
 // @depends-on ./styles.css (.board-toolbar.daily：日誌視圖隱藏「新增卡片」與「收合右側面板」)
+// @depends-on ./components/LiteratureLibrary.tsx (LiteratureLibrary：只在 viewMode === "literature" 掛載；focusId 由卡片側經 LiteratureField 的 requestOpenLiterature 觸發，顯示後由 onFocusConsumed 清除)
+// @depends-on ./components/LiteratureField.tsx (subscribeOpenLiterature：App 必須訂閱，否則卡片側「開啟文獻」會丟錯)
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { Board, type BoardHandle } from "./components/Board";
@@ -13,14 +15,16 @@ import { ConceptGraph } from "./components/ConceptGraph";
 import { DailyReview } from "./components/DailyReview";
 import { IPadCardView } from "./components/IPadCardView";
 import { LeftPanel } from "./components/LeftPanel";
+import { subscribeOpenLiterature } from "./components/LiteratureField";
+import { LiteratureLibrary } from "./components/LiteratureLibrary";
 import { CardOpenProvider, notifyCardDeleted, notifyCardTitleUpdated } from "./components/Markdown";
-import { CardEditorPane, RightPanel, type Filter, type TabKey } from "./components/RightPanel";
+import { CardEditorPane, RightPanel, type Filter, type LiteraturePatch, type TabKey } from "./components/RightPanel";
 import { initDeviceEnvironment } from "./lib/device";
 import { useNotify } from "./notify";
 import type { BoardLink, BoardSummary, CardDetail, CardSummary, RelationType, Tag } from "./types";
 
 const VIEW_KEY = "cardboard:view";
-type ViewMode = "board" | "graph" | "cards" | "daily";
+type ViewMode = "board" | "graph" | "cards" | "daily" | "literature";
 
 // 還原重新整理前的白板、視圖與篩選；欄位型別不符一律丟棄，退回預設
 function loadSavedView(): { boardId: string | null; viewMode: ViewMode; filter: Filter } {
@@ -29,7 +33,13 @@ function loadSavedView(): { boardId: string | null; viewMode: ViewMode; filter: 
     const v = JSON.parse(localStorage.getItem(VIEW_KEY) ?? "null");
     if (!v || typeof v !== "object") return view;
     if (typeof v.boardId === "string") view.boardId = v.boardId;
-    if (v.viewMode === "board" || v.viewMode === "graph" || v.viewMode === "cards" || v.viewMode === "daily")
+    if (
+      v.viewMode === "board" ||
+      v.viewMode === "graph" ||
+      v.viewMode === "cards" ||
+      v.viewMode === "daily" ||
+      v.viewMode === "literature"
+    )
       view.viewMode = v.viewMode;
     const f = v.filter;
     if (f && typeof f === "object") {
@@ -57,6 +67,7 @@ export default function App() {
   const [previewCardId, setPreviewCardId] = useState<string | null>(null);
   const [centerEditing, setCenterEditing] = useState(false);
   const [pendingSmartPaste, setPendingSmartPaste] = useState<string | null>(null);
+  const [literatureFocusId, setLiteratureFocusId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(initialView.viewMode);
   const [filter, setFilter] = useState<Filter>(initialView.filter);
   const [tab, setTab] = useState<TabKey>("content");
@@ -209,6 +220,18 @@ export default function App() {
 
   useEffect(() => {
     void Promise.all([refreshTags(), refreshBoards(), refreshIpadCards()]).finally(() => setBooted(true));
+
+    const onSync = () => {
+      void refreshTags();
+      void refreshBoards();
+      void refreshIpadCards();
+    };
+    window.addEventListener("cardnote:refresh", onSync);
+    window.addEventListener("focus", onSync);
+    return () => {
+      window.removeEventListener("cardnote:refresh", onSync);
+      window.removeEventListener("focus", onSync);
+    };
   }, [refreshTags, refreshBoards, refreshIpadCards]);
 
   // ---- 電腦版：定時自動備份至本機固定檔案（含開機錯時補償 Catch-up）----
@@ -312,6 +335,15 @@ export default function App() {
     setCenterEditing(false);
   }, []);
 
+  // 文獻庫：id 有值＝直接顯示那份文獻（卡片側「開啟文獻」）；沒有＝只切換視圖
+  const openLiterature = useCallback((id?: string) => {
+    setLiteratureFocusId(id ?? null);
+    setViewMode("literature");
+    setCenterEditing(false);
+  }, []);
+  const consumeLiteratureFocus = useCallback(() => setLiteratureFocusId(null), []);
+  useEffect(() => subscribeOpenLiterature((id) => openLiterature(id)), [openLiterature]);
+
   useEffect(() => {
     if (!centerEditing) return;
     const onKey = (e: KeyboardEvent) => {
@@ -407,10 +439,31 @@ export default function App() {
     [bump],
   );
 
+  const onNoteChanged = useCallback((noteId: string, patch: { text?: string; color?: string }) => {
+    boardRef.current?.updateNote(noteId, patch);
+  }, []);
+
+  const onLiteratureChanged = useCallback((litId: string, patch: LiteraturePatch) => {
+    boardRef.current?.updateLiterature(litId, patch);
+  }, []);
+
+  const onLiteratureDeleted = useCallback(
+    (litId: string) => {
+      boardRef.current?.removeLiterature(litId);
+      // 只清 selected 會讓 centerEditing 卡在 true（工具列隱藏、白板 inactive），與 onCardDeleted 一致兩個都重設
+      if (selected === `lit:${litId}`) {
+        setSelected(null);
+        setCenterEditing(false);
+      }
+    },
+    [selected],
+  );
+
   const onTagsChanged = useCallback(() => {
     void refreshTags();
     void refreshIpadCards();
-    if (selected) {
+    // 靈感筆記（note:）與文獻（lit:）不是卡片，cardTitle 一定失敗；不排除會把正在編輯的它們關掉
+    if (selected && !selected.startsWith("note:") && !selected.startsWith("lit:")) {
       void api.cardTitle(selected).catch(() => {
         setSelected(null);
         setCenterEditing(false);
@@ -453,6 +506,8 @@ export default function App() {
             setFilter({});
           }}
           onBoardsChanged={refreshBoards}
+          onOpenLiterature={() => openLiterature()}
+          literatureOpen={viewMode === "literature"}
           onFilter={(f) => {
             setFilter(f);
             setViewMode("cards");
@@ -519,6 +574,13 @@ export default function App() {
                   >
                     今日總結
                   </button>
+                  <button
+                    className={viewMode === "literature" ? "on" : ""}
+                    onClick={() => setViewMode("literature")}
+                    title="文獻庫（完整引用的原文資料；卡片可掛文獻作為出處）"
+                  >
+                    文獻庫
+                  </button>
                 </div>
               )}
               {!centerEditing && viewMode === "board" && boardId && (
@@ -568,6 +630,29 @@ export default function App() {
                     aria-hidden="true"
                   >
                     <rect x="2" y="2.5" width="12" height="11" rx="2" />
+                  </svg>
+                </button>
+              )}
+              {!centerEditing && viewMode === "board" && boardId && (
+                <button
+                  className="icon-btn"
+                  onClick={() => void boardRef.current?.createNote()}
+                  aria-label="新增靈感筆記"
+                  title="新增靈感筆記（只存在這塊白板的純文字便利貼；可再升級為卡片）"
+                >
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M3 2.5h10v7.5l-3.5 3.5H3z" />
+                    <path d="M9.5 13.5V10H13" />
                   </svg>
                 </button>
               )}
@@ -631,6 +716,19 @@ export default function App() {
                   report={report}
                 />
               )}
+              {viewMode === "literature" && (
+                <LiteratureLibrary
+                  version={version}
+                  focusId={literatureFocusId}
+                  onFocusConsumed={consumeLiteratureFocus}
+                  onAddToBoard={(id) => void boardRef.current?.addLiterature(id)}
+                  onChanged={onLiteratureChanged}
+                  onDeleted={onLiteratureDeleted}
+                  onOpenCard={openCardInCenter}
+                  report={report}
+                  info={info}
+                />
+              )}
               {viewMode === "daily" && (
                 <DailyReview
                   version={version}
@@ -669,16 +767,21 @@ export default function App() {
           )}
 
           {centerEditing && selected && (
-            <div className="center-editor" role="region" aria-label="中央卡片編輯視窗">
+            <div className="center-editor" role="region" aria-label="中央編輯視窗">
               <div
                 className="center-editor-head"
                 style={isStandalone || viewMode === "cards" ? { paddingRight: 16 } : undefined}
               >
                 <button onClick={closeCenterEditor} title="返回（Esc）">
-                  ← 返回{isStandalone ? "卡片冊" : viewMode === "graph" ? "概念圖譜" : viewMode === "daily" ? "今日總結" : "白板"}
+                  ← 返回{isStandalone ? "卡片冊" : viewMode === "graph" ? "概念圖譜" : viewMode === "daily" ? "今日總結" : viewMode === "literature" ? "文獻庫" : "白板"}
                 </button>
                 <span className="muted">
-                  卡片編輯模式（按 Esc 返回{isStandalone ? "卡片冊" : viewMode === "daily" ? "今日總結" : "白板"}）
+                  {selected.startsWith("note:")
+                    ? "靈感筆記編輯模式"
+                    : selected.startsWith("lit:")
+                      ? "文獻編輯模式"
+                      : "卡片編輯模式"}
+                  （按 Esc 返回{isStandalone ? "卡片冊" : viewMode === "daily" ? "今日總結" : viewMode === "literature" ? "文獻庫" : "白板"}）
                 </span>
                 {(isStandalone || viewMode === "cards") && (
                   <button
@@ -696,6 +799,7 @@ export default function App() {
               <div className="center-editor-body">
                 <CardEditorPane
                   cardId={selected}
+                  boardId={boardId}
                   tags={tags}
                   version={version}
                   initialSmartPaste={pendingSmartPaste}
@@ -704,6 +808,8 @@ export default function App() {
                   onCardDeleted={onCardDeleted}
                   onLinkAdded={onLinkAdded}
                   onSelectCard={openCardPreview}
+                  onNoteChanged={onNoteChanged}
+                  onLiteratureChanged={onLiteratureChanged}
                   onTagsChanged={onTagsChanged}
                   report={report}
                   info={info}
@@ -734,6 +840,8 @@ export default function App() {
             onCardDeleted={onCardDeleted}
             onLinkAdded={onLinkAdded}
             onLinkDeleted={onLinkDeleted}
+            onNoteChanged={onNoteChanged}
+            onLiteratureChanged={onLiteratureChanged}
             onTagsChanged={onTagsChanged}
             onOpenBoard={(id) => {
               setBoardId(id);

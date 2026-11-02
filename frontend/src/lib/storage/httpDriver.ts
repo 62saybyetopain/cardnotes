@@ -41,6 +41,12 @@ export class HttpDriver implements StorageDriver {
   createBoardGroup = httpApi.createBoardGroup;
   patchBoardGroup = httpApi.patchBoardGroup;
   deleteBoardGroup = httpApi.deleteBoardGroup;
+  createBoardNote = httpApi.createBoardNote;
+  patchBoardNote = httpApi.patchBoardNote;
+  deleteBoardNote = httpApi.deleteBoardNote;
+  addLiteratureToBoard = httpApi.addLiteratureToBoard;
+  patchBoardLiterature = httpApi.patchBoardLiterature;
+  removeLiteratureFromBoard = httpApi.removeLiteratureFromBoard;
 
   syncExport = httpApi.syncExport;
   syncDiff = httpApi.syncDiff;
@@ -67,6 +73,23 @@ export class HttpDriver implements StorageDriver {
   putCardRelation = httpApi.putCardRelation;
   deleteCardRelation = httpApi.deleteCardRelation;
   getRelationsReport = httpApi.getRelationsReport;
+
+  listLiterature = httpApi.listLiterature;
+  createLiterature = httpApi.createLiterature;
+  getLiterature = httpApi.getLiterature;
+  patchLiterature = httpApi.patchLiterature;
+  literatureDeletePreview = httpApi.literatureDeletePreview;
+  deleteLiterature = httpApi.deleteLiterature;
+  listLiteratureCollections = httpApi.listLiteratureCollections;
+  createLiteratureCollection = httpApi.createLiteratureCollection;
+  renameLiteratureCollection = httpApi.renameLiteratureCollection;
+  deleteLiteratureCollection = httpApi.deleteLiteratureCollection;
+  addLiteratureToCollection = httpApi.addLiteratureToCollection;
+  removeLiteratureFromCollection = httpApi.removeLiteratureFromCollection;
+  listCardLiterature = httpApi.listCardLiterature;
+  putCardLiterature = httpApi.putCardLiterature;
+  patchLiteratureCitation = httpApi.patchLiteratureCitation;
+  deleteLiteratureCitation = httpApi.deleteLiteratureCitation;
 
   listDailyStreams = httpApi.listDailyStreams;
   createDailyStream = httpApi.createDailyStream;
