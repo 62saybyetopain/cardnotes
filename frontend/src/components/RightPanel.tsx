@@ -1,3 +1,4 @@
+// @depends-on ./App.tsx (centerSaveTick：中央編輯器每次儲存完成就遞增（含退出時才補送的最後一次儲存），RightPanel 必須在它變動時重新取得卡片；退出後才到的那次還要清空快照讓編輯器重建，否則右側停在舊內文與舊版本號；centerEditing：中央編輯模式開關，退回右側時需重新取得最新卡片)
 // @depends-on ./Editor.tsx (Editor 自動儲存後，onSaved 回傳的 CardDetail 至少含 title/body/updated_at；父層 card 快照必須同步這三項，否則 ContentTab.updateMeta 以舊版本號送出會 409，onReload 重建 Editor 時也會顯示舊內文)
 // @depends-on ../api.ts (patchCard 回傳值含 title/body/updated_at/sources；onSaved 合併進父層 card 快照時也要帶 sources，否則出處欄會被舊值蓋回)
 // @depends-on ./SourcesField.tsx (onSave 失敗時必須 throw，元件靠這個判斷是否已儲存)
@@ -348,6 +349,7 @@ interface Props {
   previewCardId?: string | null;
   boardId?: string | null;
   centerEditing?: boolean;
+  centerSaveTick?: number;
   tags: Tag[];
   filter: Filter;
   version: number; // 外部觸發資料變化（連結、標籤）時遞增，觸發重新載入卡片
@@ -505,7 +507,7 @@ export function RightPanel(p: Props) {
   const [loadError, setLoadError] = useState("");
   const [nonce, setNonce] = useState(0); // 只有「捨棄修改重新載入」才重建編輯器
   const [fetchTick, setFetchTick] = useState(0);
-  const { selectedCardId, version, report, centerEditing, boardId } = p;
+  const { selectedCardId, version, report, centerEditing, centerSaveTick, boardId } = p;
   const activeTab: TabKey = p.hideContentTab && p.tab === "content" ? "relations" : p.tab;
   const visibleTabs = p.hideContentTab ? ALL_TABS.filter(([k]) => k !== "content") : ALL_TABS;
 
@@ -513,6 +515,11 @@ export function RightPanel(p: Props) {
     setCard(null);
     setLoadError("");
   }, [selectedCardId]);
+
+  // 原因：退出中央編輯時，Editor 卸載才補送的最後一次儲存會晚於退出切換。它完成後 centerSaveTick 遞增，此時 ContentTab 已用較舊的快照建好編輯器（編輯器只在建立時讀一次內文與版本號），所以要先清空、等最新的取回來再重建。中央編輯進行中不清空：關聯分頁還在用這份 card。
+  useEffect(() => {
+    if (centerSaveTick && !centerEditing) setCard(null);
+  }, [centerSaveTick, centerEditing]);
 
   useEffect(() => {
     if (!selectedCardId || isVirtualId(selectedCardId)) return;
@@ -524,7 +531,7 @@ export function RightPanel(p: Props) {
     return () => {
       alive = false;
     };
-  }, [selectedCardId, version, fetchTick]);
+  }, [selectedCardId, version, fetchTick, centerEditing, centerSaveTick]);
 
   const refetch = useCallback(() => setFetchTick((n) => n + 1), []);
 

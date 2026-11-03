@@ -60,6 +60,9 @@ nav .on{background:var(--accent-soft);border-color:var(--accent);color:var(--acc
 .row{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;padding:10px 12px;margin:0 0 6px;background:var(--card);border:1px solid var(--line);border-radius:10px;cursor:pointer;transition:border-color .15s ease}
 .row:hover{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
 .row span{color:var(--muted);flex:1;font-size:12px}
+/* 「重做」「抽題」與日期只是附加標記：小字、淡色、不加粗，和考卷名稱拉開主從。用 em 而不是 span，避免被上一行 .row span 蓋掉。 */
+.nt,.nd{font-style:normal;font-weight:400;font-size:11px;line-height:1.6;letter-spacing:0;white-space:nowrap;margin-left:6px;vertical-align:middle;color:var(--muted)}
+.nt{padding:0 6px;border:1px solid var(--line);border-radius:10px}
 
 /* 題目卡：比照卡片軟體的卡片；題組文章比照文獻卡片（扁平、無陰影、accent 邊） */
 article{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:12px;padding:12px 14px;margin:0 0 12px;box-shadow:0 4px 16px rgba(0,0,0,.08),0 1px 3px rgba(0,0,0,.05)}
@@ -79,6 +82,44 @@ pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;pad
 .lt{width:auto;min-width:3em;justify-content:center}
 .mk .o.on{background:color-mix(in srgb,var(--ok) 22%,var(--panel));border-color:var(--ok);font-weight:600}
 .mk .x.on{background:color-mix(in srgb,var(--danger) 20%,var(--panel));border-color:var(--danger);font-weight:600}
+/* 檢討頁每題操作列：左＝判定（每題都看）、中＝作答摘要、右＝猜的（偶爾）與 ⋯（很少用的維護／匯出設定） */
+.vrow{gap:6px 10px}
+.seg{display:inline-flex}
+.seg button{margin:0;padding:3px 14px;border-radius:0}
+.seg button+button{margin-left:-1px}
+.seg button:first-child{border-radius:6px 0 0 6px}
+.seg button:last-child{border-radius:0 6px 6px 0}
+.seg button:hover,.seg button.on{position:relative;z-index:1}
+.vs{color:var(--muted);font-size:13px}
+.vs b{color:var(--text)}
+/* 科目欄：手打輸入框＋一顆永遠列出全部科目的下拉鈕（datalist 會依已填文字過濾，改選要先刪字） */
+.tg .grow{flex:1 1 0;min-width:0;width:auto}
+.pk{flex:0 0 auto;width:34px;margin:4px 0;padding:5px 0;text-align:center;text-align-last:center;font:inherit;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:6px;cursor:pointer;-webkit-appearance:none;appearance:none}
+.pk:hover{border-color:var(--accent);color:var(--accent)}
+.pk option{color:var(--text);background:var(--card)}
+/* 對／錯是自動批改的結果：做成唯讀標籤並標示來源；手動改判才用橘框特別標出 */
+.vg{display:inline-flex;align-items:center;gap:6px}
+.vb{display:inline-flex;align-items:center;padding:2px 10px;border:1px solid var(--line);border-radius:12px;font-size:13px;font-weight:600;color:var(--muted);white-space:nowrap}
+.vb.o{color:var(--ok);border-color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,var(--card))}
+.vb.x{color:var(--danger);border-color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,var(--card))}
+.va,.vm{font-style:normal;font-size:11px;white-space:nowrap}
+.va{color:var(--muted)}
+.vm{padding:0 6px;border:1px solid var(--warn);border-radius:10px;color:var(--warn);font-weight:600}
+.mh{display:block;margin-top:4px;padding:6px 8px 2px;border-top:1px solid var(--line);font-size:11px}
+.vr{display:flex;align-items:center;gap:6px;margin-left:auto}
+.vr .nd{margin:0;font-style:normal;font-size:11px;white-space:nowrap;color:var(--warn)}
+.tgl{position:relative;display:inline-flex;align-items:center;margin:0;padding:2px 10px;border:1px solid var(--line);border-radius:12px;font-size:12px;font-weight:400;color:var(--muted);cursor:pointer;user-select:none}
+.tgl input{position:absolute;opacity:0;width:0;height:0;margin:0;padding:0;border:0}
+.tgl:hover{border-color:var(--accent)}
+.tgl:has(input:checked){background:color-mix(in srgb,var(--warn) 18%,var(--panel));border-color:var(--warn);color:var(--text)}
+.tgl:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
+.more{position:relative;margin:0}
+.more summary{list-style:none;display:inline-flex;align-items:center;justify-content:center;width:30px;height:26px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--muted);cursor:pointer;user-select:none;line-height:1}
+.more summary::-webkit-details-marker{display:none}
+.more summary:hover,.more[open] summary,.more summary.on{border-color:var(--accent);color:var(--accent)}
+.more-menu{position:absolute;right:0;top:calc(100% + 4px);z-index:5;min-width:170px;display:flex;flex-direction:column;gap:2px;padding:6px;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.more-menu .ck,.more-menu button{display:flex;align-items:center;min-height:32px;padding:4px 8px;border:0;background:transparent;border-radius:6px;white-space:nowrap;text-align:left}
+.more-menu .ck:hover,.more-menu button:hover{background:var(--accent-soft)}
 
 .tbl{overflow-x:auto;margin:0 0 8px}
 table{border-collapse:collapse;width:100%}
@@ -347,7 +388,16 @@ const save=()=>{
 function fix(){
   // 原因：舊版把「沒作答」判成錯並存了下來，單靠補丁 A 清不掉；非手動標記、沒作答卻是錯的紀錄，一律還原成未判，並明確提示筆數。
   let n=0;
-  S.papers.forEach(p=>{if(p.stage>2)p.stage=2;p.questions.forEach(q=>{q.sub=q.sub||'';q.chap=q.chap||'';q.cons=q.cons||[];q.guess=!!q.guess;if(!q.mine&&!q.manual&&q.st==='x'){q.st='';n++}})});
+  S.papers.forEach(p=>{
+    if(p.stage>2)p.stage=2;
+    // 原因：修復多次重做導致考卷名稱疊加「重做・」與重複日期的歷史資料
+    if(/^(?:重做・){2,}/.test(p.name)||/(?:・\d{1,2}[\/月]\d{1,2}日?){2,}$/.test(p.name)){
+      const base=p.name.replace(/^(?:重做・)+/,'').replace(/(?:・\d{1,2}[\/月]\d{1,2}日?)+$/,'');
+      const lastDate=(p.name.match(/・\d{1,2}[\/月]\d{1,2}日?$/)||[''])[0];
+      p.name='重做・'+base+lastDate;
+    }
+    p.questions.forEach(q=>{q.sub=q.sub||'';q.chap=q.chap||'';q.cons=q.cons||[];q.guess=!!q.guess;if(!q.mine&&!q.manual&&q.st==='x'){q.st='';n++}});
+  });
   if(n)msg('已修正 '+n+' 題「沒作答卻被判錯」的紀錄，這些題不再計入統計',false);
 }
 async function load(){try{const v=await tx('kv','readonly',s=>s.get('state'));if(v){Object.assign(S,v);REV=v.rev||0;fix()}LOADED=true;try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}}catch(e){reportDbErr(e);}}
@@ -407,8 +457,22 @@ function setTag(p,i,f,v){
   // 原因：原版會把後面「沒概念、值相同」的題全部連動代入，Q1 填完整份考卷就都被標成同一個章節，統計失真；改成每題只改自己。
   const q=p.questions[i];
   if(q[f]===v)return;
+  const was=q.cons;
   q[f]=v;if(f==='sub')q.chap='';
-  q.cons=[]; // 原因：科目／章節改了，舊概念還掛在舊章節；清掉，讓使用者在新章節下重新加，樹與統計才一致。
+  // 原因：改章節通常是改正歸屬，概念本身沒有錯，清空只會逼使用者重打。改成概念跟著搬到新章節；概念在樹裡只有一個家，所以先從舊章節移除、再掛到新章節。
+  // 例外：這個概念還有別題在用（不含同一題在其他考卷的副本，它們會跟著同步）就不能同時屬於兩個章節，這題先移除並大聲說明。改科目、或章節被清空時沒有章節可掛，維持清空。
+  if(f==='chap'&&v&&was.length){
+    const tw=new Set(twins(p,q).map(a=>a[1])),lost=[];
+    q.cons=was.filter(k=>{
+      if(S.papers.some(x=>x.questions.some(y=>y!==q&&!tw.has(y)&&y.cons.includes(k)))){lost.push(k);return false}
+      S.tree.forEach(s=>s.c.forEach(c=>{const j=c.k.indexOf(k);if(j>=0)c.k.splice(j,1)}));
+      return true;
+    });
+    ensure(q.sub,v);q.cons.forEach(k=>ensure(q.sub,v,k));
+    if(lost.length)msg('概念「'+lost.join('、')+'」在原章節還有其他題在用，一個概念只能屬於一個章節，這題已先移除它；要保留請改用不同的概念名稱。',true);
+    return;
+  }
+  q.cons=[];
   if(f==='sub')ensure(v);else ensure(q.sub,v);
 }
 const qidOf=(p,q)=>q.qid||cid(p,q);
@@ -497,8 +561,9 @@ function pick(k){
   const b=n2>0?rest.slice(0,n2+Math.max(0,n1-a.length)):[];
   return[...a,...b].sort((x,y)=>{const u=x.all[0].p.created,v=y.all[0].p.created;return u===v?x.canon.no-y.canon.no:u<v?-1:1});
 }
+const cleanPaperName=s=>String(s||'未命名考卷').replace(/^(?:重做・)+/,'').replace(/(?:・\d{1,2}[\/月]\d{1,2}日?)+$/,'').trim();
 const compose=k=>{const picks=pick(k);return picks.length?build(picks,'錯題重做・'+(k||'全部')):null};
-const resit=p=>build(p.questions.map(q=>({id:q.qid||cid(p,q),last:{p,q},canon:q,all:[{p,q}],from:q.from})),'重做・'+p.name);
+const resit=p=>build(p.questions.map(q=>({id:q.qid||cid(p,q),last:{p,q},canon:q,all:[{p,q}],from:q.from})),'重做・'+cleanPaperName(p.name));
 function build(picks,label){
   const d=new Date().toLocaleDateString('zh-TW',{month:'numeric',day:'numeric'});
   const allHave=new Set(S.papers.flatMap(p=>p.have||[]));
@@ -633,7 +698,7 @@ function show(t){
 const getAsset=async id=>MEM[id]||await aGet(id).catch(()=>null);
 
 /* ---- card app bridge ---- */
-let EXT={subs:[],chaps:{},cons:[]};
+let EXT={chaps:{},cons:[]};
 const cn=()=>{try{return window.opener&&window.opener.__cardnoteApi||null}catch(e){return null}};
 const tagList=async api=>{const r=await api.listTags();return Array.isArray(r)?r:(r.tags||r.items||[])};
 const isLoc=t=>t.axis==='location'||t.axis==='domain';
@@ -643,7 +708,8 @@ async function loadExt(){
   const api=cn();if(!api)return;
   try{
     const tags=await tagList(api),roots=tags.filter(t=>isLoc(t)&&!t.parent_id);
-    EXT={subs:roots.map(t=>t.name),chaps:{},cons:tags.filter(t=>t.axis==='concept').map(t=>t.name)};
+    // 原因：科目只來自考卷自己的資料；卡片軟體的櫃子是另一套分類（筆記主題），拿來當建議會讓人選到後寫進科目樹，之後寫卡時又依同名重用，把考卷的卡歸進不相干的櫃子。
+    EXT={chaps:{},cons:tags.filter(t=>t.axis==='concept').map(t=>t.name)};
     roots.forEach(r=>{EXT.chaps[r.name]=tags.filter(t=>isLoc(t)&&t.parent_id===r.id).map(t=>t.name)});
     render();
   }catch(e){}
@@ -1098,6 +1164,11 @@ const rnE=(t,sub,o)=>S.ren&&S.ren.t===t&&S.ren.sub===sub&&S.ren.o===o?'<div clas
 const renOpen=(sub,ch)=>!!S.ren&&((S.ren.t==='c'&&S.ren.sub===sub&&S.ren.o===ch.n)||(S.ren.t==='k'&&ch.k.includes(S.ren.o)));
 const dl=(id,a)=>'<datalist id="'+id+'">'+[...new Set(a)].filter(Boolean).map(x=>'<option value="'+esc(x)+'">').join('')+'</datalist>';
 const stepper=n=>'<nav>'+['作答','檢討','彙整'].map((t,i)=>'<button data-a="st" data-n="'+(i+1)+'" class="'+(n===i+1?'on':'')+'">'+(i+1)+' '+t+'</button>').join('')+'</nav>';
+// 原因：「重做・」與日期是附加標記，不該和考卷名稱一樣醒目。只在顯示時拆開，資料裡的名稱字串不動，所以備份、匯出、cleanPaperName 與 fix() 的比對都不受影響。
+const nameHtml=n=>{
+  const m=String(n).match(/^((?:錯題重做|重做|抽題)・)?([\s\S]*?)(?:・(\d{1,2}[\/月]\d{1,2}日?))?$/);
+  return esc(m[2])+(m[1]?'<em class="nt">'+esc(m[1].slice(0,-1))+'</em>':'')+(m[3]?'<em class="nd">'+esc(m[3])+'</em>':'');
+};
 function vList(){
   const topDashboard=
     '<div class="dash-board">'+
@@ -1128,7 +1199,7 @@ function vList(){
   return'<header><h1>考卷複習</h1></header>'+topDashboard+
   (S.papers.length?S.papers.map(p=>{
     const w=p.questions.filter(q=>q.st==='x').length;
-    return'<div class="row" data-a="open" data-id="'+p.id+'"><b>'+esc(p.name)+'</b><span>'+p.questions.length+' 題・'+['','作答中','檢討中'][p.stage]+(p.stage>1?'・錯 '+w:'')+'</span><button class="ghost" data-a="redo" data-id="'+p.id+'">再做一次</button><button class="ghost" data-a="del" data-id="'+p.id+'">'+(S.delc===p.id?'再按一次確認刪除':'刪除')+'</button></div>';
+    return'<div class="row" data-a="open" data-id="'+p.id+'"><b>'+nameHtml(p.name)+'</b><span>'+p.questions.length+' 題・'+['','作答中','檢討中'][p.stage]+(p.stage>1?'・錯 '+w:'')+'</span><button class="ghost" data-a="redo" data-id="'+p.id+'">再做一次</button><button class="ghost" data-a="del" data-id="'+p.id+'">'+(S.delc===p.id?'再按一次確認刪除':'刪除')+'</button></div>';
   }).join(''):'<p class="empty">還沒有考卷。先匯入題目與答案，就能開始作答。</p>')+
   (RS?'<p>已選：'+esc(RS.name)+' <button class="pri" data-a="rsok">確認覆蓋目前資料並還原</button></p><span id="msg"></span>':'<span id="msg"></span>');
 }
@@ -1173,7 +1244,9 @@ function editPanel(p,q,i,k){
   '<small>補圖片（接在題目最後）</small><input type="file" accept="image/*" multiple data-addimg data-i="'+i+'">'+
   q.blocks.map((b,j)=>b.u?'<button class="ghost" data-a="rmimg" data-i="'+i+'" data-j="'+j+'">✕ 移除補入的圖片 '+(j+1)+'</button>':'').join('')+'</div>';
 }
-const tagBox=(q,i)=>'<div class="tg"><input list="subs" data-f="sub" data-i="'+i+'" value="'+esc(q.sub)+'" placeholder="科目（只用來分類）">'+
+// 原因：datalist 依欄位目前文字過濾，填了「商業概論」就看不到其他科目，要改選得先刪字。改成輸入框（手打）旁加一顆下拉鈕，永遠列出科目樹的全部科目；兩者都走同一個 data-f="sub"，寫入路徑不變。占位項 disabled，不會被選成「清空科目」。
+const tagBox=(q,i)=>'<div class="tg"><div class="mk"><input class="grow" data-f="sub" data-i="'+i+'" value="'+esc(q.sub)+'" placeholder="科目（手動輸入，或點右邊選擇）">'+
+  '<select class="pk" data-f="sub" data-i="'+i+'" title="列出所有科目" aria-label="選擇科目"><option value="" disabled selected hidden>▾</option>'+S.tree.map(s=>'<option value="'+esc(s.n)+'">'+(s.n===q.sub?'✓ ':'')+esc(s.n)+'</option>').join('')+'</select></div>'+
   '<input list="ch'+i+'" data-f="chap" data-i="'+i+'" value="'+esc(q.chap)+'" '+(q.sub?'':'disabled ')+'placeholder="'+(q.sub?'章節':'先選科目，才能填章節')+'">'+dl('ch'+i,[...chapsOf(q.sub),...(EXT.chaps[q.sub]||[])])+
   (q.cons.length?'<div class="mk">'+q.cons.map(k=>'<button class="chip" data-a="rmcon" data-i="'+i+'" data-k="'+esc(k)+'">'+esc(k)+' ✕</button>').join('')+'</div>':'')+
   '<input list="cons" data-f="con" data-i="'+i+'" value="" '+(q.chap?'':'disabled ')+'placeholder="'+(q.chap?'＋概念（知識點），Enter 加入':'先選章節，才能加概念')+'"></div>';
@@ -1185,15 +1258,29 @@ const cardBlock=(p,q)=>{
   if(v.st==='err')return'<p class="wr">讀取卡片軟體端失敗：'+esc(v.msg)+'</p>';
   return'';
 };
+// 原因：對／錯是對答案時自動批改的結果，不是要使用者按的開關；改成唯讀標籤並註明來源（自動／手動改判）。沒有正解時無法自動批改，才直接給手動按鈕。
+const stBadge=(q,i)=>{
+  if(!q.key)return'<span class="vg"><span class="vb">無正解・請手動判定</span><span class="seg">'+
+    '<button class="o '+(q.st==='o'?'on':'')+'" data-a="mark" data-i="'+i+'" data-v="o">對</button>'+
+    '<button class="x '+(q.st==='x'?'on':'')+'" data-a="mark" data-i="'+i+'" data-v="x">錯</button></span></span>';
+  const c=q.st==='o'?['o','✓ 答對']:q.st==='x'?['x','✗ 答錯']:['',q.mine?'未判定':'未作答・不計入統計'];
+  return'<span class="vg"><span class="vb '+c[0]+'">'+c[1]+'</span>'+(q.manual?'<em class="vm">手動改判</em>':'<em class="va">自動批改</em>')+'</span>';
+};
+// 只列「會改變結果」的選項；有正解才能恢復自動批改。
+const stMenu=(q,i)=>{
+  if(!q.key)return'';
+  const b=(a,v,t)=>'<button data-a="'+a+'" data-i="'+i+'"'+(v?' data-v="'+v+'"':'')+'>'+t+'</button>';
+  return'<small class="mh">手動改判（覆蓋自動批改）</small>'+(q.st!=='o'?b('mark','o','改判為「對」'):'')+(q.st!=='x'?b('mark','x','改判為「錯」'):'')+(q.manual?b('auto','','恢復自動批改'):'');
+};
 function rev(p,q,i){
   const ps=po(p,q),w=q.st==='x',k=qidOf(p,q),cv=CARDV[k],isMod=cv&&cv.modified;
   const hasAnyNotes=q.cause||q.why||q.right||q.fix||q.appendNote||Object.values(q.optNotes||{}).some(Boolean);
   const showDirectly=w||q.guess||isMod;
   const isSynced=q.appendSyncedText&&q.appendSyncedText===(q.appendNote||'').trim();
   const causeField='<input list="causes" data-f="cause" data-i="'+i+'" value="'+esc(q.cause)+'" placeholder="錯因（可選或自填）">';
-  const modFields='<p class="wr" style="font-weight:600;margin:6px 0">⚡ 卡片軟體端已修改內文：訂正區已自動切換為對照與追加模式，本次補充將追加於卡片尾端。</p>'+
+  const modFields=!isMod?'':'<p class="wr" style="font-weight:600;margin:6px 0">⚡ 卡片軟體端已修改內文：訂正區已自動切換為對照與追加模式，本次補充將追加於卡片尾端。</p>'+
     causeField+
-    '<details open><summary>卡片軟體端既有內容（唯讀）</summary><div style="max-height:220px;overflow-y:auto;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:8px;margin:4px 0;white-space:pre-wrap;font-size:13px"><b>'+esc(cv.title)+'</b>\n\n'+esc(cv.body.replace(/!\[[^\]]*\]\(media:[^)]*\)/g,'[圖片]'))+'</div></details>'+
+    '<details open><summary>卡片軟體端既有內容（唯讀）</summary><div style="max-height:220px;overflow-y:auto;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:8px;margin:4px 0;white-space:pre-wrap;font-size:13px"><b>'+esc((cv&&cv.title)||'')+'</b>\n\n'+esc(((cv&&cv.body)||'').replace(/!\[[^\]]*\]\(media:[^)]*\)/g,'[圖片]'))+'</div></details>'+
     ta('appnote',i,q.appendNote||'','本次重做訂正補充（同步時將以追加形式附加於卡片軟體尾端）')+
     (isSynced?'<small class="hint">✓ 已於上次同步追加至卡片軟體</small>':'');
   const normalFields=causeField+
@@ -1203,11 +1290,12 @@ function rev(p,q,i){
 
   return'<article id="q'+q.no+'" class="'+(w?'ng':'')+'">'+(ps?'<details><summary>題組文章</summary>'+blks(ps.blocks)+'</details>':'')+ref(q)+blks(q.blocks,'<b>'+q.no+'.</b> ')+wr(p,q)+
   q.options.map(o=>'<div class="opt '+(q.key.includes(o.k)?'k':q.mine.includes(o.k)?'m':'')+'"><b>'+o.k+'</b>'+esc(o.v)+'</div>').join('')+
-  '<div class="mk"><span>我的 <b>'+esc(q.mine||'—')+'</b> 正解 <b>'+esc(q.key||'無')+'</b></span>'+
-  '<button class="o '+(q.st==='o'?'on':'')+'" data-a="mark" data-i="'+i+'" data-v="o">對</button>'+
-  '<button class="x '+(w?'on':'')+'" data-a="mark" data-i="'+i+'" data-v="x">錯</button>'+
-  '<label class="ck"><input type="checkbox" data-f="guess" data-i="'+i+'"'+(q.guess?' checked':'')+'>猜的</label>'+
-  '<label class="ck"><input type="checkbox" data-f="skip" data-i="'+i+'"'+(S.skip&&S.skip[k]?' checked':'')+'>不匯出成卡片</label>'+eb(i)+'</div>'+tagBox(q,i)+
+  '<div class="mk vrow">'+stBadge(q,i)+
+  '<span class="vs">我的 <b>'+esc(q.mine||'—')+'</b>・正解 <b>'+esc(q.key||'無')+'</b></span>'+
+  '<div class="vr">'+(S.skip&&S.skip[k]?'<em class="nd" title="這題不會寫入卡片軟體">不匯出</em>':'')+
+  '<label class="tgl" title="猜對的題目，仍會算進弱點與組卷"><input type="checkbox" data-f="guess" data-i="'+i+'"'+(q.guess?' checked':'')+'>猜的</label>'+
+  '<details class="more"><summary class="'+(S.edit===p.id+':'+i?'on':'')+'" aria-label="更多">⋯</summary><div class="more-menu">'+eb(i)+stMenu(q,i)+
+  '<label class="ck"><input type="checkbox" data-f="skip" data-i="'+i+'"'+(S.skip&&S.skip[k]?' checked':'')+'>不匯出成卡片</label></div></details></div></div>'+tagBox(q,i)+
   (showDirectly ? notesContent : '<details'+(hasAnyNotes?' open':'')+'><summary>＋加入學習／訂正筆記（選填）</summary>'+notesContent+'</details>')+
   cardBlock(p,q)+(S.edit===p.id+':'+i?editPanel(p,q,i,1):'')+'</article>';
 }
@@ -1224,7 +1312,7 @@ const qnavUI=p=>{
 
 function vPaper(){
   const p=P(),qs=p.questions,L=LET(p);
-  const h='<header><h2>'+esc(p.name)+'</h2><button data-a="home">返回</button></header>'+stepper(p.stage)+iss(p)+orphUI(p);
+  const h='<header><h2>'+nameHtml(p.name)+'</h2><button data-a="home">返回</button></header>'+stepper(p.stage)+iss(p)+orphUI(p);
   if(p.stage===1)return h+'<p class="hint">正解已隱藏。憑記憶作答，完成後按「對答案」進入檢討。</p>'+qs.map((q,i)=>{
     const ps=po(p,q),first=ps&&(!qs[i-1]||qs[i-1].pid!==q.pid);
     return(first?'<article class="ps"><small>題組：第 '+ps.from+'–'+ps.to+' 題</small>'+blks(ps.blocks)+'</article>':'')+
@@ -1235,9 +1323,9 @@ function vPaper(){
   }).join('')+'<button class="pri" data-a="st" data-n="2">對答案</button>'+qnavUI(p);
   const c=s=>qs.filter(q=>q.st===s).length,fl=S.filt||'x',nx=c('x'),no=c('o'),nu=qs.filter(q=>!q.cons.length).length;
   const list=qs.map((q,i)=>[q,i]).filter(([q])=>fl==='all'||(fl==='x'?q.st==='x':fl==='o'?q.st==='o':!q.cons.length));
-  return h+dl('subs',[...S.tree.map(s=>s.n),...EXT.subs])+dl('cons',[...allCons(),...EXT.cons])+dl('causes',CAUSES)+
+  return h+dl('cons',[...allCons(),...EXT.cons])+dl('causes',CAUSES)+
   // 原因：沒作答的題不計入統計，要明說，免得又被當成「全對」或「全錯」而沒發現。
-  (qs.some(q=>!q.mine&&!q.st)?'<p class="wr">有 '+qs.filter(q=>!q.mine&&!q.st).length+' 題沒作答，不會計入統計；要算錯請手動按「錯」。</p>':'')+
+  (qs.some(q=>!q.mine&&!q.st)?'<p class="wr">有 '+qs.filter(q=>!q.mine&&!q.st).length+' 題沒作答，不會計入統計；要算錯請手動改判為錯（在該題的 ⋯ 選單）。</p>':'')+
   '<p>對 '+no+'・錯 '+nx+'・未判 '+c('')+'</p><div class="mk">'+[['x','錯題 '+nx],['o','答對 '+no],['all','全部 '+qs.length],['u','未標概念 '+nu]].map(([v,t])=>'<button class="'+(fl===v?'on':'')+'" data-a="filt" data-v="'+v+'">'+t+'</button>').join('')+(qs.some(q=>S.cardMap[qidOf(p,q)])?'<button data-a="cardview">對照卡片軟體端</button>':'')+'</div>'+
   '<p class="hint">每一題都要標單元／概念（含答對的），彙整才算得出錯率。每題各自標記，不會連動到其他題。 <button class="ghost" data-a="cleartags">'+(S.delc==='t'+p.id?'再按一次確認清除（其他考卷的同一題也會一起清掉）':'清除本卷所有標籤（其他考卷的同一題也會一起清掉）')+'</button></p>'+
   (list.length?list.map(([q,i])=>rev(p,q,i)).join(''):'<p class="empty">這個篩選下沒有題目。</p>')+'<button class="pri" data-a="st" data-n="3">前往彙整</button>'+qnavUI(p);
@@ -1349,6 +1437,8 @@ function grade(p){
 
 /* ---------- events ---------- */
 document.addEventListener('click',async e=>{
+  // 原因：⋯ 選單是原生 details，點外面不會自己收；不收的話會蓋住下面的科目欄。
+  document.querySelectorAll('.more[open]').forEach(m=>{if(!m.contains(e.target))m.removeAttribute('open')});
   const t=e.target.closest('[data-a]');if(!t)return;
   const d=t.dataset,p=P(),q=p&&p.questions[d.i],y=scrollY;
   if(d.a==='ren')e.preventDefault();
@@ -1424,6 +1514,7 @@ document.addEventListener('click',async e=>{
       if(S.delc==='t'+p.id){withSync(p,()=>p.questions.forEach(z=>{z.sub='';z.chap='';z.cons=[]}));S.delc=null}else S.delc='t'+p.id;
       break;
     case'mark':q.st=d.v;q.manual=1;p.gradedAt=new Date().toISOString();break;
+    case'auto':delete q.manual;grade(p);break;
     case'jump':{
       let el=$('#q'+d.no);
       if(!el&&S.filt&&S.filt!=='all'){S.filt='all';render();el=$('#q'+d.no)}
@@ -1432,7 +1523,7 @@ document.addEventListener('click',async e=>{
     }
   }
   save();render();
-  if(['pick','mark','edit','rmcon','rmimg','useorph','sort','ren','rok','rcx','catpool','catclear'].includes(d.a))scrollTo(0,y);else scrollTo(0,0);
+  if(['pick','mark','auto','edit','rmcon','rmimg','useorph','sort','ren','rok','rcx','catpool','catclear'].includes(d.a))scrollTo(0,y);else scrollTo(0,0);
 });
 
 document.addEventListener('change',async e=>{
@@ -1504,7 +1595,7 @@ document.addEventListener('change',async e=>{
   else if(/^(eb|pb|eo):/.test(f)||f==='key')syncEdit(p,q,f,t.value);
   else q[f]=t.value;
   const y=scrollY;
-  save();if(['th','sub','chap','con','key','cat','catsub','catn','guess'].includes(f)||/^(eb|pb|eo):/.test(f)){render();scrollTo(0,y)}
+  save();if(['th','sub','chap','con','key','cat','catsub','catn','guess','skip'].includes(f)||/^(eb|pb|eo):/.test(f)){render();scrollTo(0,y)}
 });
 
 // 原因：筆記原本只在 change（離開輸入框）才寫入；打字到一半關頁、切換 App 或重新整理時 change 不會觸發，整段筆記會消失且沒有任何提示。改成邊打邊更新記憶體、停手後存檔，頁面隱藏時立刻存。

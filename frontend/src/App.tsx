@@ -2,10 +2,12 @@
 // @depends-on ./components/RightPanel.tsx (Filter：loadSavedView 逐欄位白名單還原，Filter 新增欄位時要同步改，否則重整後該欄位會被丟掉)
 // @depends-on ./lib/device.ts (initDeviceEnvironment)
 // @depends-on ./components/IPadCardView.tsx (IPadCardView)
+// @depends-on ./components/IPadCardView.tsx (卡片冊顯示內文時 body 優先於 snippet：onSaved 更新 ipadCardList 必須同時寫 body 與 snippet；只改 snippet 會讓有 body 的項目〔listCards 分支〕顯示舊內文，沒有 body 的項目〔白板分支，snippet 即全文〕則被截成 160 字)
 // @depends-on ./components/Board.tsx (toolsSlot：App 工具列提供的容器，Board 以 createPortal 把「定位／自動對齊」渲染進去；toolsOpen 只控制容器的展開動畫)
 // @depends-on ./styles.css (.tools-dock / .tools-slide 及其內部 button 樣式)
 // @depends-on ./components/DailyReview.tsx (DailyReview：只在 viewMode === "daily" 掛載；此視圖不渲染右側面板，grid 欄位與 right-closed 都改看 showRight)
-// @depends-on ./styles.css (.board-toolbar.daily：日誌視圖隱藏「新增卡片」與「收合右側面板」)
+// @depends-on ./styles.css (.center-topbar[data-view]：日誌與卡片冊視圖隱藏頂欄的「新增卡片」與「收合右側面板」；.center-stage 是所有滿版視圖的定位容器；.app.standalone 只有獨立模式才為左側收合鈕預留左邊距)
+// @depends-on ./components/LiteraturePicker.tsx (白板工具列的「加入文獻」：自己管理開關，選定後經 onPick 轉給 BoardHandle.addLiterature)
 // @depends-on ./components/LiteratureLibrary.tsx (LiteratureLibrary：只在 viewMode === "literature" 掛載；focusId 由卡片側經 LiteratureField 的 requestOpenLiterature 觸發，顯示後由 onFocusConsumed 清除)
 // @depends-on ./components/LiteratureField.tsx (subscribeOpenLiterature：App 必須訂閱，否則卡片側「開啟文獻」會丟錯)
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -17,6 +19,7 @@ import { IPadCardView } from "./components/IPadCardView";
 import { LeftPanel } from "./components/LeftPanel";
 import { subscribeOpenLiterature } from "./components/LiteratureField";
 import { LiteratureLibrary } from "./components/LiteratureLibrary";
+import { LiteraturePicker } from "./components/LiteraturePicker";
 import { CardOpenProvider, notifyCardDeleted, notifyCardTitleUpdated } from "./components/Markdown";
 import { CardEditorPane, RightPanel, type Filter, type LiteraturePatch, type TabKey } from "./components/RightPanel";
 import { initDeviceEnvironment } from "./lib/device";
@@ -94,6 +97,7 @@ export default function App() {
     return true;
   });
   const [version, setVersion] = useState(0);
+  const [centerSaveTick, setCenterSaveTick] = useState(0);
   const [booted, setBooted] = useState(false);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
@@ -398,13 +402,22 @@ export default function App() {
       setIpadCardList((prev) =>
         prev.map((item) =>
           item.id === c.id
-            ? { ...item, title: c.title, snippet: c.body.slice(0, 160), updated_at: c.updated_at }
+            ? { ...item, title: c.title, body: c.body, snippet: c.body.slice(0, 160), updated_at: c.updated_at }
             : item,
         ),
       );
       void refreshTags();
     },
     [refreshTags],
+  );
+
+  // 原因：中央編輯器的儲存要通知右側面板（它的 card 快照不會自己跟上）。只有中央編輯器走這條：右側面板自己的儲存也遞增的話，會讓它每次自動儲存都重建編輯器。
+  const onCenterSaved = useCallback(
+    (c: CardDetail) => {
+      onSaved(c);
+      setCenterSaveTick((n) => n + 1);
+    },
+    [onSaved],
   );
 
   // 刪除卡片：立即從 ipadCardList 與畫布中移除，不需重新整理立即生效
@@ -480,10 +493,41 @@ export default function App() {
   // 日誌視圖整頁接管中央與右欄；standalone 沒有日誌視圖，不隱藏右側面板
   const showRight = rightOpen && !(viewMode === "daily" && !isStandalone);
 
+  // 左側收合時的展開／主題按鈕：桌面版放進頂欄（在版面流內），獨立模式沒有頂欄，仍浮在左上角
+  const collapsedBar = leftOpen ? null : (
+    <div className="left-collapsed-bar" role="toolbar" aria-label="左側面板控制">
+      <button
+        type="button"
+        className="icon-btn"
+        onClick={toggleLeft}
+        aria-label="展開左側面板"
+        title="展開左側面板"
+      >
+        ▶
+      </button>
+      <button
+        type="button"
+        className="icon-btn"
+        onClick={toggleTheme}
+        aria-label={theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
+        title={theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
+      >
+        {theme === "dark" ? "☀️" : "🌙"}
+      </button>
+    </div>
+  );
+
+  // 切換視圖一律同時關掉中央編輯，所以切換列在任何狀態下都能顯示在同一個位置
+  const switchView = (mode: ViewMode) => {
+    setViewMode(mode);
+    setCenterEditing(false);
+    if (mode === "board") setFilter({});
+  };
+
   return (
     <CardOpenProvider onOpenCard={openCardPreview}>
       <div
-        className={`app${leftOpen ? "" : " left-closed"}${showRight ? "" : " right-closed"}`}
+        className={`app${leftOpen ? "" : " left-closed"}${showRight ? "" : " right-closed"}${isStandalone ? " standalone" : ""}`}
         style={{
           gridTemplateColumns: `${leftOpen ? "260px" : "0px"} 1fr${showRight ? ` ${rightWidth}px` : ""}`,
         }}
@@ -517,72 +561,41 @@ export default function App() {
           report={report}
         />
         <main className="center">
-          {!leftOpen && (
-            <div className="left-collapsed-bar" role="toolbar" aria-label="左側面板控制">
-              <button
-                type="button"
-                className="icon-btn"
-                onClick={toggleLeft}
-                aria-label="展開左側面板"
-                title="展開左側面板"
-              >
-                ▶
-              </button>
-              <button
-                type="button"
-                className="icon-btn"
-                onClick={toggleTheme}
-                aria-label={theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
-                title={theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
-              >
-                {theme === "dark" ? "☀️" : "🌙"}
-              </button>
-            </div>
-          )}
+          {isStandalone && collapsedBar}
 
-          {!isStandalone && viewMode !== "cards" && (
-            <div className={`board-toolbar${viewMode === "daily" ? " daily" : ""}`}>
-              {!centerEditing && (
-                <div className="view-switch" role="group" aria-label="視圖模式切換">
-                  <button
-                    className={viewMode === "board" ? "on" : ""}
-                    onClick={() => {
-                      setViewMode("board");
-                      setFilter({});
-                    }}
-                    title="白板畫布（手動排列卡片與專題推理）"
-                  >
-                    白板畫布
-                  </button>
-                  <button
-                    className={viewMode === "graph" ? "on" : ""}
-                    onClick={() => setViewMode("graph")}
-                    title="全域概念圖譜（以概念標籤為節點，探索共現群落）"
-                  >
-                    概念圖譜
-                  </button>
-                  <button
-                    onClick={() => setViewMode("cards")}
-                    title="卡片冊模式（列表瀏覽、批次歸檔與收件夾整理）"
-                  >
-                    卡片冊
-                  </button>
-                  <button
-                    className={viewMode === "daily" ? "on" : ""}
-                    onClick={() => setViewMode("daily")}
-                    title="今日總結（先盲寫，再對照今天動過的卡片）"
-                  >
-                    今日總結
-                  </button>
-                  <button
-                    className={viewMode === "literature" ? "on" : ""}
-                    onClick={() => setViewMode("literature")}
-                    title="文獻庫（完整引用的原文資料；卡片可掛文獻作為出處）"
-                  >
-                    文獻庫
-                  </button>
-                </div>
-              )}
+          {!isStandalone && (
+            <div className="center-topbar" data-view={viewMode}>
+              {collapsedBar}
+              <div className="view-switch" role="group" aria-label="視圖模式切換">
+                <button
+                  className={viewMode === "board" ? "on" : ""}
+                  onClick={() => switchView("board")}
+                  title="白板畫布（手動排列卡片與專題推理）"
+                >
+                  白板畫布
+                </button>
+                <button
+                  className={viewMode === "graph" ? "on" : ""}
+                  onClick={() => switchView("graph")}
+                  title="全域概念圖譜（以概念標籤為節點，探索共現群落）"
+                >
+                  概念圖譜
+                </button>
+                <button
+                  className={viewMode === "cards" ? "on" : ""}
+                  onClick={() => switchView("cards")}
+                  title="卡片冊模式（列表瀏覽、批次歸檔與收件夾整理）"
+                >
+                  卡片冊
+                </button>
+                <button
+                  className={viewMode === "daily" ? "on" : ""}
+                  onClick={() => switchView("daily")}
+                  title="今日總結（先盲寫，再對照今天動過的卡片）"
+                >
+                  今日總結
+                </button>
+              </div>
               {!centerEditing && viewMode === "board" && boardId && (
                 <div className="tools-dock">
                   <button
@@ -656,6 +669,9 @@ export default function App() {
                   </svg>
                 </button>
               )}
+              {!centerEditing && viewMode === "board" && boardId && (
+                <LiteraturePicker onPick={(id) => void boardRef.current?.addLiterature(id)} report={report} />
+              )}
               <button
                 className="icon-btn primary"
                 onClick={() => void createCard()}
@@ -689,6 +705,7 @@ export default function App() {
             </div>
           )}
 
+          <div className="center-stage">
           {!isStandalone && viewMode !== "cards" ? (
             <>
               <Board
@@ -804,7 +821,7 @@ export default function App() {
                   version={version}
                   initialSmartPaste={pendingSmartPaste}
                   onClearInitialSmartPaste={() => setPendingSmartPaste(null)}
-                  onSaved={onSaved}
+                  onSaved={onCenterSaved}
                   onCardDeleted={onCardDeleted}
                   onLinkAdded={onLinkAdded}
                   onSelectCard={openCardPreview}
@@ -817,6 +834,7 @@ export default function App() {
               </div>
             </div>
           )}
+          </div>
         </main>
       {showRight && (
           <RightPanel
@@ -824,6 +842,7 @@ export default function App() {
             previewCardId={previewCardId}
             boardId={boardId}
             centerEditing={centerEditing}
+            centerSaveTick={centerSaveTick}
             tags={tags}
             filter={filter}
             version={version}

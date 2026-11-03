@@ -346,6 +346,65 @@ summary .add { float: right; border: 0; background: transparent; }
 .card-body .md img, .card-body .md video { max-width: 100%; max-height: 180px; object-fit: contain; border-radius: 6px; }
 .card-error { border-color: var(--danger); color: var(--danger); }
 
+/* 白板文獻卡片（LiteratureNode）：扁平風、無陰影、支援全功能編輯與縮放 */
+.react-flow__node-boardLiterature {
+  border-radius: 12px;
+  display: flex;
+}
+.lit-node {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 80px;
+  box-sizing: border-box;
+  background: color-mix(in srgb, var(--panel) 80%, var(--bg));
+  border: 1.5px solid color-mix(in srgb, var(--accent) 55%, var(--line));
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  transition: border-color 0.15s ease;
+}
+.lit-node:hover {
+  border-color: var(--accent);
+}
+.lit-node.selected {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  box-shadow: none;
+}
+.lit-node-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 4px;
+  flex-shrink: 0;
+}
+.lit-node-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.lit-node-body {
+  flex: 1;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.9;
+  line-height: 1.45;
+  width: 100%;
+}
+
 /* 白板視覺分組框（Frame / Group）：僅表達空間群集，位於卡片下層 */
 .react-flow__node-boardGroup {
   border-radius: 14px;
@@ -395,15 +454,13 @@ summary .add { float: right; border: 0; background: transparent; }
 .group-actions button { padding: 1px 5px; font-size: 11px; background: var(--panel); }
 .link-direction-preview { padding: 8px 10px; border-radius: 6px; background: var(--bg); font-size: 13px; text-align: center; }
 
-/* 白板靈感筆記（便利貼）：純文字、高度隨內容、只能調寬度。
+/* 白板靈感筆記（便利貼）：純文字、固定尺寸（預設寬同卡片、高為卡片 3 倍）、四邊四角都能縮放。
    @depends-on components/Board.tsx（NoteNode 的 class 名稱；顏色名沿用分組框的 slate/blue/green/amber/purple） */
-.react-flow__node-boardNote { border-radius: 8px; }
-.react-flow__node-boardNote .react-flow__resize-control.handle,
-.react-flow__node-boardNote .react-flow__resize-control.line.top,
-.react-flow__node-boardNote .react-flow__resize-control.line.bottom { display: none !important; }
+.react-flow__node-boardNote { border-radius: 8px; display: flex; }
 .note-node {
   position: relative;
   width: 100%;
+  height: 100%;
   box-sizing: border-box;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -422,7 +479,17 @@ summary .add { float: right; border: 0; background: transparent; }
 .note-actions { display: none; gap: 2px; }
 .note-node:hover .note-actions, .note-node.selected .note-actions { display: inline-flex; }
 .note-actions button { padding: 0 5px; font-size: 11px; background: var(--panel); }
-.note-text { display: block; width: 100%; min-height: 3em; resize: none; overflow: hidden; border: 0; background: transparent; padding: 0 10px 8px; font: inherit; font-size: 13px; line-height: 1.5; color: var(--text); }
+/* 顏色小圓點：白板便利貼與右側欄 NoteEditorPane 共用（.note-color-picker 為共同祖先） */
+.note-color-picker { display: inline-flex; align-items: center; gap: 5px; }
+.note-color-picker .note-color-dot { width: 12px; height: 12px; min-height: 0; padding: 0; flex-shrink: 0; border-radius: 50%; border: 1.5px solid var(--line); }
+.note-color-picker .note-color-dot:hover { border-color: var(--text); }
+.note-color-picker .note-color-dot.color-slate { background: var(--muted); }
+.note-color-picker .note-color-dot.color-blue { background: #3b82f6; }
+.note-color-picker .note-color-dot.color-green { background: #10b981; }
+.note-color-picker .note-color-dot.color-amber { background: #f59e0b; }
+.note-color-picker .note-color-dot.color-purple { background: #8b5cf6; }
+.note-color-picker .note-color-dot.active { border-color: var(--text); outline: 1.5px solid var(--text); outline-offset: 1px; }
+.note-text { display: block; width: 100%; flex: 1; min-height: 0; resize: none; overflow: auto; border: 0; background: transparent; padding: 0 10px 8px; font: inherit; font-size: 13px; line-height: 1.5; color: var(--text); }
 .note-text:focus { outline: none; }
 
 

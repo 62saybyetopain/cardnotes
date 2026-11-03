@@ -18,7 +18,7 @@ import { LeftPanel } from "./components/LeftPanel";
 import { subscribeOpenLiterature } from "./components/LiteratureField";
 import { LiteratureLibrary } from "./components/LiteratureLibrary";
 import { CardOpenProvider, notifyCardDeleted, notifyCardTitleUpdated } from "./components/Markdown";
-import { CardEditorPane, RightPanel, type Filter, type TabKey } from "./components/RightPanel";
+import { CardEditorPane, RightPanel, type Filter, type LiteraturePatch, type TabKey } from "./components/RightPanel";
 import { initDeviceEnvironment } from "./lib/device";
 import { useNotify } from "./notify";
 import type { BoardLink, BoardSummary, CardDetail, CardSummary, RelationType, Tag } from "./types";
@@ -220,6 +220,18 @@ export default function App() {
 
   useEffect(() => {
     void Promise.all([refreshTags(), refreshBoards(), refreshIpadCards()]).finally(() => setBooted(true));
+
+    const onSync = () => {
+      void refreshTags();
+      void refreshBoards();
+      void refreshIpadCards();
+    };
+    window.addEventListener("cardnote:refresh", onSync);
+    window.addEventListener("focus", onSync);
+    return () => {
+      window.removeEventListener("cardnote:refresh", onSync);
+      window.removeEventListener("focus", onSync);
+    };
   }, [refreshTags, refreshBoards, refreshIpadCards]);
 
   // ---- 電腦版：定時自動備份至本機固定檔案（含開機錯時補償 Catch-up）----
@@ -427,10 +439,31 @@ export default function App() {
     [bump],
   );
 
+  const onNoteChanged = useCallback((noteId: string, patch: { text?: string; color?: string }) => {
+    boardRef.current?.updateNote(noteId, patch);
+  }, []);
+
+  const onLiteratureChanged = useCallback((litId: string, patch: LiteraturePatch) => {
+    boardRef.current?.updateLiterature(litId, patch);
+  }, []);
+
+  const onLiteratureDeleted = useCallback(
+    (litId: string) => {
+      boardRef.current?.removeLiterature(litId);
+      // 只清 selected 會讓 centerEditing 卡在 true（工具列隱藏、白板 inactive），與 onCardDeleted 一致兩個都重設
+      if (selected === `lit:${litId}`) {
+        setSelected(null);
+        setCenterEditing(false);
+      }
+    },
+    [selected],
+  );
+
   const onTagsChanged = useCallback(() => {
     void refreshTags();
     void refreshIpadCards();
-    if (selected) {
+    // 靈感筆記（note:）與文獻（lit:）不是卡片，cardTitle 一定失敗；不排除會把正在編輯的它們關掉
+    if (selected && !selected.startsWith("note:") && !selected.startsWith("lit:")) {
       void api.cardTitle(selected).catch(() => {
         setSelected(null);
         setCenterEditing(false);
@@ -688,6 +721,9 @@ export default function App() {
                   version={version}
                   focusId={literatureFocusId}
                   onFocusConsumed={consumeLiteratureFocus}
+                  onAddToBoard={(id) => void boardRef.current?.addLiterature(id)}
+                  onChanged={onLiteratureChanged}
+                  onDeleted={onLiteratureDeleted}
                   onOpenCard={openCardInCenter}
                   report={report}
                   info={info}
@@ -772,6 +808,8 @@ export default function App() {
                   onCardDeleted={onCardDeleted}
                   onLinkAdded={onLinkAdded}
                   onSelectCard={openCardPreview}
+                  onNoteChanged={onNoteChanged}
+                  onLiteratureChanged={onLiteratureChanged}
                   onTagsChanged={onTagsChanged}
                   report={report}
                   info={info}
@@ -802,6 +840,8 @@ export default function App() {
             onCardDeleted={onCardDeleted}
             onLinkAdded={onLinkAdded}
             onLinkDeleted={onLinkDeleted}
+            onNoteChanged={onNoteChanged}
+            onLiteratureChanged={onLiteratureChanged}
             onTagsChanged={onTagsChanged}
             onOpenBoard={(id) => {
               setBoardId(id);
