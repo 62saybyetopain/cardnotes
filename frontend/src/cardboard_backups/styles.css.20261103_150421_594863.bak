@@ -36,10 +36,9 @@ input, textarea, select { font: inherit; color: inherit; background: var(--panel
 .app.left-closed { grid-template-columns: 0px 1fr 420px; }
 .app.left-closed.right-closed { grid-template-columns: 0px 1fr; }
 .app.left-closed > .left { overflow: hidden; padding: 0; border-right: 0; visibility: hidden; pointer-events: none; min-width: 0; }
-.app.left-closed .board-snap-bar { left: 88px; }
-.app.left-closed .ipad-toolbar,
-.app.left-closed .center-editor-head,
-.app.left-closed .graph-controls { padding-left: 88px; }
+/* 桌面版的收合按鈕在頂欄內，不再浮在內容上；只有獨立（iPad）模式沒有頂欄，才需要為浮動收合按鈕留左邊距 */
+.app.standalone.left-closed .ipad-toolbar,
+.app.standalone.left-closed .center-editor-head { padding-left: 88px; }
 .app > .left, .app > .right { background: var(--sidebar); overflow: auto; }
 .left-header { display: flex; justify-content: space-between; align-items: center; padding: 6px 4px 10px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
 .left-header-title { font-weight: 700; font-size: 14px; letter-spacing: 0.02em; color: var(--accent); }
@@ -49,8 +48,21 @@ input, textarea, select { font: inherit; color: inherit; background: var(--panel
 .app > .right { position: relative; border-left: 1px solid var(--line); display: flex; flex-direction: column; min-width: 0; container-type: inline-size; container-name: right-panel; }
 .right-resizer { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 10; }
 .right-resizer:hover { background: var(--accent-soft); }
-.center { position: relative; min-width: 0; }
-.board-toolbar { position: absolute; right: 8px; top: 8px; z-index: 5; display: flex; align-items: center; gap: 6px; }
+.center { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+/* 所有滿版視圖（白板、圖譜、日誌、文獻庫、卡片冊、中央編輯）都以 .center-stage 為定位容器，頂欄在它上方、不蓋住任何東西 */
+.center-stage { position: relative; flex: 1; min-height: 0; }
+/* 頂欄：切換列固定靠左，其餘按鈕靠右；切換列的位置不再受右邊有幾顆按鈕影響 */
+.center-topbar { position: relative; z-index: 20; flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.center-topbar > .view-switch { margin-right: auto; background: transparent; border: 0; border-radius: 0; padding: 0; }
+.center-topbar > .view-switch button { padding: 3px 8px; }
+.center-topbar > .view-switch button:not(.on):hover { background: var(--accent-soft); }
+.center-topbar > .left-collapsed-bar { position: static; padding: 0; border: 0; background: transparent; box-shadow: none; }
+/* 白板工具列的「加入文獻」挑選浮層 */
+.lit-picker-wrap { position: relative; display: inline-flex; }
+.lit-picker-pop { position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; width: 320px; max-height: min(60vh, 420px); display: flex; flex-direction: column; gap: 6px; padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2); }
+.lit-picker-pop > input { width: 100%; }
+.lit-picker-list { list-style: none; margin: 0; padding: 0; overflow: auto; display: flex; flex-direction: column; gap: 4px; }
+.lit-picker-item { width: 100%; min-width: 0; text-align: left; display: flex; flex-direction: column; }
 .icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; }
 .toggle-right { height: 30px; display: inline-flex; align-items: center; justify-content: center; }
 
@@ -229,7 +241,7 @@ summary .add { float: right; border: 0; background: transparent; }
 .board { position: absolute; inset: 0; }
 .board-hint { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; color: var(--muted); text-align: center; padding: 24px; }
 .center-editor { position: absolute; inset: 0; z-index: 4; background: var(--panel); display: flex; flex-direction: column; container-type: inline-size; container-name: right-panel; }
-.center-editor-head { padding: 8px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; padding-right: 160px; }
+.center-editor-head { padding: 8px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
 .center-editor-body { padding: 16px; overflow: auto; flex: 1; }
 
 /* 確保 React Flow 節點外層與卡片本體永遠 100% 同步貼齊 */
@@ -348,7 +360,7 @@ summary .add { float: right; border: 0; background: transparent; }
 
 /* 白板文獻卡片（LiteratureNode）：扁平風、無陰影、支援全功能編輯與縮放 */
 .react-flow__node-boardLiterature {
-  border-radius: 12px;
+  border-radius: 3px;
   display: flex;
 }
 .lit-node {
@@ -357,10 +369,11 @@ summary .add { float: right; border: 0; background: transparent; }
   height: 100%;
   min-height: 80px;
   box-sizing: border-box;
-  background: color-mix(in srgb, var(--panel) 80%, var(--bg));
-  border: 1.5px solid color-mix(in srgb, var(--accent) 55%, var(--line));
-  border-radius: 12px;
-  padding: 10px 12px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--card));
+  border: 1px solid var(--line);
+  border-left: 4px solid color-mix(in srgb, var(--accent) 60%, var(--card));
+  border-radius: 3px;
+  padding: 10px 12px 10px 14px;
   box-shadow: none;
   display: flex;
   flex-direction: column;
@@ -382,7 +395,7 @@ summary .add { float: right; border: 0; background: transparent; }
   font-size: 11px;
   font-weight: 600;
   color: var(--accent);
-  margin-bottom: 4px;
+  margin-bottom: 6px;
   flex-shrink: 0;
 }
 .lit-node-title {
@@ -456,25 +469,34 @@ summary .add { float: right; border: 0; background: transparent; }
 
 /* 白板靈感筆記（便利貼）：純文字、固定尺寸（預設寬同卡片、高為卡片 3 倍）、四邊四角都能縮放。
    @depends-on components/Board.tsx（NoteNode 的 class 名稱；顏色名沿用分組框的 slate/blue/green/amber/purple） */
-.react-flow__node-boardNote { border-radius: 8px; display: flex; }
+.react-flow__node-boardNote { border-radius: 2px 2px 18px 2px; display: flex; }
+/* 便利貼：不透明的彩色紙片、無邊框、右下角捲角、頂部貼膠帶；與有圓角邊框的卡片、有書脊的文獻明顯不同 */
 .note-node {
   position: relative;
   width: 100%;
   height: 100%;
   box-sizing: border-box;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--card);
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.12);
+  border: 0;
+  border-radius: 2px 2px 18px 2px;
+  --note-bg: color-mix(in srgb, var(--muted) 26%, var(--card));
+  background: var(--note-bg);
+  box-shadow: 2px 5px 10px rgba(0, 0, 0, 0.2);
   display: flex;
   flex-direction: column;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
-.note-node.color-blue { border-color: #3b82f6; background: color-mix(in srgb, #3b82f6 14%, var(--card)); }
-.note-node.color-green { border-color: #10b981; background: color-mix(in srgb, #10b981 14%, var(--card)); }
-.note-node.color-amber { border-color: #f59e0b; background: color-mix(in srgb, #f59e0b 16%, var(--card)); }
-.note-node.color-purple { border-color: #8b5cf6; background: color-mix(in srgb, #8b5cf6 14%, var(--card)); }
-.note-node.selected { box-shadow: 0 0 0 2px var(--accent), 0 6px 16px rgba(0, 0, 0, 0.16); }
+/* 頂部的半透明膠帶：純裝飾，不吃滑鼠事件 */
+.note-node::before { content: ""; position: absolute; top: -8px; left: 50%; width: 46px; height: 16px; transform: translateX(-50%) rotate(-2deg); background: rgba(255, 255, 255, 0.4); border: 1px solid rgba(0, 0, 0, 0.08); pointer-events: none; }
+/* 深色主題：彩色混進卡片底色，保持暗但有色相；淺色主題：用明確的粉彩，混色在亮底上會變成髒橘色 */
+.note-node.color-blue { --note-bg: color-mix(in srgb, #3b82f6 26%, var(--card)); }
+.note-node.color-green { --note-bg: color-mix(in srgb, #10b981 24%, var(--card)); }
+.note-node.color-amber { --note-bg: color-mix(in srgb, #f59e0b 26%, var(--card)); }
+.note-node.color-purple { --note-bg: color-mix(in srgb, #8b5cf6 26%, var(--card)); }
+[data-theme="light"] .note-node { --note-bg: #e6e8ec; }
+[data-theme="light"] .note-node.color-blue { --note-bg: #d9e8fb; }
+[data-theme="light"] .note-node.color-green { --note-bg: #d8f0e1; }
+[data-theme="light"] .note-node.color-amber { --note-bg: #fbf0b9; }
+[data-theme="light"] .note-node.color-purple { --note-bg: #e7def8; }
+.note-node.selected { outline: 2px solid var(--accent); outline-offset: 3px; }
 .note-header { display: flex; justify-content: space-between; align-items: center; height: 22px; padding: 0 6px; cursor: grab; color: var(--muted); font-size: 11px; user-select: none; }
 .note-actions { display: none; gap: 2px; }
 .note-node:hover .note-actions, .note-node.selected .note-actions { display: inline-flex; }
@@ -499,7 +521,7 @@ summary .add { float: right; border: 0; background: transparent; }
 .view-switch button.on { background: var(--accent); color: #fff; font-weight: 600; }
 
 .concept-graph { position: absolute; inset: 0; z-index: 3; background: var(--bg); display: flex; flex-direction: column; overflow: hidden; }
-.graph-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 14px; padding-right: 260px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 12px; z-index: 4; }
+.graph-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 12px; z-index: 4; }
 .graph-ctrl-item { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
 .graph-ctrl-item input[type="range"] { width: 76px; padding: 0; }
 .graph-svg { flex: 1; width: 100%; height: 100%; cursor: grab; user-select: none; }
@@ -888,13 +910,14 @@ summary .add { float: right; border: 0; background: transparent; }
 
 /* 今日總結（日誌）
    @depends-on components/DailyReview.tsx（class 名稱）
-   @depends-on App.tsx（.board-toolbar.daily：日誌視圖隱藏「新增卡片」與「收合右側面板」，右側面板在此視圖不渲染） */
-.board-toolbar.daily > .icon-btn.primary,
-.board-toolbar.daily > .toggle-right { display: none; }
+   @depends-on App.tsx（.center-topbar[data-view]：日誌視圖不渲染右側面板，卡片冊自己有新增與收合鈕，所以兩者都隱藏頂欄的「新增卡片」與「收合右側面板」） */
+.center-topbar[data-view="daily"] > .icon-btn.primary,
+.center-topbar[data-view="daily"] > .toggle-right,
+.center-topbar[data-view="cards"] > .icon-btn.primary,
+.center-topbar[data-view="cards"] > .toggle-right { display: none; }
 
 .daily-review { position: absolute; inset: 0; z-index: 3; background: var(--bg); display: flex; flex-direction: column; overflow: hidden; }
-.daily-head { display: flex; align-items: center; gap: 8px; padding: 8px 14px; padding-right: 280px; background: var(--panel); border-bottom: 1px solid var(--line); }
-.app.left-closed .daily-head { padding-left: 88px; }
+.daily-head { display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .daily-nav { display: inline-flex; align-items: center; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
 .daily-nav button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); }
 .daily-nav button:hover { background: var(--accent-soft); color: var(--accent); }
@@ -966,10 +989,9 @@ summary .add { float: right; border: 0; background: transparent; }
 
 /* 文獻庫（僅電腦端）
    @depends-on components/LiteratureLibrary.tsx（class 名稱）
-   @depends-on App.tsx（工具列在此視圖仍顯示，標題列右側留白避免被擋住） */
+   @depends-on App.tsx（此視圖從左側面板進入，頂欄在 .center-stage 上方，不需要為它留白） */
 .lit-view { position: absolute; inset: 0; z-index: 3; background: var(--bg); display: flex; flex-direction: column; overflow: hidden; }
-.lit-head { display: flex; align-items: center; gap: 10px; padding: 8px 14px; padding-right: 340px; background: var(--panel); border-bottom: 1px solid var(--line); }
-.app.left-closed .lit-head { padding-left: 88px; }
+.lit-head { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .lit-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 320px minmax(0, 1fr); }
 .lit-list { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); background: var(--sidebar); }
 .lit-list-tools { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-bottom: 1px solid var(--line); }

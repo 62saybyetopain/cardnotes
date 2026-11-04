@@ -547,6 +547,85 @@ function parseAltWidth(alt: unknown): string | undefined {
   return undefined;
 }
 
+function isMarkdownTable(text: string): boolean {
+  const lines = text.trim().split("\n").map((l) => l.trim());
+  if (lines.length < 2) return false;
+  const isRow = (l: string) => l.startsWith("|") && l.endsWith("|") && l.length >= 2;
+  const isSep = (l: string) => /^\s*\|(\s*:?-+:?\s*\|)+\s*$/.test(l);
+  return isRow(lines[0]) && isSep(lines[1]) && lines.slice(2).every(isRow);
+}
+
+function MarkdownTableRenderer({ rawText, onOpenCard }: { rawText: string; onOpenCard?: (cardId: string) => void }) {
+  const lines = rawText.trim().split("\n").map((l) => l.trim());
+  const parseCells = (line: string) =>
+    line
+      .slice(1, -1)
+      .split("|")
+      .map((c) => c.trim());
+
+  const headerCells = parseCells(lines[0]);
+  const dataRows = lines.slice(2).map(parseCells);
+
+  const renderCellMarkdown = (cell: string) => (
+    <ReactMarkdown
+      urlTransform={markdownUrlTransform}
+      components={{
+        p: ({ children }) => <>{renderRichChildren(children)}</>,
+        a: ({ href, children }) => {
+          const cardId = cardIdFromHref(typeof href === "string" ? href : undefined);
+          if (cardId) return <CardRef id={cardId} onOpenCard={onOpenCard}>{children}</CardRef>;
+          return <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>;
+        },
+      }}
+    >
+      {cell}
+    </ReactMarkdown>
+  );
+
+  return (
+    <div className="md-table-wrap nodrag" style={{ overflowX: "auto", margin: "10px 0" }}>
+      <table
+        style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          fontSize: 13,
+          textAlign: "left",
+          border: "1px solid var(--line, #334155)",
+          borderRadius: 6,
+          overflow: "hidden",
+        }}
+      >
+        <thead>
+          <tr style={{ background: "var(--panel-sub, rgba(255, 255, 255, 0.05))", borderBottom: "2px solid var(--line, #475569)" }}>
+            {headerCells.map((h, i) => (
+              <th key={i} style={{ padding: "6px 10px", fontWeight: 600, borderRight: "1px solid var(--line, #334155)" }}>
+                {renderCellMarkdown(h)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {dataRows.map((row, rIdx) => (
+            <tr
+              key={rIdx}
+              style={{
+                borderBottom: "1px solid var(--line, #334155)",
+                background: rIdx % 2 === 1 ? "var(--table-alt, rgba(255, 255, 255, 0.02))" : "transparent",
+              }}
+            >
+              {row.map((cell, cIdx) => (
+                <td key={cIdx} style={{ padding: "6px 10px", borderRight: "1px solid var(--line, #334155)" }}>
+                  {renderCellMarkdown(cell)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function CodeBlockView({ info, codeText }: { info: string; codeText: string }) {
   const lines = codeText.split("\n");
   const lineCount = lines.length;
@@ -1000,8 +1079,16 @@ export function Markdown({
         // 整段只有一個 YouTube 網址：渲染成嵌入（沒有 remark-gfm，裸網址此時是單一字串）
         const only = Children.toArray(children);
         if (only.length === 1 && typeof only[0] === "string") {
-          const ytId = youtubeIdFromUrl(only[0].trim());
+          const trimmed = only[0].trim();
+          const ytId = youtubeIdFromUrl(trimmed);
           if (ytId) return <YouTubeEmbed id={ytId} title="" />;
+          if (isMarkdownTable(trimmed)) return <MarkdownTableRenderer onOpenCard={onOpenCard} rawText={trimmed} />;
+        }
+        const fullText = Children.toArray(children)
+          .map((c) => (typeof c === "string" ? c : ""))
+          .join("");
+        if (fullText && isMarkdownTable(fullText)) {
+          return <MarkdownTableRenderer onOpenCard={onOpenCard} rawText={fullText} />;
         }
         return <p>{renderRichChildren(children)}</p>;
       },
@@ -1080,3 +1167,4 @@ export function Markdown({
     </div>
   );
 }
+

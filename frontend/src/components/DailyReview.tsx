@@ -286,7 +286,7 @@ export function DailyReview({ version, centerEditing, onOpenCard, report, info }
                     aria-label={open ? "收合內容" : "展開內容"}
                     onClick={() => toggleExpand(c.id)}
                   >
-                    <Ico d="{ICON.right}"/>
+                    <Ico d={ICON.right}/>
                   </button>
                   <span className={`facet-badge kind-${c.kind}`}>{c.kind === "new" ? "新增" : "更新"}</span>
                   <strong className="change-title">{c.title || "（無標題）"}</strong>

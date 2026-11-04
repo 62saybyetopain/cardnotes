@@ -1,5 +1,6 @@
 // @depends-on ../lib/markdown.ts (BULLET_STYLE_OPTIONS, HIGHLIGHT_COLOR_OPTIONS, ORDERED_STYLE_OPTIONS, applyHighlight, applyInlineWrap, applyLineType, detectAtTrigger, detectLineType, detectListStyleAtCursor, formatCardRef, handleListEnter, indentListLines, transformPasteContent)
 // @depends-on ./MentionPopup.tsx (MentionPopup)
+// @depends-on ./LiteratureLibrary.tsx (save／allowMention／plainPaste：文獻編輯用的三個選填 prop；未傳時行為與卡片完全相同。文獻以 asEditorCard 轉接成 CardDetail，Editor 只用到 id／title／body／updated_at／warnings)
 // @depends-on ./Markdown.tsx (Markdown)
 // @depends-on ./LiveSegmentEditor.tsx (LiveSegmentEditor, SegmentHandle；內文編輯改用 CodeMirror，位移一律是 body 的全域字元位移)
 // @depends-on ../lib/liveMarkdown.ts (編輯中的即時渲染；語法規則與 Markdown.tsx 重複一份)
@@ -36,6 +37,12 @@ type Status = "saved" | "dirty" | "saving" | "error" | "conflict";
 
 interface Props {
   card: CardDetail;
+  // 文獻編輯用（皆為選填，未傳＝卡片行為）：
+  // save 取代 api.patchCard；allowMention=false 關閉 @ 引用（文獻之間沒有連結，原文裡的 @ 也不該跳彈窗）；
+  // plainPaste=true 貼上一律走純文字，不經 HTML 重建（文獻要求原文逐字）
+  save?(patch: { title: string; body: string }, expectedUpdatedAt: string): Promise<CardDetail>;
+  allowMention?: boolean;
+  plainPaste?: boolean;
   compact?: boolean;
   hideTopToolbar?: boolean;
   initialSmartPaste?: string | null;
@@ -251,7 +258,7 @@ const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
   { type: "h3", label: "標題 3" },
 ];
 
-export function Editor({ card, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, onDirtyChange, report }: Props) {
+export function Editor({ card, save, allowMention = true, plainPaste = false, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, onDirtyChange, report }: Props) {
   const [title, setTitle] = useState(card.title);
   const [body, setBody] = useState(() => normalizeNewlines(card.body));
   const [cursorPos, setCursorPos] = useState(0);
@@ -349,7 +356,7 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
     setStatus("saving");
     const snap = { ...latest.current };
     try {
-      const updated = await api.patchCard(card.id, snap, versionRef.current);
+      const updated = save ? await save(snap, versionRef.current) : await api.patchCard(card.id, snap, versionRef.current);
       versionRef.current = updated.updated_at;
       setWarnings(updated.warnings);
       onSaved(updated);
@@ -826,9 +833,11 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
       </span>
 
       <span role="group" aria-label="插入" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-        <button type="button" onClick={openMentionFromToolbar}>
-          @ 引用
-        </button>
+        {allowMention && (
+          <button type="button" onClick={openMentionFromToolbar}>
+            @ 引用
+          </button>
+        )}
         <button type="button" onClick={insertCodeBlock} title="在卡片中插入可命名的代碼區塊">
           ＋ 代碼塊
         </button>
@@ -1151,7 +1160,7 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
                         onBody(nextBody);
                         setCursorPos(globalPos);
                         requestAnimationFrame(keepCaretComfortable);
-                        if (nextBody.length >= prevBodyLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
+                        if (allowMention && nextBody.length >= prevBodyLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
                           const trig = detectAtTrigger(nextBody, globalPos);
                           if (trig && trig.query === "") {
                             setMentionState({
@@ -1202,6 +1211,8 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
                           if (files.length) void uploadFiles(files, gFrom);
                           return true;
                         }
+                        // 文獻：不做任何 HTML 轉換，交給編輯器原生的純文字貼上
+                        if (plainPaste) return false;
                         // 游標在代碼圍欄內：一律走原生純文字貼上，不經 HTML 重建，避免代碼被改寫
                         if (extractCodeBlocks(latest.current.body).some((b) => gFrom >= b.contentStart && gFrom <= b.contentEnd)) {
                           return false;
@@ -1467,7 +1478,7 @@ function normalizeSmartPasteInput(rawInput: string): string {
   // 語言標籤與代碼可能是點號相連（如 CSS.app）、空格相連（如 Python   return）、或直接換行
   const markerRegex = new RegExp(
     `([^\n\r])?[ \\t]*` +
-      `([#*>\`\\-\\s0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
+      `([#*>\`\\-\\t 0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
       `(?:[ \\t]*(?:` +
       LANGS +
       `)(?:[ \\t]*(?:copy(?:[ \\t]*code)?|複製(?:[ \\t]*代碼|[ \\t]*程式碼)?))?)?` +
@@ -1485,7 +1496,7 @@ function normalizeSmartPasteInput(rawInput: string): string {
   // 在標記前補換行、標記後補換行，並將緊鄰的語言標記剝除，把純代碼保留到下一行
   const inlineMarkerRegex = new RegExp(
     `([^\n\r])?[ \\t]*` +
-      `([#*>\`\\-\\s0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
+      `([#*>\`\\-\\t 0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
       `(?:[ \\t]*(?:` +
       LANGS +
       `)(?:[ \\t]*(?:copy(?:[ \\t]*code)?|複製(?:[ \\t]*代碼|[ \\t]*程式碼)?))?)?` +

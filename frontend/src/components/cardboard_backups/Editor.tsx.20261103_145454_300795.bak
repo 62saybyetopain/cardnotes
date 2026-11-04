@@ -1,5 +1,6 @@
 // @depends-on ../lib/markdown.ts (BULLET_STYLE_OPTIONS, HIGHLIGHT_COLOR_OPTIONS, ORDERED_STYLE_OPTIONS, applyHighlight, applyInlineWrap, applyLineType, detectAtTrigger, detectLineType, detectListStyleAtCursor, formatCardRef, handleListEnter, indentListLines, transformPasteContent)
 // @depends-on ./MentionPopup.tsx (MentionPopup)
+// @depends-on ./LiteratureLibrary.tsx (save／allowMention／plainPaste：文獻編輯用的三個選填 prop；未傳時行為與卡片完全相同。文獻以 asEditorCard 轉接成 CardDetail，Editor 只用到 id／title／body／updated_at／warnings)
 // @depends-on ./Markdown.tsx (Markdown)
 // @depends-on ./LiveSegmentEditor.tsx (LiveSegmentEditor, SegmentHandle；內文編輯改用 CodeMirror，位移一律是 body 的全域字元位移)
 // @depends-on ../lib/liveMarkdown.ts (編輯中的即時渲染；語法規則與 Markdown.tsx 重複一份)
@@ -36,6 +37,12 @@ type Status = "saved" | "dirty" | "saving" | "error" | "conflict";
 
 interface Props {
   card: CardDetail;
+  // 文獻編輯用（皆為選填，未傳＝卡片行為）：
+  // save 取代 api.patchCard；allowMention=false 關閉 @ 引用（文獻之間沒有連結，原文裡的 @ 也不該跳彈窗）；
+  // plainPaste=true 貼上一律走純文字，不經 HTML 重建（文獻要求原文逐字）
+  save?(patch: { title: string; body: string }, expectedUpdatedAt: string): Promise<CardDetail>;
+  allowMention?: boolean;
+  plainPaste?: boolean;
   compact?: boolean;
   hideTopToolbar?: boolean;
   initialSmartPaste?: string | null;
@@ -251,7 +258,7 @@ const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
   { type: "h3", label: "標題 3" },
 ];
 
-export function Editor({ card, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, onDirtyChange, report }: Props) {
+export function Editor({ card, save, allowMention = true, plainPaste = false, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, onDirtyChange, report }: Props) {
   const [title, setTitle] = useState(card.title);
   const [body, setBody] = useState(() => normalizeNewlines(card.body));
   const [cursorPos, setCursorPos] = useState(0);
@@ -349,7 +356,7 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
     setStatus("saving");
     const snap = { ...latest.current };
     try {
-      const updated = await api.patchCard(card.id, snap, versionRef.current);
+      const updated = save ? await save(snap, versionRef.current) : await api.patchCard(card.id, snap, versionRef.current);
       versionRef.current = updated.updated_at;
       setWarnings(updated.warnings);
       onSaved(updated);
@@ -589,6 +596,36 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
     });
   };
 
+  const insertTable = (cols: number, rows: number) => {
+    const cur = latest.current.body;
+    const { start: from, end: to } = getGlobalSelection();
+    const tableMarkdown = createMarkdownTable(cols, rows);
+    const prefixNewline = from > 0 && cur[from - 1] !== "\n" ? "\n\n" : "";
+    const suffixNewline = to < cur.length && cur[to] !== "\n" ? "\n\n" : "\n";
+    const insertText = prefixNewline + tableMarkdown + suffixNewline;
+    const nextText = cur.slice(0, from) + insertText + cur.slice(to);
+    const cursorInside = from + prefixNewline.length + tableMarkdown.length;
+    applyEditPatch({
+      text: nextText,
+      selectionStart: cursorInside,
+      selectionEnd: cursorInside,
+      replaceFrom: from,
+      replaceTo: to,
+      insertText,
+    });
+  };
+
+  const handleTableAction = (action: "addRow" | "deleteRow" | "addCol" | "deleteCol" | "deleteTable") => {
+    const cur = latest.current.body;
+    const { start: selStart } = getGlobalSelection();
+    const info = detectTableAtCursor(cur, selStart);
+    if (!info) return;
+    const patch = modifyMarkdownTable(cur, info, action);
+    if (patch) {
+      applyEditPatch(patch);
+    }
+  };
+
   const currentLineType = detectLineType(body, cursorPos);
   const currentListStyle = detectListStyleAtCursor(body, cursorPos);
   const activeBulletStyle = currentListStyle.bulletStyle ?? bulletStyle;
@@ -602,6 +639,7 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
     .reduce((n, w) => n + w.ids.length, 0);
 
   const [openMenu, setOpenMenu] = useState<"bullet" | "ordered" | null>(null);
+  const [tablePickerOpen, setTablePickerOpen] = useState(false);
 
   // 反白圖標列：位置由 LiveSegmentEditor 回報；停頓 150ms 才顯示（拖曳選取時不閃爍），收合或失焦立即隱藏
   const [selBubble, setSelBubble] = useState<{ segStart: number; left: number; top: number } | null>(null);
@@ -664,6 +702,18 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
   }, [openMenu]);
+
+  useEffect(() => {
+    if (!tablePickerOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target?.closest("[data-table-picker]") && !target?.closest("[data-table-btn]")) {
+        setTablePickerOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [tablePickerOpen]);
 
   const activeBulletMeta = BULLET_STYLE_OPTIONS.find((o) => o.style === activeBulletStyle);
   const activeOrderedMeta = ORDERED_STYLE_OPTIONS.find((o) => o.style === activeOrderedStyle);
@@ -826,12 +876,66 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
       </span>
 
       <span role="group" aria-label="插入" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-        <button type="button" onClick={openMentionFromToolbar}>
-          @ 引用
-        </button>
+        {allowMention && (
+          <button type="button" onClick={openMentionFromToolbar}>
+            @ 引用
+          </button>
+        )}
         <button type="button" onClick={insertCodeBlock} title="在卡片中插入可命名的代碼區塊">
           ＋ 代碼塊
         </button>
+        <span style={{ position: "relative", display: "inline-flex" }}>
+          <button
+            type="button"
+            data-table-btn
+            className={detectTableAtCursor(latest.current.body, cursorPos) ? "on" : ""}
+            onClick={() => setTablePickerOpen((o) => !o)}
+            title="建立或管理表格（Word 式選取欄列）"
+          >
+            ⊞ 表格 ▾
+          </button>
+          <TableGridPicker onClose="{()" open="{tablePickerOpen}"> setTablePickerOpen(false)}
+            onInsert={insertTable}
+            inTable={Boolean(detectTableAtCursor(latest.current.body, cursorPos))}
+            onAction={handleTableAction}
+          />
+        </span>
+        {detectTableAtCursor(latest.current.body, cursorPos) && (
+          <span role="group" aria-label="表格快捷" style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+            <button
+              type="button"
+              style={{ fontSize: 11, padding: "2px 6px" }}
+              onClick={() => handleTableAction("addRow")}
+              title="在下方增加一列"
+            >
+              ＋列
+            </button>
+            <button
+              type="button"
+              style={{ fontSize: 11, padding: "2px 6px" }}
+              onClick={() => handleTableAction("deleteRow")}
+              title="刪除游標所在列"
+            >
+              ➖列
+            </button>
+            <button
+              type="button"
+              style={{ fontSize: 11, padding: "2px 6px" }}
+              onClick={() => handleTableAction("addCol")}
+              title="在右側增加一欄"
+            >
+              ＋欄
+            </button>
+            <button
+              type="button"
+              style={{ fontSize: 11, padding: "2px 6px" }}
+              onClick={() => handleTableAction("deleteCol")}
+              title="刪除游標所在欄"
+            >
+              ➖欄
+            </button>
+          </span>
+        )}
         <button
           type="button"
           onClick={() => setCodePatchOpen(true)}
@@ -1151,7 +1255,7 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
                         onBody(nextBody);
                         setCursorPos(globalPos);
                         requestAnimationFrame(keepCaretComfortable);
-                        if (nextBody.length >= prevBodyLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
+                        if (allowMention && nextBody.length >= prevBodyLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
                           const trig = detectAtTrigger(nextBody, globalPos);
                           if (trig && trig.query === "") {
                             setMentionState({
@@ -1201,6 +1305,12 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
                           const files = takeFiles(cd.files);
                           if (files.length) void uploadFiles(files, gFrom);
                           return true;
+                        }
+                        // 文獻：不做任何 HTML 轉換，交給編輯器原生的純文字貼上
+                        if (plainPaste) return false;
+                        // 游標在代碼圍欄內：一律走原生純文字貼上，不經 HTML 重建，避免代碼被改寫
+                        if (extractCodeBlocks(latest.current.body).some((b) => gFrom >= b.contentStart && gFrom <= b.contentEnd)) {
+                          return false;
                         }
                         const transformed = transformPasteContent(cd.getData("text/plain"), cd.getData("text/html"));
                         if (transformed === null) return false;
@@ -1290,6 +1400,311 @@ export function Editor({ card, compact = false, initialSmartPaste, onClearInitia
     </div>
   );
 }
+// ---- 表格偵測、Word 式選取與行列智慧增減 ----
+
+interface TableCursorInfo {
+  tableStartOffset: number;
+  tableEndOffset: number;
+  lines: string[];
+  currentRowIndex: number;
+  currentColIndex: number;
+}
+
+function detectTableAtCursor(body: string, cursor: number): TableCursorInfo | null {
+  if (!body) return null;
+  const lines = body.split("\n");
+  const lineStarts: number[] = [];
+  let acc = 0;
+  let targetLine = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    lineStarts.push(acc);
+    const lineLen = lines[i].length;
+    if (cursor >= acc && cursor <= acc + lineLen) {
+      targetLine = i;
+    }
+    acc += lineLen + 1;
+  }
+  if (targetLine === -1) return null;
+
+  const isTableRow = (s: string) => {
+    const t = s.trim();
+    return t.startsWith("|") && t.endsWith("|") && t.length >= 2;
+  };
+
+  if (!isTableRow(lines[targetLine])) return null;
+
+  let startLine = targetLine;
+  while (startLine > 0 && isTableRow(lines[startLine - 1])) {
+    startLine--;
+  }
+  let endLine = targetLine;
+  while (endLine < lines.length - 1 && isTableRow(lines[endLine + 1])) {
+    endLine++;
+  }
+
+  const tableLines = lines.slice(startLine, endLine + 1);
+  if (tableLines.length < 2) return null;
+
+  const isSep = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/.test(tableLines[1]);
+  if (!isSep) return null;
+
+  const tableStartOffset = lineStarts[startLine];
+  const lastLineOffset = lineStarts[endLine];
+  const tableEndOffset = lastLineOffset + lines[endLine].length;
+
+  const currentRowIndex = targetLine - startLine;
+  const curLineText = lines[targetLine];
+  const cursorInLine = Math.max(0, cursor - lineStarts[targetLine]);
+  const prefixWithoutEscapes = curLineText.slice(0, cursorInLine).replace(/\\\|/g, "");
+  const pipeMatches = prefixWithoutEscapes.match(/\|/g);
+  const currentColIndex = pipeMatches ? Math.max(0, pipeMatches.length - 1) : 0;
+
+  return {
+    tableStartOffset,
+    tableEndOffset,
+    lines: tableLines,
+    currentRowIndex,
+    currentColIndex,
+  };
+}
+
+function createMarkdownTable(cols: number, rows: number): string {
+  const c = Math.max(1, cols);
+  const r = Math.max(2, rows);
+  const header = "| " + Array.from({ length: c }, (_, i) => `標題 ${i + 1}`).join(" | ") + " |";
+  const sep = "| " + Array.from({ length: c }, () => "---").join(" | ") + " |";
+  const dataRows: string[] = [];
+  for (let i = 0; i < r - 1; i++) {
+    dataRows.push("| " + Array.from({ length: c }, () => "  ").join(" | ") + " |");
+  }
+  return [header, sep, ...dataRows].join("\n");
+}
+
+function modifyMarkdownTable(
+  body: string,
+  info: TableCursorInfo,
+  action: "addRow" | "deleteRow" | "addCol" | "deleteCol" | "deleteTable",
+): EditPatch | null {
+  const { lines, currentRowIndex, currentColIndex, tableStartOffset, tableEndOffset } = info;
+  if (action === "deleteTable") {
+    const nextBody = body.slice(0, tableStartOffset) + body.slice(tableEndOffset);
+    return {
+      text: nextBody,
+      selectionStart: tableStartOffset,
+      selectionEnd: tableStartOffset,
+      replaceFrom: tableStartOffset,
+      replaceTo: tableEndOffset,
+      insertText: "",
+    };
+  }
+
+  const parseRow = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return [];
+    return trimmed.slice(1, -1).split("|").map((c) => c.trim());
+  };
+  const formatRow = (cells: string[]) => "| " + cells.map((c) => (c.length ? c : "  ")).join(" | ") + " |";
+
+  const headerCells = parseRow(lines[0]);
+  const colCount = Math.max(1, headerCells.length);
+  const newLines = [...lines];
+
+  if (action === "addRow") {
+    const insertIdx = Math.max(2, currentRowIndex + 1);
+    const newRow = formatRow(Array.from({ length: colCount }, () => "  "));
+    newLines.splice(insertIdx, 0, newRow);
+  } else if (action === "deleteRow") {
+    if (newLines.length <= 3) {
+      return modifyMarkdownTable(body, info, "deleteTable");
+    }
+    if (currentRowIndex === 0 || currentRowIndex === 1) {
+      newLines.splice(2, 1);
+    } else {
+      newLines.splice(currentRowIndex, 1);
+    }
+  } else if (action === "addCol") {
+    const targetCol = Math.min(colCount, currentColIndex + 1);
+    for (let i = 0; i < newLines.length; i++) {
+      const cells = parseRow(newLines[i]);
+      if (i === 0) {
+        cells.splice(targetCol, 0, `標題 ${colCount + 1}`);
+      } else if (i === 1) {
+        cells.splice(targetCol, 0, "---");
+      } else {
+        cells.splice(targetCol, 0, "  ");
+      }
+      newLines[i] = formatRow(cells);
+    }
+  } else if (action === "deleteCol") {
+    if (colCount <= 1) {
+      return modifyMarkdownTable(body, info, "deleteTable");
+    }
+    const targetCol = Math.min(colCount - 1, currentColIndex);
+    for (let i = 0; i < newLines.length; i++) {
+      const cells = parseRow(newLines[i]);
+      cells.splice(targetCol, 1);
+      newLines[i] = formatRow(cells);
+    }
+  }
+
+  const nextTableStr = newLines.join("\n");
+  const nextBody = body.slice(0, tableStartOffset) + nextTableStr + body.slice(tableEndOffset);
+  const newCursor = Math.min(nextBody.length, tableStartOffset + nextTableStr.length);
+
+  return {
+    text: nextBody,
+    selectionStart: newCursor,
+    selectionEnd: newCursor,
+    replaceFrom: tableStartOffset,
+    replaceTo: tableEndOffset,
+    insertText: nextTableStr,
+  };
+}
+
+function TableGridPicker(props: {
+  open: boolean;
+  onClose(): void;
+  onInsert(cols: number, rows: number): void;
+  inTable: boolean;
+  onAction(action: "addRow" | "deleteRow" | "addCol" | "deleteCol" | "deleteTable"): void;
+}) {
+  const { open, onClose, onInsert, inTable, onAction } = props;
+  const [hoverR, setHoverR] = useState(0);
+  const [hoverC, setHoverC] = useState(0);
+
+  if (!open) return null;
+
+  const MAX_ROWS = 8;
+  const MAX_COLS = 8;
+
+  return (
+    <div
+      role="menu"
+      data-table-picker
+      style={{
+        position: "absolute",
+        top: "100%",
+        left: 0,
+        marginTop: 4,
+        zIndex: 35,
+        padding: 10,
+        background: "var(--panel, #1e293b)",
+        border: "1px solid var(--line, #475569)",
+        borderRadius: 6,
+        boxShadow: "0 6px 18px rgba(0, 0, 0, 0.32)",
+        minWidth: 170,
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, display: "flex", justifyContent: "space-between" }}>
+        <span>{hoverR > 0 && hoverC > 0 ? `${hoverC} × ${hoverR} 表格` : "選取表格欄列"}</span>
+        <span className="muted" style={{ fontWeight: 400, fontSize: 11 }}>Word 式選取</span>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: `repeat(${MAX_COLS}, 16px)`,
+          gap: 3,
+          marginBottom: 8,
+          cursor: "pointer",
+        }}
+        onMouseLeave={() => {
+          setHoverR(0);
+          setHoverC(0);
+        }}
+      >
+        {Array.from({ length: MAX_ROWS * MAX_COLS }).map((_, idx) => {
+          const r = Math.floor(idx / MAX_COLS) + 1;
+          const c = (idx % MAX_COLS) + 1;
+          const active = r <= hoverR && c <= hoverC;
+          return (
+            <div
+              key={idx}
+              onMouseEnter={() => {
+                setHoverR(r);
+                setHoverC(c);
+              }}
+              onClick={() => {
+                onInsert(c, r);
+                onClose();
+              }}
+              style={{
+                width: 16,
+                height: 16,
+                border: "1px solid " + (active ? "var(--accent, #60a5fa)" : "var(--line, #475569)"),
+                borderRadius: 2,
+                background: active ? "rgba(96, 165, 250, 0.35)" : "rgba(255, 255, 255, 0.05)",
+                transition: "background 0.1s, border-color 0.1s",
+              }}
+            />
+          );
+        })}
+      </div>
+
+      {inTable && (
+        <div style={{ borderTop: "1px solid var(--line, #475569)", paddingTop: 8, marginTop: 4 }}>
+          <div style={{ fontSize: 11, color: "var(--muted, #94a3b8)", marginBottom: 4 }}>目前表格快捷操作：</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+            <button
+              type="button"
+              style={{ fontSize: 11, padding: "3px 4px" }}
+              onClick={() => {
+                onAction("addRow");
+                onClose();
+              }}
+            >
+              ➕ 下方增列
+            </button>
+            <button
+              type="button"
+              style={{ fontSize: 11, padding: "3px 4px" }}
+              onClick={() => {
+                onAction("deleteRow");
+                onClose();
+              }}
+            >
+              ➖ 刪除此列
+            </button>
+            <button
+              type="button"
+              style={{ fontSize: 11, padding: "3px 4px" }}
+              onClick={() => {
+                onAction("addCol");
+                onClose();
+              }}
+            >
+              ➕ 右側增欄
+            </button>
+            <button
+              type="button"
+              style={{ fontSize: 11, padding: "3px 4px" }}
+              onClick={() => {
+                onAction("deleteCol");
+                onClose();
+              }}
+            >
+              ➖ 刪除此欄
+            </button>
+          </div>
+          <button
+            type="button"
+            className="danger"
+            style={{ fontSize: 11, padding: "2px 6px", width: "100%", marginTop: 6 }}
+            onClick={() => {
+              onAction("deleteTable");
+              onClose();
+            }}
+          >
+            刪除整個表格
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---- 多代碼塊掃描、模式 B 智慧拆解與唯一性定位取代 ----
 
 interface ParsedCodeBlock {
@@ -1463,7 +1878,7 @@ function normalizeSmartPasteInput(rawInput: string): string {
   // 語言標籤與代碼可能是點號相連（如 CSS.app）、空格相連（如 Python   return）、或直接換行
   const markerRegex = new RegExp(
     `([^\n\r])?[ \\t]*` +
-      `([#*>\`\\-\\s0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
+      `([#*>\`\\-\\t 0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
       `(?:[ \\t]*(?:` +
       LANGS +
       `)(?:[ \\t]*(?:copy(?:[ \\t]*code)?|複製(?:[ \\t]*代碼|[ \\t]*程式碼)?))?)?` +
@@ -1481,7 +1896,7 @@ function normalizeSmartPasteInput(rawInput: string): string {
   // 在標記前補換行、標記後補換行，並將緊鄰的語言標記剝除，把純代碼保留到下一行
   const inlineMarkerRegex = new RegExp(
     `([^\n\r])?[ \\t]*` +
-      `([#*>\`\\-\\s0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
+      `([#*>\`\\-\\t 0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
       `(?:[ \\t]*(?:` +
       LANGS +
       `)(?:[ \\t]*(?:copy(?:[ \\t]*code)?|複製(?:[ \\t]*代碼|[ \\t]*程式碼)?))?)?` +

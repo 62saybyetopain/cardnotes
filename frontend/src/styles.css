@@ -43,7 +43,7 @@ input, textarea, select { font: inherit; color: inherit; background: var(--panel
 .left-header { display: flex; justify-content: space-between; align-items: center; padding: 6px 4px 10px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
 .left-header-title { font-weight: 700; font-size: 14px; letter-spacing: 0.02em; color: var(--accent); }
 .left-header-actions { display: inline-flex; align-items: center; gap: 4px; }
-.left-collapsed-bar { position: absolute; left: 8px; top: 8px; z-index: 10; display: inline-flex; align-items: center; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 3px 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12); }.left-collapsed-bar { position: absolute; left: 8px; top: 8px; z-index: 10; display: inline-flex; align-items: center; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 3px 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12); }
+.left-collapsed-bar { position: absolute; left: 8px; top: 8px; z-index: 10; display: inline-flex; align-items: center; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 3px 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12); }
 .app > .left { border-right: 1px solid var(--line); padding: 8px; }
 .app > .right { position: relative; border-left: 1px solid var(--line); display: flex; flex-direction: column; min-width: 0; container-type: inline-size; container-name: right-panel; }
 .right-resizer { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 10; }
@@ -52,8 +52,10 @@ input, textarea, select { font: inherit; color: inherit; background: var(--panel
 /* 所有滿版視圖（白板、圖譜、日誌、文獻庫、卡片冊、中央編輯）都以 .center-stage 為定位容器，頂欄在它上方、不蓋住任何東西 */
 .center-stage { position: relative; flex: 1; min-height: 0; }
 /* 頂欄：切換列固定靠左，其餘按鈕靠右；切換列的位置不再受右邊有幾顆按鈕影響 */
-.center-topbar { position: relative; z-index: 20; flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
-.center-topbar > .view-switch { margin-right: auto; }
+.center-topbar { position: relative; z-index: 20; flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.center-topbar > .view-switch { margin-right: auto; background: transparent; border: 0; border-radius: 0; padding: 0; }
+.center-topbar > .view-switch button { padding: 3px 8px; }
+.center-topbar > .view-switch button:not(.on):hover { background: var(--accent-soft); }
 .center-topbar > .left-collapsed-bar { position: static; padding: 0; border: 0; background: transparent; box-shadow: none; }
 /* 白板工具列的「加入文獻」挑選浮層 */
 .lit-picker-wrap { position: relative; display: inline-flex; }
