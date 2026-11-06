@@ -121,6 +121,12 @@ export class CardboardDatabase extends Dexie {
     this.version(3).stores({
       board_notes: "id, board_id",
     });
+    // v4：cards 加 [title+id] 複合索引，讓 listAllCardTitles 只讀索引鍵、不載入內文。
+    // 只加索引不轉資料，不需要 upgrade；stores 必須完整重寫 cards 既有的索引字串。
+    // @depends-on indexedDbDriver.ts::listAllCardTitles（orderBy("[title+id]")，索引改名或移除時一起改）
+    this.version(4).stores({
+      cards: "id, updated_at, card_type, curation_status, [title+id]",
+    });
   }
 }
 

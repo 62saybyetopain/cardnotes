@@ -1,10 +1,11 @@
 // @depends-on ../api.ts (listLiterature, createLiterature, getLiterature, patchLiterature, literatureDeletePreview, deleteLiterature 與收藏夾方法；僅電腦端)
-// @depends-on ./Editor.tsx (save／allowMention／plainPaste：文獻編輯沿用卡片編輯器；card 參數以 asEditorCard 轉接，Editor 只用到 id／title／body／updated_at／warnings)
+// @depends-on ./Editor.tsx (save／allowMention／pasteTransform：文獻編輯沿用卡片編輯器，貼上改用 lib/pasteHtml.ts 的 htmlToMarkdownPaste 保留網頁格式；card 參數以 asEditorCard 轉接，Editor 只用到 id／title／body／updated_at／warnings)
 // @depends-on ./Markdown.tsx (Markdown：唯讀顯示；整段只有一個 YouTube 網址會渲染成點擊播放)
 // @depends-on ../styles.css (.lit-*)
-// @depends-on ../App.tsx (focusId：從卡片側跳進來時指定要顯示哪一份；顯示後由 onFocusConsumed 清除)
+// @depends-on ../App.tsx (focusId：從卡片側跳進來時指定要顯示哪一份；顯示後由 onFocusConsumed 清除；onEditInCenter：App 以 lit:<id> 開中央編輯，要求 CardEditorPane 認得 lit: 前綴；literatureTick：App 每收到一次文獻儲存通知就遞增，本元件據此重抓，否則中央編輯存檔後這裡會顯示舊內文，再進內嵌編輯會以舊版本號觸發 409)
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { htmlToMarkdownPaste } from "../lib/pasteHtml";
 import type { CardDetail, Literature, LiteratureCollection, LiteratureSummary } from "../types";
 import { Editor } from "./Editor";
 import { Markdown } from "./Markdown";
@@ -39,12 +40,14 @@ export function LiteratureLibrary(props: {
   onFocusConsumed(): void;
   onOpenCard(id: string): void;
   onAddToBoard(id: string): void; // 放上目前白板；成功與否由 Board 自己提示
+  onEditInCenter(id: string): void; // 以中央編輯視窗開啟這份文獻
+  literatureTick: number; // 文獻儲存通知計數；非內嵌編輯時遞增就重抓詳情與清單
   onChanged(id: string, patch: { title?: string; body?: string; author?: string }): void; // 同步白板上的文獻節點
   onDeleted(id: string): void; // 文獻已刪除：白板上的節點一併移除
   report(e: unknown, prefix?: string): void;
   info(text: string): void;
 }) {
-  const { version, focusId, onFocusConsumed, onOpenCard, onAddToBoard, onChanged, onDeleted, report, info } = props;
+  const { version, focusId, onFocusConsumed, onOpenCard, onAddToBoard, onEditInCenter, literatureTick, onChanged, onDeleted, report, info } = props;
   const [items, setItems] = useState<LiteratureSummary[]>([]);
   const [collections, setCollections] = useState<LiteratureCollection[]>([]);
   const [q, setQ] = useState("");
@@ -60,6 +63,9 @@ export function LiteratureLibrary(props: {
   const [dtick, setDtick] = useState(0); // 詳情重抓
   const [meta, setMeta] = useState({ author: "", url: "", captured_on: "" });
   const seq = useRef(0);
+  const editingRef = useRef(false);
+  editingRef.current = editing;
+  const seenTick = useRef(literatureTick);
 
   const refreshList = () => setTick((n) => n + 1);
   const colId = filter.startsWith("c:") ? filter.slice(2) : undefined;
@@ -128,6 +134,15 @@ export function LiteratureLibrary(props: {
     if (!editing) setEditorDirty(false);
   }, [editing]);
 
+  // 中央編輯視窗存檔後 App 會遞增 literatureTick：重抓詳情與清單。內嵌編輯中由編輯器自己維護版本，不重抓
+  useEffect(() => {
+    if (literatureTick === seenTick.current) return;
+    seenTick.current = literatureTick;
+    if (editingRef.current) return;
+    setDtick((n) => n + 1);
+    setTick((n) => n + 1);
+  }, [literatureTick]);
+
   // 內文還沒存進資料庫時，任何會換版本號、切換或刪除的動作都先擋下，不讓自動儲存與它互相覆蓋
   const blockedByDirty = (what: string): boolean => {
     if (!editorDirty) return false;
@@ -160,6 +175,13 @@ export function LiteratureLibrary(props: {
     if (!detail) return;
     setMeta({ author: detail.author, url: detail.url, captured_on: detail.captured_on });
     setEditing(true);
+  };
+
+  // 內嵌編輯器與中央編輯器不能同時存在，否則同一份文獻有兩個編輯器各自用版本號存檔
+  const editInCenter = () => {
+    if (!detail || blockedByDirty("開啟中央編輯失敗")) return;
+    setEditing(false);
+    onEditInCenter(detail.id);
   };
 
   const saveMeta = async () => {
@@ -371,7 +393,12 @@ export function LiteratureLibrary(props: {
                   {detail.title || "（無標題）"}
                 </h3>
                 {!editing ? (
-                  <button onClick={startEdit}>✎ 編輯</button>
+                  <>
+                    <button onClick={startEdit}>✎ 編輯</button>
+                    <button onClick={editInCenter} title="以中央編輯視窗開啟（寬版，Esc 返回文獻庫）">
+                      ⛶ 中央編輯
+                    </button>
+                  </>
                 ) : (
                   <button
                     className="primary"
@@ -474,7 +501,7 @@ export function LiteratureLibrary(props: {
                   card={asEditorCard(detail)}
                   save={async (patch, expected) => asEditorCard(await api.patchLiterature(detail.id, patch, expected))}
                   allowMention={false}
-                  plainPaste={true}
+                  pasteTransform={htmlToMarkdownPaste}
                   onSaved={onEditorSaved}
                   onReload={() => void reloadDetail()}
                   onDirtyChange={setEditorDirty}

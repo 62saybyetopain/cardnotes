@@ -1,7 +1,7 @@
 // 提及建議：卡片文字裡提到、但還沒建立的概念標籤與其他卡片（對應 Obsidian 的「未連結的提及」）。
 // 只比對文字、只提出建議：按下按鈕才會寫入，沒有建議時整個面板不顯示。
 // @depends-on ../api.ts (api.listTags, api.assignTag)
-// @depends-on ../lib/mentions.ts (findTagMentions, findCardMentions)
+// @depends-on ../lib/mentions.ts (findTagMentions, findCardMentions；findCardMentions 必須排除 selfId：標題清單只在換卡片時重抓，自己的標題在清單裡可能是舊值)
 // @depends-on ../types.ts (CardDetail, Tag)
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
@@ -51,6 +51,15 @@ export function MentionPanel({ card, onChanged, report, info, loadCardTitles, on
     };
   }, [card.id, card.updated_at, report]);
 
+  // 原因：清單是全部卡片的標題（HTTP 一次全撈、Dexie 讀整張索引），原本每次自動儲存都重抓；
+  // 但 updated_at 是這張卡片的版本，與其他卡片的標題無關，所以只在換卡片時重抓。
+  // 與上面標籤清單刻意不同：標籤可能在左側面板新建後直接回來打字，標籤維持隨存檔重讀。
+  // 已確認：Board 沒有行內改名，改別張卡片標題一定要先選取它；拖入同名檔案不會改標題；新建卡片都會改選取；
+  // MentionPanel 在 RelationsTab 內，切分頁會重新掛載。自己的標題由 findCardMentions 排除，不受舊清單影響。
+  // 已知限制（已檢視 SyncModal 與考卷同步）：兩者都會在選取不變時新增別張卡片（iPad 合併套用、考卷寫入），
+  // 新卡片的標題要等換卡片或切分頁才會進提及建議。舊寫法同樣如此：考卷同步只觸發 cardnote:refresh（App 不遞增 version），
+  // SyncModal 只有目前這張剛好被更新時才靠 updated_at 順帶重抓。
+  // if broken: 提及建議漏掉剛同步進來的卡片；只是少提示，按下按鈕才會寫入
   useEffect(() => {
     if (!loadCardTitles) return;
     let alive = true;
@@ -60,7 +69,7 @@ export function MentionPanel({ card, onChanged, report, info, loadCardTitles, on
     return () => {
       alive = false;
     };
-  }, [card.id, card.updated_at, loadCardTitles, report]);
+  }, [card.id, loadCardTitles, report]);
 
   const text = `${card.title}\n${card.body}`;
   const tagMentions = useMemo(
@@ -143,3 +152,4 @@ export function MentionPanel({ card, onChanged, report, info, loadCardTitles, on
     </div>
   );
 }
+

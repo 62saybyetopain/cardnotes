@@ -1,9 +1,10 @@
 // @depends-on ../lib/markdown.ts (BULLET_STYLE_OPTIONS, HIGHLIGHT_COLOR_OPTIONS, ORDERED_STYLE_OPTIONS, applyHighlight, applyInlineWrap, applyLineType, detectAtTrigger, detectLineType, detectListStyleAtCursor, formatCardRef, handleListEnter, indentListLines, transformPasteContent)
 // @depends-on ./MentionPopup.tsx (MentionPopup)
-// @depends-on ./LiteratureLibrary.tsx (save／allowMention／plainPaste：文獻編輯用的三個選填 prop；未傳時行為與卡片完全相同。文獻以 asEditorCard 轉接成 CardDetail，Editor 只用到 id／title／body／updated_at／warnings)
+// @depends-on ./LiteratureLibrary.tsx, ./RightPanel.tsx::LiteratureEditorPane (save／allowMention／pasteTransform：文獻編輯用的選填 prop；未傳時行為與卡片完全相同。plainPaste 目前沒有呼叫端使用，確認沒有其他呼叫端後可刪。文獻以 asEditorCard 轉接成 CardDetail，Editor 只用到 id／title／body／updated_at／warnings)
 // @depends-on ./Markdown.tsx (Markdown)
 // @depends-on ./LiveSegmentEditor.tsx (LiveSegmentEditor, SegmentHandle；內文編輯改用 CodeMirror，位移一律是 body 的全域字元位移)
 // @depends-on ../lib/liveMarkdown.ts (編輯中的即時渲染；語法規則與 Markdown.tsx 重複一份)
+// @depends-on ../api.ts::writeCardFile／backend cards.py::write_card_file／RightPanel.tsx::FileLinkBox.handleWrite（後端寫入的是資料庫裡的內文，且要求 expected_updated_at 等於資料庫版本；所以取代後必須等 status 為 saved 才能寫檔，否則會悄悄把舊代碼寫進檔案並回報成功。FILE_CONFLICT 的確認流程與 FileLinkBox 相同，改其一要同步另一邊）
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import {
@@ -39,10 +40,12 @@ interface Props {
   card: CardDetail;
   // 文獻編輯用（皆為選填，未傳＝卡片行為）：
   // save 取代 api.patchCard；allowMention=false 關閉 @ 引用（文獻之間沒有連結，原文裡的 @ 也不該跳彈窗）；
-  // plainPaste=true 貼上一律走純文字，不經 HTML 重建（文獻要求原文逐字）
+  // pasteTransform 取代預設的 transformPasteContent（它只保留清單，其餘格式都會消失）；回傳 null＝交給瀏覽器原生純文字貼上
+  // plainPaste=true 貼上一律走純文字（目前沒有呼叫端使用）
   save?(patch: { title: string; body: string }, expectedUpdatedAt: string): Promise<CardDetail>;
   allowMention?: boolean;
   plainPaste?: boolean;
+  pasteTransform?(plainText: string, htmlText: string): string | null;
   compact?: boolean;
   hideTopToolbar?: boolean;
   initialSmartPaste?: string | null;
@@ -258,7 +261,7 @@ const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
   { type: "h3", label: "標題 3" },
 ];
 
-export function Editor({ card, save, allowMention = true, plainPaste = false, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, onDirtyChange, report }: Props) {
+export function Editor({ card, save, allowMention = true, plainPaste = false, pasteTransform = transformPasteContent, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, onDirtyChange, report }: Props) {
   const [title, setTitle] = useState(card.title);
   const [body, setBody] = useState(() => normalizeNewlines(card.body));
   const [cursorPos, setCursorPos] = useState(0);
@@ -568,6 +571,32 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, co
       setCodePatchOpen(true);
     }
   }, [initialSmartPaste]);
+
+  // 取代成功且卡片綁定了本機檔案時詢問是否寫檔；null＝不顯示
+  const [filePrompt, setFilePrompt] = useState<{ writing: boolean; result: string | null } | null>(null);
+
+  const writeBoundFile = async (force = false): Promise<void> => {
+    setFilePrompt({ writing: true, result: null });
+    try {
+      // 後端寫的是資料庫裡的內文；按鈕只在 status 為 saved 時可按，此時 versionRef 就是資料庫版本
+      const res = await api.writeCardFile(card.id, { expected_updated_at: versionRef.current, force });
+      setFilePrompt({
+        writing: false,
+        result: `✓ ${res.message}${res.has_backup ? "（已於 cardboard_backups 保留備份）" : ""}`,
+      });
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "FILE_CONFLICT") {
+        if (window.confirm(`⚠️ ${e.message}\n\n是否仍要強制覆寫？`)) {
+          await writeBoundFile(true);
+          return;
+        }
+        setFilePrompt({ writing: false, result: null });
+        return;
+      }
+      setFilePrompt({ writing: false, result: null });
+      report(e, "寫入檔案失敗");
+    }
+  };
 
   const insertCodeBlock = () => {
     const label = window.prompt("輸入代碼塊名稱或檔名（例如 Board.tsx，可留空）", "");
@@ -1031,9 +1060,52 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, co
           onApplyPatch={(patch) => {
             applyEditPatch(patch);
             onClearInitialSmartPaste?.();
+            if (card.file_path) setFilePrompt({ writing: false, result: null });
           }}
         />
       )}
+
+      {filePrompt && (() => {
+        const saveReady = status === "saved" && uploading === 0;
+        const saveBroken = status === "error" || status === "conflict";
+        return (
+          <div className="modal" role="dialog" aria-label="寫入綁定檔案">
+            <div className="modal-card" style={{ maxWidth: 460 }}>
+              <h4 style={{ margin: 0 }}>寫入綁定檔案？</h4>
+              <div style={{ margin: "8px 0", fontSize: 13 }}>
+                <div>代碼已取代並更新到卡片。此卡片綁定了本機檔案：</div>
+                <div style={{ fontFamily: "monospace", fontSize: 12, wordBreak: "break-all", margin: "4px 0" }}>
+                  {card.file_path}
+                </div>
+              </div>
+              {filePrompt.result ? (
+                <div style={{ fontSize: 13 }}>{filePrompt.result}</div>
+              ) : !saveReady ? (
+                <div className="muted" style={{ fontSize: 12 }}>
+                  {saveBroken
+                    ? `卡片尚未存入資料庫（${STATUS_TEXT[status]}），無法寫入檔案`
+                    : "等待卡片儲存完成…"}
+                </div>
+              ) : null}
+              <div className="modal-actions" style={{ marginTop: 12 }}>
+                <button type="button" onClick={() => setFilePrompt(null)} disabled={filePrompt.writing}>
+                  {filePrompt.result ? "關閉" : "不寫入"}
+                </button>
+                {!filePrompt.result && (
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={!saveReady || filePrompt.writing}
+                    onClick={() => void writeBoundFile()}
+                  >
+                    {filePrompt.writing ? "寫入中…" : "⚡ 寫入檔案"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       <div
         ref={scrollContainerRef}
@@ -1314,7 +1386,7 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, co
                         if (extractCodeBlocks(latest.current.body).some((b) => gFrom >= b.contentStart && gFrom <= b.contentEnd)) {
                           return false;
                         }
-                        const transformed = transformPasteContent(cd.getData("text/plain"), cd.getData("text/html"));
+                        const transformed = pasteTransform(cd.getData("text/plain"), cd.getData("text/html"));
                         if (transformed === null) return false;
                         const cur = latest.current.body;
                         const nextText = cur.slice(0, gFrom) + transformed + cur.slice(gTo);

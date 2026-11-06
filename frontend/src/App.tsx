@@ -8,7 +8,7 @@
 // @depends-on ./components/DailyReview.tsx (DailyReview：只在 viewMode === "daily" 掛載；此視圖不渲染右側面板，grid 欄位與 right-closed 都改看 showRight)
 // @depends-on ./styles.css (.center-topbar[data-view]：日誌與卡片冊視圖隱藏頂欄的「新增卡片」與「收合右側面板」；.center-stage 是所有滿版視圖的定位容器；.app.standalone 只有獨立模式才為左側收合鈕預留左邊距)
 // @depends-on ./components/LiteraturePicker.tsx (白板工具列的「加入文獻」：自己管理開關，選定後經 onPick 轉給 BoardHandle.addLiterature)
-// @depends-on ./components/LiteratureLibrary.tsx (LiteratureLibrary：只在 viewMode === "literature" 掛載；focusId 由卡片側經 LiteratureField 的 requestOpenLiterature 觸發，顯示後由 onFocusConsumed 清除)
+// @depends-on ./components/LiteratureLibrary.tsx (LiteratureLibrary：只在 viewMode === "literature" 掛載；focusId 由卡片側經 LiteratureField 的 requestOpenLiterature 觸發，顯示後由 onFocusConsumed 清除；onEditInCenter 以 lit:<id> 呼叫 openCardInCenter，要求 CardEditorPane 能以 lit: 前綴載入文獻；literatureTick 由 onLiteratureChanged 遞增，不可改用 bump，否則 CardEditorPane 會在每次存檔後重載)
 // @depends-on ./components/LiteratureField.tsx (subscribeOpenLiterature：App 必須訂閱，否則卡片側「開啟文獻」會丟錯)
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
@@ -71,6 +71,7 @@ export default function App() {
   const [centerEditing, setCenterEditing] = useState(false);
   const [pendingSmartPaste, setPendingSmartPaste] = useState<string | null>(null);
   const [literatureFocusId, setLiteratureFocusId] = useState<string | null>(null);
+  const [literatureTick, setLiteratureTick] = useState(0);
   const [viewMode, setViewMode] = useState<ViewMode>(initialView.viewMode);
   const [filter, setFilter] = useState<Filter>(initialView.filter);
   const [tab, setTab] = useState<TabKey>("content");
@@ -458,6 +459,7 @@ export default function App() {
 
   const onLiteratureChanged = useCallback((litId: string, patch: LiteraturePatch) => {
     boardRef.current?.updateLiterature(litId, patch);
+    setLiteratureTick((n) => n + 1);
   }, []);
 
   const onLiteratureDeleted = useCallback(
@@ -739,6 +741,8 @@ export default function App() {
                   focusId={literatureFocusId}
                   onFocusConsumed={consumeLiteratureFocus}
                   onAddToBoard={(id) => void boardRef.current?.addLiterature(id)}
+                  onEditInCenter={(id) => openCardInCenter(`lit:${id}`)}
+                  literatureTick={literatureTick}
                   onChanged={onLiteratureChanged}
                   onDeleted={onLiteratureDeleted}
                   onOpenCard={openCardInCenter}

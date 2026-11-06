@@ -247,9 +247,19 @@ export class IndexedDbDriver implements StorageDriver {
   }
 
   // 對齊後端 /cards/titles/all：全部卡片的 id/title，供提及偵測使用（不經 listCards 的 200 筆上限）
+  // 原因：toArray() 會把每張卡的內文都讀進記憶體；改讀 [title+id] 索引鍵（keys() 走 key cursor，不載入內文）。
+  // @depends-on dexieDb.ts::version(4) 的 [title+id] 索引
+  // assumption: 每張卡片的 title 都是字串；title 為 undefined 的記錄不會進索引
+  // if broken: 索引筆數與卡片總數不符就丟錯，不回傳少一部分的清單
   async listAllCardTitles(): Promise<{ items: { id: string; title: string }[] }> {
-    const rows = await db.cards.toArray();
-    return { items: rows.map((c) => ({ id: c.id, title: c.title })) };
+    return db.transaction("r", db.cards, async () => {
+      const keys = (await db.cards.orderBy("[title+id]").keys()) as unknown as [string, string][];
+      const total = await db.cards.count();
+      if (keys.length !== total) {
+        throw new Error(`卡片標題索引不完整：索引 ${keys.length} 筆、卡片 ${total} 張（可能有卡片缺少 title）`);
+      }
+      return { items: keys.map(([title, id]) => ({ id, title })) };
+    });
   }
 
   async patchCard(

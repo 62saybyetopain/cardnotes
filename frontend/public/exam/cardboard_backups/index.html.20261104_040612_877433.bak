@@ -637,6 +637,8 @@ function setTag(p,i,f,v){
   if(f==='sub')ensure(v);else ensure(q.sub,v);
 }
 const qidOf=(p,q)=>q.qid||cid(p,q);
+// 原因：重做／抽題卷會複製題組，複本的 oid 指向原題組；改題組時要連同這些複本一起改，與題組文字既有的同步規則一致。回傳 [考卷, 題組] 配對（含自己）。
+const pTw=(p,ps)=>{const pk=ps.oid||p.id+':'+ps.id;return S.papers.flatMap(x=>x.passages.filter(z=>z===ps||(z.oid||x.id+':'+z.id)===pk).map(z=>[x,z]))};
 const twins=(p,q)=>{const id=qidOf(p,q),r=[];S.papers.forEach(x=>x.questions.forEach(y=>{if(y!==q&&qidOf(x,y)===id)r.push([x,y])}));return r};
 function syncEdit(p,q,f,v){
   const tw=twins(p,q),oo=o=>o.o||o.k;
@@ -1417,8 +1419,10 @@ const orph=p=>{
 };
 const orphUI=p=>{
   const keySet=new Set(p.keyImgs||[]);
-  const o=orph(p).filter(id=>!keySet.has(id));if(!o.length)return'';
-  return'<details open><summary>未被使用的圖片 '+o.length+' 張（檔案在，但沒有放進任何題目或詳解）</summary>'+o.map(id=>'<div class="tg">'+(U[id]?'<img class="fig" data-a="zoom" data-src="'+U[id]+'" src="'+U[id]+'" alt="">':'<p class="miss">圖片讀取失敗：'+esc(id.slice(-24))+'</p>')+'<div class="mk">加到第 <input class="num" type="number" min="1" max="'+p.questions.length+'"> 題 <button data-a="useorph" data-id="'+esc(id)+'">加入題目</button> <button data-a="useorphx" data-id="'+esc(id)+'">加入詳解</button> <button data-a="setkeyimg" data-id="'+esc(id)+'">設為檢討答案圖</button></div></div>').join('')+'</details>';
+  // 原因：有些圖片本來就不屬於任何題目（裝飾圖、頁首圖），留在面板裡永遠清不掉；使用者按「忽略」後記在 p.ignImgs，面板不再列出，可隨時還原。
+  const ign=new Set(p.ignImgs||[]),o=orph(p).filter(id=>!keySet.has(id)&&!ign.has(id)),nig=orph(p).filter(id=>ign.has(id)).length;
+  if(!o.length)return nig?'<p class="hint">已忽略 '+nig+' 張未使用的圖片 <button class="ghost" data-a="unign">全部還原</button></p>':'';
+  return'<details open><summary>未被使用的圖片 '+o.length+' 張（檔案在，但沒有放進任何題目或詳解）</summary><div class="mk"><button data-a="ignall">全部忽略這些圖片</button></div>'+o.map(id=>'<div class="tg">'+(U[id]?'<img class="fig" data-a="zoom" data-src="'+U[id]+'" src="'+U[id]+'" alt="">':'<p class="miss">圖片讀取失敗：'+esc(id.slice(-24))+'</p>')+'<div class="mk">加到第 <input class="num" type="number" min="1" max="'+p.questions.length+'"> 題 <button data-a="useorph" data-id="'+esc(id)+'">加入題目</button> <button data-a="useorphx" data-id="'+esc(id)+'">加入詳解</button> <button data-a="setkeyimg" data-id="'+esc(id)+'">設為檢討答案圖</button> <button data-a="ign" data-id="'+esc(id)+'">忽略</button></div></div>').join('')+(nig?'<p class="hint">已忽略 '+nig+' 張 <button class="ghost" data-a="unign">全部還原</button></p>':'')+'</details>';
 };
 
 const keyImgUI=p=>{
@@ -1431,10 +1435,15 @@ const ta=(f,i,v,ph)=>'<textarea data-f="'+f+'" data-i="'+i+'" placeholder="'+ph+
 const ref=q=>q.from?'<small>'+esc(q.from)+'</small>':'';
 const eb=i=>'<button class="ghost" data-a="edit" data-i="'+i+'">✎ 編輯</button>';
 const imgDel=(a,i,j,b,t)=>'<div class="mk">'+(U[b.id]?'<img src="'+U[b.id]+'" alt="" style="max-height:56px;max-width:120px;background:#fff;border-radius:4px">':'')+'<button class="ghost" data-a="'+a+'" data-i="'+i+'" data-j="'+j+'">✕ 移除'+t+'</button></div>';
+const pEb=i=>'<button class="ghost" data-a="pedit" data-i="'+i+'">✎ 編輯題組</button>';
+const passagePanel=(p,ps,i)=>'<div class="ed">'+ps.blocks.map((b,j)=>{
+  if(b.t==='text'||b.t==='code')return'<small>題組文字 '+(j+1)+'</small><textarea data-f="pb:'+j+'" data-i="'+i+'">'+esc(b.v)+'</textarea><div class="mk"><button class="ghost" data-a="rmpblk" data-i="'+i+'" data-j="'+j+'">✕ 移除這段文字</button></div>';
+  return imgDel('rmpblk',i,j,b,b.t==='tbl'?'題組表格 '+(j+1)+(U[b.id]?'':'（'+esc(tblText(b.html||'').replace(/\s+/g,' ').slice(0,20))+'…）'):'題組圖片 '+(j+1));
+}).join('')+'<div class="mk"><button class="ghost" data-a="addptxt" data-i="'+i+'">＋新增文字段</button></div><small>上傳題組圖片（接在題組最後）</small><input type="file" accept="image/*" multiple data-addpimg data-i="'+i+'"></div>';
 function editPanel(p,q,i,k){
   const ps=po(p,q),first=ps&&(!p.questions[i-1]||p.questions[i-1].pid!==q.pid);
   const et=(f,v,l)=>'<small>'+l+'</small><textarea data-f="'+f+'" data-i="'+i+'">'+esc(v)+'</textarea>';
-  return'<div class="ed">'+(first?ps.blocks.map((b,j)=>b.t==='text'||b.t==='code'?et('pb:'+j,b.v,'題組文字'):b.t==='img'?imgDel('rmpimg',i,j,b,'題組圖片 '+(j+1)):'').join(''):'')+
+  return'<div class="ed">'+
   q.blocks.map((b,j)=>b.t==='text'||b.t==='code'?et('eb:'+j,b.v,'題幹'):'').join('')+(q.blocks.some(b=>b.t==='text')?'':'<button class="ghost" data-a="addtxt" data-i="'+i+'">＋補題幹文字</button>')+
   (q.exp||[]).map((b,j)=>b.t==='text'?et('ex:'+j,b.v,'詳解文字'):'').join('')+'<div class="mk"><button class="ghost" data-a="addxtxt" data-i="'+i+'">＋補詳解文字</button></div><small>補詳解圖片（接在詳解最後）</small><input type="file" accept="image/*" multiple data-addximg data-i="'+i+'">'+
   q.options.map(o=>'<small>選項 '+o.k+'</small><input data-f="eo:'+o.k+'" data-i="'+i+'" value="'+esc(o.v)+'">').join('')+
@@ -1442,8 +1451,9 @@ function editPanel(p,q,i,k){
   (k?'<small>正解（字母）</small><input data-f="key" data-i="'+i+'" value="'+esc(q.key)+'">':'')+
   // 原因：MinerU 漏切的圖沒有位址可對，改成直接把截圖或相簿圖接在這一題後面（接在最後；選項整張被漏掉時，可截圖整個選項區）。
   '<small>補圖片（接在題目最後）</small><input type="file" accept="image/*" multiple data-addimg data-i="'+i+'">'+
-  q.blocks.map((b,j)=>b.t==='img'?imgDel('rmimg',i,j,b,'題目圖片 '+(j+1)):'').join('')+
-  (q.exp||[]).map((b,j)=>b.t==='img'?imgDel('rmximg',i,j,b,'詳解圖片 '+(j+1)):'').join('')+'</div>';
+  // 原因：MinerU 的表格區塊（t:'tbl'）帶 image_path 時 blk() 會畫成圖，但這裡只認 'img'，導致這類圖永遠沒有移除鈕。凡是 blk() 會畫出來的非文字區塊都要能移除。
+  q.blocks.map((b,j)=>b.t==='img'||b.t==='tbl'?imgDel('rmimg',i,j,b,(b.t==='img'||U[b.id]?'題目圖片 ':'題目表格 ')+(j+1)):'').join('')+
+  (q.exp||[]).map((b,j)=>b.t==='img'||b.t==='tbl'?imgDel('rmximg',i,j,b,(b.t==='img'||U[b.id]?'詳解圖片 ':'詳解表格 ')+(j+1)):'').join('')+'</div>';
 }
 // 原因：datalist 依欄位目前文字過濾，填了「商業概論」就看不到其他科目，要改選得先刪字。改成輸入框（手打）旁加一顆下拉鈕，永遠列出科目樹的全部科目；兩者都走同一個 data-f="sub"，寫入路徑不變。占位項 disabled，不會被選成「清空科目」。
 const tagBox=(q,i)=>'<div class="tg"><div class="mk"><input class="grow" data-f="sub" data-i="'+i+'" value="'+esc(q.sub)+'" placeholder="科目（手動輸入，或點右邊選擇）">'+
@@ -1475,7 +1485,7 @@ const stMenu=(q,i)=>{
 };
 // 原因：詳解很長、算式又多，預設收起；展開時才畫內容並排版，平常不佔 KaTeX 的時間。展開狀態只記在記憶體（不存檔），render() 整頁重畫後仍維持。
 const EXPO=new Set();
-const LOCKED=new Set(['edit','addq','addtxt','addxtxt','addopt','rmopt','resplit','rmimg','rmximg','rmpimg','useorph','useorphx','setkeyimg','rmkeyimg']);
+const LOCKED=new Set(['edit','addq','addtxt','addxtxt','addopt','rmopt','resplit','rmimg','rmximg','rmpblk','pedit','addptxt','useorph','useorphx','setkeyimg','rmkeyimg']);
 // 原因：原檔缺詳解編號時，內容是依換頁位置推測歸給這題的；提醒放在展開的詳解裡，不放進自動檢查（那邊的提醒沒辦法解除，會一直掛著）。
 const expBody=q=>(q.expInf?'<p class="wr">⚠ 原檔沒有這題詳解的編號，以下是依圖片或換頁位置推測歸給這題的內容，請核對。</p>':'')+
   (q.expGap?'<p class="wr">⚠ 原檔缺少第 '+q.expGap.join('、')+' 題詳解的編號，又找不到可切開的位置，那幾題的詳解可能被併在這一題裡，請核對。</p>':'')+(q.expLead?'<p class="wr">⚠ 最上方是依位置歸給這一題的「題組詳解」（文章翻譯／圖表），原檔沒有它的題號，請核對。</p>':'')+blks(q.exp);
@@ -1509,7 +1519,7 @@ function rev(p,q,i){
     (q.options.length?'<details'+(Object.values(q.optNotes||{}).some(Boolean)?' open':'')+'><summary>選項筆記（選填）</summary>'+q.options.map(o=>'<input data-f="o:'+o.k+'" data-i="'+i+'" value="'+esc(q.optNotes[o.k]||'')+'" placeholder="選項 '+o.k+' 為什麼對／錯">').join('')+'</details>':'');
   const notesContent=isMod?modFields:normalFields;
 
-  return'<article id="q'+q.no+'" class="'+(w?'ng':'')+'">'+(ps?'<details><summary>題組文章</summary>'+blks(ps.blocks)+'</details>':'')+ref(q)+blks(q.blocks,'<b>'+q.no+'.</b> ')+wr(p,q)+
+  return'<article id="q'+q.no+'" class="'+(w?'ng':'')+'">'+(ps?'<details'+(S.pedit===p.id+':'+ps.id+':'+i?' open':'')+'><summary>題組文章</summary>'+blks(ps.blocks)+pEb(i)+(S.pedit===p.id+':'+ps.id+':'+i?passagePanel(p,ps,i):'')+'</details>':'')+ref(q)+blks(q.blocks,'<b>'+q.no+'.</b> ')+wr(p,q)+
   q.options.map(o=>'<div class="opt '+(q.key.includes(o.k)?'k':q.mine.includes(o.k)?'m':'')+'"><b>'+o.k+'</b>'+esc(o.v)+'</div>').join('')+
   '<div class="mk vrow">'+stBadge(q,i)+
   '<span class="vs">我的 <b>'+esc(q.mine||'—')+'</b>・正解 <b>'+esc(q.key||'無')+'</b></span>'+
@@ -1548,7 +1558,7 @@ function vPaper(){
   const h='<header><h2>'+nameHtml(p.name)+'</h2><button data-a="home">返回</button></header>'+stepper(p.stage)+(p.started?'':iss(p)+orphUI(p));
   if(p.stage===1)return h+'<p class="hint">正解已隱藏。按「開始作答」後會鎖定檢討、彙整與編輯，作答完按「交卷」解除並進入檢討。</p><div class="mk" style="margin:0 0 8px"><button class="pri" data-a="start"'+(p.started?' disabled':'')+'>開始作答</button><button class="pri" data-a="submit"'+(p.started?'':' disabled')+'>交卷</button>'+(p.started?'<small>作答中：檢討、彙整與編輯已鎖定</small>':'')+'</div>'+qs.map((q,i)=>{
     const ps=po(p,q),first=ps&&(!qs[i-1]||qs[i-1].pid!==q.pid);
-    return(first?'<article class="ps"><small>題組：第 '+ps.from+'–'+ps.to+' 題</small>'+blks(ps.blocks)+'</article>':'')+
+    return(first?'<article class="ps"><small>題組：第 '+ps.from+'–'+ps.to+' 題</small>'+blks(ps.blocks)+(p.started?'':pEb(i)+(S.pedit===p.id+':'+ps.id+':'+i?passagePanel(p,ps,i):''))+'</article>':'')+
     '<article id="q'+q.no+'">'+ref(q)+blks(q.blocks,'<b>'+q.no+'.</b> ')+wr(p,q)+
     (q.options.length?q.options.map(o=>'<button class="opt '+(q.mine.includes(o.k)?'sel':'')+'" data-a="pick" data-i="'+i+'" data-k="'+o.k+'"><b>'+o.k+'</b>'+esc(o.v)+'</button>').join(''):
     '<div class="mk">'+L.map(k=>'<button class="opt lt '+(q.mine.includes(k)?'sel':'')+'" data-a="pick" data-i="'+i+'" data-k="'+k+'"><b>'+k+'</b></button>').join('')+'</div>')+
@@ -1743,10 +1753,14 @@ document.addEventListener('click',async e=>{
     case'compose':{const np=compose(d.k);if(!np){msg('沒有符合的題目', true);return}S.papers.unshift(np);S.cur=np.id;S.view='paper';await loadAssets(np);break}
     case'start':p.started=true;p.stage=1;S.edit=null;break;
     case'submit':{p.started=false;if(!p.graded)grade(p);p.stage=2;loadCardView(p,true);break}
-    case'rmpimg':{
-      const ps=po(p,q),b=ps&&ps.blocks[+d.j];if(!b||b.t!=='img')break;
-      const pk=ps.oid||p.id+':'+ps.id;
-      S.papers.forEach(x=>{x.passages.forEach(z=>{if(z===ps||(z.oid||x.id+':'+z.id)===pk)z.blocks=z.blocks.filter(y=>y.id!==b.id)});validate(x)});
+    case'ign':p.ignImgs=[...new Set([...(p.ignImgs||[]),d.id])];break;
+    case'ignall':{const kp=new Set(p.keyImgs||[]);p.ignImgs=[...new Set([...(p.ignImgs||[]),...orph(p).filter(id=>!kp.has(id))])];break}
+    case'unign':p.ignImgs=[];break;
+    case'pedit':{const ps=po(p,q);if(!ps)break;const k=p.id+':'+ps.id+':'+d.i;S.pedit=S.pedit===k?null:k;break}
+    case'addptxt':{const ps=po(p,q);if(!ps)break;pTw(p,ps).forEach(([x,z])=>z.blocks.push({t:'text',v:''}));break}
+    case'rmpblk':{
+      const ps=po(p,q),j=+d.j,b=ps&&ps.blocks[j];if(!b)break;
+      pTw(p,ps).forEach(([x,z])=>{const y=z.blocks[j];if(y&&y.t===b.t&&(y.id||'')===(b.id||''))z.blocks.splice(j,1);validate(x)});
       break}
     case'edit':{const k=p.id+':'+d.i;S.edit=S.edit===k?null:k;break}
     case'filt':S.filt=d.v;break;
@@ -1793,12 +1807,15 @@ document.addEventListener('click',async e=>{
       if(r.opts.length<2){msg('題幹文字裡找不到 (A)(B)… 這樣的選項標記，切不出選項',true);return}
       q.blocks[j].v=wrapBareLatex(r.stem);q.options=r.opts.map(o=>({k:o.k,v:wrapBareLatex(o.v)}));validate(p);break}
     case'rmximg':{
-      const b=q.exp&&q.exp[+d.j];if(!b||b.t!=='img')break;
-      [[p,q],...twins(p,q)].forEach(([x,y])=>{y.exp=(y.exp||[]).filter(z=>z.id!==b.id);if(!y.exp.length)delete y.exp;validate(x)});
+      const b=q.exp&&q.exp[+d.j];if(!b||(b.t!=='img'&&b.t!=='tbl'))break;
+      // 原因：純 HTML 表格的 id 是空字串，只比 id 會連其他純 HTML 表格一起刪；改以 t／id／html 三者完全相同才算同一個區塊。
+      const sm=z=>z.t===b.t&&(z.id||'')===(b.id||'')&&(z.html||'')===(b.html||'');
+      [[p,q],...twins(p,q)].forEach(([x,y])=>{y.exp=(y.exp||[]).filter(z=>!sm(z));if(!y.exp.length)delete y.exp;validate(x)});
       break}
     case'rmimg':{
-      const b=q.blocks[+d.j];if(!b||b.t!=='img')break;
-      [[p,q],...twins(p,q)].forEach(([x,y])=>{y.blocks=y.blocks.filter(z=>z.id!==b.id);validate(x)});
+      const b=q.blocks[+d.j];if(!b||(b.t!=='img'&&b.t!=='tbl'))break;
+      const sm=z=>z.t===b.t&&(z.id||'')===(b.id||'')&&(z.html||'')===(b.html||'');
+      [[p,q],...twins(p,q)].forEach(([x,y])=>{y.blocks=y.blocks.filter(z=>!sm(z));validate(x)});
       break}
     case'setkeyimg':{
       p.keyImgs=p.keyImgs||[];
@@ -1823,7 +1840,7 @@ document.addEventListener('click',async e=>{
     }
   }
   save();render();
-  if(['pick','mark','auto','nmmark','edit','start','rmpimg','addopt','rmopt','resplit','addtxt','addxtxt','rmcon','rmimg','useorph','useorphx','rmximg','sort','ren','rok','rcx','catpool','catclear','gtog','subjadd','sdel','del'].includes(d.a))scrollTo(0,y);else scrollTo(0,0);
+  if(['pick','mark','auto','nmmark','edit','start','rmpblk','pedit','addptxt','ign','ignall','unign','addopt','rmopt','resplit','addtxt','addxtxt','rmcon','rmimg','useorph','useorphx','rmximg','sort','ren','rok','rcx','catpool','catclear','gtog','subjadd','sdel','del'].includes(d.a))scrollTo(0,y);else scrollTo(0,0);
 });
 
 document.addEventListener('change',async e=>{
@@ -1868,6 +1885,17 @@ document.addEventListener('change',async e=>{
       [[p,q],...tw].forEach(([x,y])=>{y.blocks.push({t:'img',id,html:'',u:1});if(!x.have.includes(id))x.have.push(id)});
     }
     t.value='';validate(p);tw.forEach(([x])=>validate(x));await loadAssets(p);await save();render();return;
+  }
+  if(t.dataset.addpimg!==undefined){
+    const p=P(),q=p&&p.questions[t.dataset.i],ps=q&&po(p,q);if(!ps)return;
+    const tw=pTw(p,ps);
+    for(const f of t.files){
+      const id=p.id+'__u'+uid()+((f.name.match(/\.\w+$/)||['.png'])[0]);
+      try{await tx('assets','readwrite',s=>s.put(f,id))}catch(err){reportDbErr(err);break}
+      MEM[id]=f;
+      tw.forEach(([x,z])=>{z.blocks.push({t:'img',id,html:'',u:1});if(!x.have.includes(id))x.have.push(id)});
+    }
+    t.value='';tw.forEach(([x])=>validate(x));await loadAssets(p);await save();render();return;
   }
   if(t.dataset.addximg!==undefined){
     const p=P(),q=p&&p.questions[t.dataset.i];if(!q)return;
