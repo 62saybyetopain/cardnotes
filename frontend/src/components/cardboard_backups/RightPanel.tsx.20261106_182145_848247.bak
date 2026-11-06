@@ -1,9 +1,10 @@
+// @depends-on ./App.tsx (centerSaveTick：中央編輯器每次儲存完成就遞增（含退出時才補送的最後一次儲存），RightPanel 必須在它變動時重新取得卡片；退出後才到的那次還要清空快照讓編輯器重建，否則右側停在舊內文與舊版本號；centerEditing：中央編輯模式開關，退回右側時需重新取得最新卡片)
 // @depends-on ./Editor.tsx (Editor 自動儲存後，onSaved 回傳的 CardDetail 至少含 title/body/updated_at；父層 card 快照必須同步這三項，否則 ContentTab.updateMeta 以舊版本號送出會 409，onReload 重建 Editor 時也會顯示舊內文)
 // @depends-on ../api.ts (patchCard 回傳值含 title/body/updated_at/sources；onSaved 合併進父層 card 快照時也要帶 sources，否則出處欄會被舊值蓋回)
 // @depends-on ./SourcesField.tsx (onSave 失敗時必須 throw，元件靠這個判斷是否已儲存)
 // @depends-on ./LiteratureField.tsx (卡片「引用文獻」區塊：獨立於卡片儲存、不經 patchCard，所以不受 editorDirty 限制；dexie 下整個不渲染)
 // @depends-on ./MentionPanel.tsx (loadCardTitles 在它的 effect 依賴陣列內，傳入的函式必須是穩定身分（模組層級或 useCallback）；行內箭頭會讓每次渲染都重抓全部卡片標題，且不會有任何錯誤)
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
 import { api } from "../api";
 import { isSameAxisGroup, tagPath } from "../lib/tree";
 import {
@@ -37,6 +38,13 @@ import { SourcesField } from "./SourcesField";
 // 原因：MentionPanel 的 effect 把 loadCardTitles 放在依賴陣列，行內箭頭每次渲染都是新身分，會反覆重抓全部標題。
 // api 在呼叫時才解析 driver（不在模組載入時），所以 HTTP／Dexie 切換後仍走對的那一邊。
 const loadAllCardTitles = () => api.listAllCardTitles().then((r) => r.items);
+
+// 靈感筆記（"note:<id>"）與文獻（"lit:<id>"）借用 selectedCardId 傳遞，但不是卡片，不能呼叫 api.getCard／cardTitle
+const isVirtualId = (id: string | null | undefined): boolean => !!id && (id.startsWith("note:") || id.startsWith("lit:"));
+type NotePatch = { text?: string; color?: string };
+// 與 backend schemas.py::NOTE_TEXT_MAX、Board.tsx::NOTE_TEXT_MAX 必須同值：超過後端會回 422
+const NOTE_TEXT_MAX = 2000;
+export type LiteraturePatch = { title?: string; body?: string; author?: string };
 
 function FileLinkBox(props: {
   card: CardDetail;
@@ -341,6 +349,7 @@ interface Props {
   previewCardId?: string | null;
   boardId?: string | null;
   centerEditing?: boolean;
+  centerSaveTick?: number;
   tags: Tag[];
   filter: Filter;
   version: number; // 外部觸發資料變化（連結、標籤）時遞增，觸發重新載入卡片
@@ -359,11 +368,47 @@ interface Props {
   onLinkDeleted?(sourceId: string, targetId: string, relationType?: RelationType): void;
   onTagsChanged(): void;
   onOpenBoard(id: string): void;
+  onNoteChanged?(noteId: string, patch: NotePatch): void;
+  onLiteratureChanged?(litId: string, patch: LiteraturePatch): void;
   report(e: unknown, prefix?: string): void;
   info(text: string): void;
 }
 
-export function CardEditorPane(props: {
+// 型態分派必須放在有 hooks 的元件之外：同一個實例在 cardId 於卡片／便利貼／文獻之間切換時，hook 數量不能改變
+export function CardEditorPane(
+  props: ComponentProps<typeof CardEditorPaneInner> & {
+    onNoteChanged?(noteId: string, patch: NotePatch): void;
+    onLiteratureChanged?(litId: string, patch: LiteraturePatch): void;
+  },
+) {
+  const { onNoteChanged, onLiteratureChanged, ...rest } = props;
+  if (rest.cardId.startsWith("note:")) {
+    return (
+      <NoteEditorPane
+        key={rest.cardId}
+        noteId={rest.cardId.slice("note:".length)}
+        boardId={rest.boardId}
+        onChanged={onNoteChanged}
+        report={rest.report}
+        info={rest.info}
+      />
+    );
+  }
+  if (rest.cardId.startsWith("lit:")) {
+    return (
+      <LiteratureEditorPane
+        key={rest.cardId}
+        litId={rest.cardId.slice("lit:".length)}
+        onChanged={onLiteratureChanged}
+        report={rest.report}
+        info={rest.info}
+      />
+    );
+  }
+  return <CardEditorPaneInner {...rest} />;
+}
+
+function CardEditorPaneInner(props: {
   cardId: string;
   boardId?: string | null;
   tags: Tag[];
@@ -378,17 +423,7 @@ export function CardEditorPane(props: {
   report(e: unknown, prefix?: string): void;
   info?(text: string): void;
 }) {
-  const { cardId, boardId, tags, version, initialSmartPaste, onClearInitialSmartPaste, onSaved, onCardDeleted, onLinkAdded, onSelectCard, onTagsChanged, report, info } = props;
-
-  if (cardId.startsWith("note:")) {
-    const noteId = cardId.slice("note:".length);
-    return <NoteEditorPane noteId={noteId} boardId={boardId} report={report} info={info} />;
-  }
-
-  if (cardId.startsWith("lit:")) {
-    const litId = cardId.slice("lit:".length);
-    return <LiteratureEditorPane litId={litId} report={report} info={info} />;
-  }
+  const { cardId, tags, version, initialSmartPaste, onClearInitialSmartPaste, onSaved, onCardDeleted, onLinkAdded, onSelectCard, onTagsChanged, report, info } = props;
 
   const [card, setCard] = useState<CardDetail | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -472,7 +507,7 @@ export function RightPanel(p: Props) {
   const [loadError, setLoadError] = useState("");
   const [nonce, setNonce] = useState(0); // 只有「捨棄修改重新載入」才重建編輯器
   const [fetchTick, setFetchTick] = useState(0);
-  const { selectedCardId, version, report, centerEditing, boardId } = p;
+  const { selectedCardId, version, report, centerEditing, centerSaveTick, boardId } = p;
   const activeTab: TabKey = p.hideContentTab && p.tab === "content" ? "relations" : p.tab;
   const visibleTabs = p.hideContentTab ? ALL_TABS.filter(([k]) => k !== "content") : ALL_TABS;
 
@@ -481,8 +516,13 @@ export function RightPanel(p: Props) {
     setLoadError("");
   }, [selectedCardId]);
 
+  // 原因：退出中央編輯時，Editor 卸載才補送的最後一次儲存會晚於退出切換。它完成後 centerSaveTick 遞增，此時 ContentTab 已用較舊的快照建好編輯器（編輯器只在建立時讀一次內文與版本號），所以要先清空、等最新的取回來再重建。中央編輯進行中不清空：關聯分頁還在用這份 card。
   useEffect(() => {
-    if (!selectedCardId) return;
+    if (centerSaveTick && !centerEditing) setCard(null);
+  }, [centerSaveTick, centerEditing]);
+
+  useEffect(() => {
+    if (!selectedCardId || isVirtualId(selectedCardId)) return;
     let alive = true;
     api
       .getCard(selectedCardId)
@@ -491,7 +531,7 @@ export function RightPanel(p: Props) {
     return () => {
       alive = false;
     };
-  }, [selectedCardId, version, fetchTick]);
+  }, [selectedCardId, version, fetchTick, centerEditing, centerSaveTick]);
 
   const refetch = useCallback(() => setFetchTick((n) => n + 1), []);
 
@@ -539,14 +579,30 @@ export function RightPanel(p: Props) {
             <button onClick={refetch}>重試</button>
           </div>
         )}
-        {activeTab !== "search" && !(activeTab === "content" && centerEditing) && selectedCardId && !loadError && !card && (
+        {activeTab !== "search" && !(activeTab === "content" && centerEditing) && selectedCardId && !isVirtualId(selectedCardId) && !loadError && !card && (
           <div className="empty">載入中…</div>
         )}
         {activeTab === "content" && !centerEditing && selectedCardId?.startsWith("note:") && (
-          <NoteEditorPane noteId={selectedCardId.slice("note:".length)} boardId={boardId} report={report} info={p.info} />
+          <NoteEditorPane
+            key={selectedCardId}
+            noteId={selectedCardId.slice("note:".length)}
+            boardId={boardId}
+            onChanged={p.onNoteChanged}
+            report={report}
+            info={p.info}
+          />
         )}
         {activeTab === "content" && !centerEditing && selectedCardId?.startsWith("lit:") && (
-          <LiteratureEditorPane litId={selectedCardId.slice("lit:".length)} report={report} info={p.info} />
+          <LiteratureEditorPane
+            key={selectedCardId}
+            litId={selectedCardId.slice("lit:".length)}
+            onChanged={p.onLiteratureChanged}
+            report={report}
+            info={p.info}
+          />
+        )}
+        {activeTab === "relations" && isVirtualId(selectedCardId) && (
+          <div className="empty">靈感筆記與文獻沒有語意連結。</div>
         )}
         {activeTab === "content" && !centerEditing && card && !selectedCardId?.startsWith("note:") && !selectedCardId?.startsWith("lit:") && (
           <ContentTab
@@ -1013,13 +1069,16 @@ function ContentTab(props: {
 function NoteEditorPane(props: {
   noteId: string;
   boardId?: string | null;
+  onChanged?(noteId: string, patch: NotePatch): void;
   report(e: unknown, prefix?: string): void;
   info?(text: string): void;
 }) {
-  const { noteId, boardId, report, info } = props;
+  const { noteId, boardId, onChanged, report, info } = props;
   const [text, setText] = useState("");
   const [color, setColor] = useState("amber");
   const [loading, setLoading] = useState(true);
+  // 最後一次載入或儲存成功的內文：失焦時內容沒變就不寫入，避免用過期內文蓋掉白板上剛改的版本
+  const savedTextRef = useRef("");
 
   useEffect(() => {
     if (!boardId) return;
@@ -1029,7 +1088,10 @@ function NoteEditorPane(props: {
       const n = (b.notes ?? []).find((x) => x.id === noteId);
       if (n) {
         setText(n.text);
+        savedTextRef.current = n.text;
         setColor(n.color || "amber");
+      } else {
+        report(new Error("找不到這張靈感筆記（可能已被刪除）"), "載入靈感筆記失敗");
       }
       setLoading(false);
     }).catch((e) => {
@@ -1042,9 +1104,11 @@ function NoteEditorPane(props: {
   }, [noteId, boardId, report]);
 
   const commitText = async (val: string) => {
-    if (!boardId) return;
+    if (!boardId || val === savedTextRef.current) return;
     try {
       await api.patchBoardNote(boardId, noteId, { text: val });
+      savedTextRef.current = val;
+      onChanged?.(noteId, { text: val });
     } catch (e) {
       report(e, "儲存靈感筆記內容失敗");
     }
@@ -1055,6 +1119,7 @@ function NoteEditorPane(props: {
     setColor(c);
     try {
       await api.patchBoardNote(boardId, noteId, { color: c });
+      onChanged?.(noteId, { color: c });
       info?.("已切換顏色");
     } catch (e) {
       report(e, "切換顏色失敗");
@@ -1082,6 +1147,7 @@ function NoteEditorPane(props: {
       <textarea
         value={text}
         rows={16}
+        maxLength={NOTE_TEXT_MAX}
         onChange={(e) => setText(e.target.value)}
         onBlur={() => void commitText(text)}
         placeholder="在此編輯靈感筆記內容…"
@@ -1101,10 +1167,11 @@ function NoteEditorPane(props: {
 
 function LiteratureEditorPane(props: {
   litId: string;
+  onChanged?(litId: string, patch: LiteraturePatch): void;
   report(e: unknown, prefix?: string): void;
   info?(text: string): void;
 }) {
-  const { litId, report, info } = props;
+  const { litId, onChanged, report, info } = props;
   const [lit, setLit] = useState<import("../types").Literature | null>(null);
   const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
@@ -1152,7 +1219,10 @@ function LiteratureEditorPane(props: {
         }}
         allowMention={false}
         plainPaste={true}
-        onSaved={() => info?.("已更新文獻內文")}
+        onSaved={(c) => {
+          onChanged?.(lit.id, { title: c.title, body: c.body });
+          info?.("已更新文獻內文");
+        }}
         onReload={() => setNonce((n) => n + 1)}
         report={report}
       />

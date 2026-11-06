@@ -328,7 +328,7 @@ export interface BoardHandle {
   createGroup(): Promise<void>;
   createNote(): Promise<void>;
   updateNote(noteId: string, patch: { text?: string; color?: string }): void;
-  addLiterature(litId: string): Promise<void>;
+  addLiterature(litId: string): Promise<boolean>; // true＝文獻已在白板上；false＝沒放上（錯誤已由 Board 提示）
   updateLiterature(litId: string, patch: { title?: string; body?: string; author?: string }): void;
   removeLiterature(litId: string): void;
 }
@@ -2541,11 +2541,11 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       async addLiterature(litId: string) {
         if (!boardId) {
           report(new Error("請先在左側建立或選擇一塊白板"));
-          return;
+          return false;
         }
         if (nodesRef.current.some((n) => n.id === `lit:${litId}`)) {
           info("這份文獻已經在這塊白板上");
-          return;
+          return true;
         }
         try {
           const b = wrapRef.current?.getBoundingClientRect();
@@ -2570,8 +2570,10 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           // 不改選取：從文獻庫放上白板時選取會讓右側欄同時開出同一份文獻的第二個編輯器
           setNodes((ns) => [...ns, toLiteratureNode(added)]);
           info("已將文獻放上白板");
+          return true;
         } catch (e) {
           report(e, "加入文獻至白板失敗");
+          return false;
         }
       },
     }),
@@ -2677,7 +2679,8 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         </div>
       )}
 
-      {boardId && selectedCards.length >= 2 && (
+      {/* active=false（中央編輯、其他視圖）時 Board 仍掛載且保留選取，面板必須跟著隱藏，否則會浮在編輯器上擋住畫面 */}
+      {active && boardId && selectedCards.length >= 2 && (
         <div className="board-multi-toolbar" role="toolbar" aria-label="多選批次與自動排列工具列">
           <span className="multi-count">已選 {selectedCards.length} 張</span>
 

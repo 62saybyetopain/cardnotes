@@ -7,8 +7,9 @@
 // @depends-on ./styles.css (.tools-dock / .tools-slide 及其內部 button 樣式)
 // @depends-on ./components/DailyReview.tsx (DailyReview：只在 viewMode === "daily" 掛載；此視圖不渲染右側面板，grid 欄位與 right-closed 都改看 showRight)
 // @depends-on ./styles.css (.center-topbar[data-view]：日誌與卡片冊視圖隱藏頂欄的「新增卡片」與「收合右側面板」；.center-stage 是所有滿版視圖的定位容器；.app.standalone 只有獨立模式才為左側收合鈕預留左邊距)
-// @depends-on ./components/LiteraturePicker.tsx (白板工具列的「加入文獻」：自己管理開關，選定後經 onPick 轉給 BoardHandle.addLiterature)
-// @depends-on ./components/LiteratureLibrary.tsx (LiteratureLibrary：只在 viewMode === "literature" 掛載；focusId 由卡片側經 LiteratureField 的 requestOpenLiterature 觸發，顯示後由 onFocusConsumed 清除)
+// @depends-on ./components/LiteraturePicker.tsx (白板工具列的「加入文獻」：自己管理選單與清單的開關；選定後經 onPick 轉給 BoardHandle.addLiterature，新建後經 onCreated 交給 onLiteratureCreated)
+// @depends-on ./components/Board.tsx (BoardHandle.addLiterature 回傳 true＝文獻已在白板上、false＝沒放上；onLiteratureCreated 依此決定要不要開中央編輯，改回 void 會讓失敗時也開編輯器)
+// @depends-on ./components/LiteratureLibrary.tsx (LiteratureLibrary：只在 viewMode === "literature" 掛載；focusId 由卡片側經 LiteratureField 的 requestOpenLiterature 觸發，顯示後由 onFocusConsumed 清除；onEditInCenter 以 lit:<id> 呼叫 openCardInCenter，要求 CardEditorPane 能以 lit: 前綴載入文獻；literatureTick 由 onLiteratureChanged 遞增，不可改用 bump，否則 CardEditorPane 會在每次存檔後重載)
 // @depends-on ./components/LiteratureField.tsx (subscribeOpenLiterature：App 必須訂閱，否則卡片側「開啟文獻」會丟錯)
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
@@ -71,6 +72,7 @@ export default function App() {
   const [centerEditing, setCenterEditing] = useState(false);
   const [pendingSmartPaste, setPendingSmartPaste] = useState<string | null>(null);
   const [literatureFocusId, setLiteratureFocusId] = useState<string | null>(null);
+  const [literatureTick, setLiteratureTick] = useState(0);
   const [viewMode, setViewMode] = useState<ViewMode>(initialView.viewMode);
   const [filter, setFilter] = useState<Filter>(initialView.filter);
   const [tab, setTab] = useState<TabKey>("content");
@@ -97,6 +99,7 @@ export default function App() {
     return true;
   });
   const [version, setVersion] = useState(0);
+  const [centerSaveTick, setCenterSaveTick] = useState(0);
   const [booted, setBooted] = useState(false);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
@@ -410,6 +413,15 @@ export default function App() {
     [refreshTags],
   );
 
+  // 原因：中央編輯器的儲存要通知右側面板（它的 card 快照不會自己跟上）。只有中央編輯器走這條：右側面板自己的儲存也遞增的話，會讓它每次自動儲存都重建編輯器。
+  const onCenterSaved = useCallback(
+    (c: CardDetail) => {
+      onSaved(c);
+      setCenterSaveTick((n) => n + 1);
+    },
+    [onSaved],
+  );
+
   // 刪除卡片：立即從 ipadCardList 與畫布中移除，不需重新整理立即生效
   const onCardDeleted = useCallback(
     (id: string) => {
@@ -448,6 +460,7 @@ export default function App() {
 
   const onLiteratureChanged = useCallback((litId: string, patch: LiteraturePatch) => {
     boardRef.current?.updateLiterature(litId, patch);
+    setLiteratureTick((n) => n + 1);
   }, []);
 
   const onLiteratureDeleted = useCallback(
@@ -460,6 +473,20 @@ export default function App() {
       }
     },
     [selected],
+  );
+
+  // 白板上新增文獻：文獻已由 LiteraturePicker 建立，這裡放上白板後開中央編輯（與雙擊文獻節點同一條路）。
+  // 放上失敗時不開編輯，並明講文獻已建立，避免使用者不知道文獻庫多了一份文獻
+  const onLiteratureCreated = useCallback(
+    async (litId: string) => {
+      const placed = await boardRef.current?.addLiterature(litId);
+      if (placed) {
+        openCardInCenter(`lit:${litId}`);
+      } else {
+        report(new Error("文獻已建立，但沒有放上白板；可到文獻庫找到它"), "新增文獻");
+      }
+    },
+    [openCardInCenter, report],
   );
 
   const onTagsChanged = useCallback(() => {
@@ -660,7 +687,11 @@ export default function App() {
                 </button>
               )}
               {!centerEditing && viewMode === "board" && boardId && (
-                <LiteraturePicker onPick={(id) => void boardRef.current?.addLiterature(id)} report={report} />
+                <LiteraturePicker
+                  onPick={(id) => void boardRef.current?.addLiterature(id)}
+                  onCreated={(id) => void onLiteratureCreated(id)}
+                  report={report}
+                />
               )}
               <button
                 className="icon-btn primary"
@@ -729,6 +760,8 @@ export default function App() {
                   focusId={literatureFocusId}
                   onFocusConsumed={consumeLiteratureFocus}
                   onAddToBoard={(id) => void boardRef.current?.addLiterature(id)}
+                  onEditInCenter={(id) => openCardInCenter(`lit:${id}`)}
+                  literatureTick={literatureTick}
                   onChanged={onLiteratureChanged}
                   onDeleted={onLiteratureDeleted}
                   onOpenCard={openCardInCenter}
@@ -811,7 +844,7 @@ export default function App() {
                   version={version}
                   initialSmartPaste={pendingSmartPaste}
                   onClearInitialSmartPaste={() => setPendingSmartPaste(null)}
-                  onSaved={onSaved}
+                  onSaved={onCenterSaved}
                   onCardDeleted={onCardDeleted}
                   onLinkAdded={onLinkAdded}
                   onSelectCard={openCardPreview}
@@ -832,6 +865,7 @@ export default function App() {
             previewCardId={previewCardId}
             boardId={boardId}
             centerEditing={centerEditing}
+            centerSaveTick={centerSaveTick}
             tags={tags}
             filter={filter}
             version={version}

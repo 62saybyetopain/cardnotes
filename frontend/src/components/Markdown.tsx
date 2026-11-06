@@ -2,6 +2,7 @@
 // @depends-on ../lib/media.ts (youtubeIdFromUrl：img 處理器遇到 ![](YouTube網址)、或 p 處理器遇到「整段只有一個 YouTube 網址」時，渲染為點擊播放的 YouTubeEmbed；這兩處是「外部網址不載入」規則僅有的例外)
 // @depends-on ../lib/markdown.ts (HIGHLIGHT_COLOR_OPTIONS, cardIdFromHref, resolveLineInContext, type HighlightColor)
 // @depends-on ../lib/liveMarkdown.ts (編輯中的即時渲染重寫了 ++／== 開合判定、顏色別名與圍欄判定；修改這裡的規則要同步改那邊)
+// @depends-on ./Editor.tsx (fencedRanges／splitBodySegments：parseCollapsibleDoc 重寫了圍欄判定與巢狀深度配對，預覽與編輯的章節邊界必須一致；改其一要同步另一邊。只是規則同步標記，不可 import Editor)
 import {
   Children,
   cloneElement,
@@ -626,6 +627,139 @@ function MarkdownTableRenderer({ rawText, onOpenCard }: { rawText: string; onOpe
   );
 }
 
+interface CollapsibleDocPart {
+  kind: "markdown" | "details";
+  text?: string;
+  summary?: string;
+  content?: string;
+  open?: boolean;
+}
+
+// 圍欄代碼塊的範圍（含開頭與結尾行）：判定與 Editor.tsx fencedRanges 相同。
+// 原因：收摺標籤出現在代碼裡只是代碼文字，惰性 regex 不看圍欄就會把它切成章節。
+function fencedRanges(body: string): [number, number][] {
+  const ranges: [number, number][] = [];
+  let open = -1;
+  let openLen = 0;
+  let pos = 0;
+  while (pos <= body.length) {
+    let nl = body.indexOf("\n", pos);
+    if (nl < 0) nl = body.length;
+    const t = body.slice(pos, nl).trim();
+    if (open < 0) {
+      if (t.startsWith("`".repeat(3))) {
+        openLen = 0;
+        while (t[openLen] === "`") openLen++;
+        open = pos;
+      }
+    } else if (t.length >= openLen && t.replace(/`/g, "") === "") {
+      ranges.push([open, nl]);
+      open = -1;
+    }
+    pos = nl + 1;
+  }
+  if (open >= 0) ranges.push([open, body.length]);
+  return ranges;
+}
+
+// 與 Editor.tsx splitBodySegments 相同：先找開標籤＋summary，再以巢狀深度找對應的 </details>，
+// 圍欄內的標籤一律略過；這樣預覽的章節邊界才會和編輯模式一致。
+function parseCollapsibleDoc(source: string): CollapsibleDocPart[] {
+  const parts: CollapsibleDocPart[] = [];
+  const openRe = /<details(\s+open)?>\s*<summary>([\s\S]*?)<\/summary>/gi;
+  const tagRe = /<details(?:\s+open)?>|<\/details>/gi;
+  const fences = fencedRanges(source);
+  const inFence = (i: number) => fences.some(([a, b]) => i >= a && i < b);
+  let lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = openRe.exec(source)) !== null) {
+    if (inFence(m.index)) continue;
+    const summaryEnd = m.index + m[0].length;
+    let depth = 1;
+    let closeStart = -1;
+    let t: RegExpExecArray | null;
+    tagRe.lastIndex = summaryEnd;
+    while ((t = tagRe.exec(source)) !== null) {
+      if (inFence(t.index)) continue;
+      depth += t[0].startsWith("</") ? -1 : 1;
+      if (depth === 0) {
+        closeStart = t.index;
+        break;
+      }
+    }
+    // 沒有對應的 </details>：保持一般文字，不切段
+    if (closeStart < 0) continue;
+    const closeEnd = closeStart + "</details>".length;
+    if (m.index > lastIndex) {
+      parts.push({ kind: "markdown", text: source.slice(lastIndex, m.index) });
+    }
+    parts.push({
+      kind: "details",
+      open: Boolean(m[1]),
+      summary: m[2].trim(),
+      content: source.slice(summaryEnd, closeStart).replace(/^\n+|\n+$/g, ""),
+    });
+    lastIndex = closeEnd;
+    openRe.lastIndex = closeEnd;
+  }
+  if (lastIndex < source.length) {
+    parts.push({ kind: "markdown", text: source.slice(lastIndex) });
+  }
+  return parts;
+}
+
+function CollapsibleDetailsSection({
+  summary,
+  content,
+  defaultOpen = false,
+  components,
+}: {
+  summary: string;
+  content: string;
+  defaultOpen?: boolean;
+  components: React.ComponentProps<typeof ReactMarkdown>["components"];
+}) {
+  const hMatch = summary.match(/^(#{1,6})\s+(.*)$/);
+  const displaySummary = hMatch ? hMatch[2] : summary;
+  const level = hMatch ? hMatch[1].length : 2;
+
+  return (
+    <details
+      className="md-details-section nodrag"
+      open={defaultOpen}
+      style={{
+        border: "1px solid var(--line, rgba(148, 163, 184, 0.35))",
+        borderRadius: 6,
+        margin: "10px 0",
+        background: "var(--panel-sub, rgba(0, 0, 0, 0.02))",
+        overflow: "hidden",
+      }}
+    >
+      <summary
+        className="md-details-summary"
+        style={{
+          padding: "8px 12px",
+          cursor: "pointer",
+          fontWeight: level === 1 ? 700 : 600,
+          fontSize: level === 1 ? 16 : level === 2 ? 14 : 13,
+          userSelect: "none",
+          background: "var(--code-head-bg, rgba(0, 0, 0, 0.03))",
+          borderBottom: "1px solid var(--line, rgba(148, 163, 184, 0.2))",
+          color: "var(--text, inherit)",
+          outline: "none",
+        }}
+      >
+        {displaySummary}
+      </summary>
+      <div style={{ padding: "10px 14px" }}>
+        <ReactMarkdown urlTransform={markdownUrlTransform} components={components}>
+          {preprocessCustomLists(content)}
+        </ReactMarkdown>
+      </div>
+    </details>
+  );
+}
+
 function CodeBlockView({ info, codeText }: { info: string; codeText: string }) {
   const lines = codeText.split("\n");
   const lineCount = lines.length;
@@ -1090,7 +1224,7 @@ export function Markdown({
         if (fullText && isMarkdownTable(fullText)) {
           return <MarkdownTableRenderer onOpenCard={onOpenCard} rawText={fullText} />;
         }
-        return <p>{renderRichChildren(children)}</p>;
+        return <p style={{ whiteSpace: "pre-wrap", margin: "6px 0", lineHeight: 1.6 }}>{renderRichChildren(children)}</p>;
       },
       h1: ({ children }) => <h1>{renderRichChildren(children)}</h1>,
       h2: ({ children }) => <h2>{renderRichChildren(children)}</h2>,
@@ -1158,6 +1292,30 @@ export function Markdown({
     }),
     [onOpenCard],
   );
+
+  const docParts = useMemo(() => parseCollapsibleDoc(source), [source]);
+
+  if (docParts.length > 1 || (docParts.length === 1 && docParts[0].kind === "details")) {
+    return (
+      <div className="md">
+        {docParts.map((p, idx) =>
+          p.kind === "details" ? (
+            <CollapsibleDetailsSection
+              key={idx}
+              summary={p.summary ?? ""}
+              content={p.content ?? ""}
+              defaultOpen={p.open}
+              components={components}
+            />
+          ) : (
+            <ReactMarkdown key={idx} urlTransform={markdownUrlTransform} components={components}>
+              {preprocessCustomLists(p.text ?? "")}
+            </ReactMarkdown>
+          ),
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="md">

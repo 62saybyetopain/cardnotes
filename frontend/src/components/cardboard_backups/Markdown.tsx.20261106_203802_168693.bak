@@ -547,6 +547,168 @@ function parseAltWidth(alt: unknown): string | undefined {
   return undefined;
 }
 
+function isMarkdownTable(text: string): boolean {
+  const lines = text.trim().split("\n").map((l) => l.trim());
+  if (lines.length < 2) return false;
+  const isRow = (l: string) => l.startsWith("|") && l.endsWith("|") && l.length >= 2;
+  const isSep = (l: string) => /^\s*\|(\s*:?-+:?\s*\|)+\s*$/.test(l);
+  return isRow(lines[0]) && isSep(lines[1]) && lines.slice(2).every(isRow);
+}
+
+function MarkdownTableRenderer({ rawText, onOpenCard }: { rawText: string; onOpenCard?: (cardId: string) => void }) {
+  const lines = rawText.trim().split("\n").map((l) => l.trim());
+  const parseCells = (line: string) =>
+    line
+      .slice(1, -1)
+      .split("|")
+      .map((c) => c.trim());
+
+  const headerCells = parseCells(lines[0]);
+  const dataRows = lines.slice(2).map(parseCells);
+
+  const renderCellMarkdown = (cell: string) => (
+    <ReactMarkdown
+      urlTransform={markdownUrlTransform}
+      components={{
+        p: ({ children }) => <>{renderRichChildren(children)}</>,
+        a: ({ href, children }) => {
+          const cardId = cardIdFromHref(typeof href === "string" ? href : undefined);
+          if (cardId) return <CardRef id={cardId} onOpenCard={onOpenCard}>{children}</CardRef>;
+          return <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>;
+        },
+      }}
+    >
+      {cell}
+    </ReactMarkdown>
+  );
+
+  return (
+    <div className="md-table-wrap nodrag" style={{ overflowX: "auto", margin: "10px 0" }}>
+      <table
+        style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          fontSize: 13,
+          textAlign: "left",
+          border: "1px solid var(--line, #334155)",
+          borderRadius: 6,
+          overflow: "hidden",
+        }}
+      >
+        <thead>
+          <tr style={{ background: "var(--panel-sub, rgba(255, 255, 255, 0.05))", borderBottom: "2px solid var(--line, #475569)" }}>
+            {headerCells.map((h, i) => (
+              <th key={i} style={{ padding: "6px 10px", fontWeight: 600, borderRight: "1px solid var(--line, #334155)" }}>
+                {renderCellMarkdown(h)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {dataRows.map((row, rIdx) => (
+            <tr
+              key={rIdx}
+              style={{
+                borderBottom: "1px solid var(--line, #334155)",
+                background: rIdx % 2 === 1 ? "var(--table-alt, rgba(255, 255, 255, 0.02))" : "transparent",
+              }}
+            >
+              {row.map((cell, cIdx) => (
+                <td key={cIdx} style={{ padding: "6px 10px", borderRight: "1px solid var(--line, #334155)" }}>
+                  {renderCellMarkdown(cell)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+interface CollapsibleDocPart {
+  kind: "markdown" | "details";
+  text?: string;
+  summary?: string;
+  content?: string;
+  open?: boolean;
+}
+
+function parseCollapsibleDoc(source: string): CollapsibleDocPart[] {
+  const parts: CollapsibleDocPart[] = [];
+  const regex = /<details(\s+open)?>\s*<summary>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi;
+  let lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(source)) !== null) {
+    if (m.index > lastIndex) {
+      parts.push({ kind: "markdown", text: source.slice(lastIndex, m.index) });
+    }
+    parts.push({
+      kind: "details",
+      open: Boolean(m[1]),
+      summary: m[2].trim(),
+      content: m[3].replace(/^\n+|\n+$/g, ""),
+    });
+    lastIndex = m.index + m[0].length;
+  }
+  if (lastIndex < source.length) {
+    parts.push({ kind: "markdown", text: source.slice(lastIndex) });
+  }
+  return parts;
+}
+
+function CollapsibleDetailsSection({
+  summary,
+  content,
+  defaultOpen = false,
+  components,
+}: {
+  summary: string;
+  content: string;
+  defaultOpen?: boolean;
+  components: React.ComponentProps<typeof ReactMarkdown>["components"];
+}) {
+  const hMatch = summary.match(/^(#{1,6})\s+(.*)$/);
+  const displaySummary = hMatch ? hMatch[2] : summary;
+  const level = hMatch ? hMatch[1].length : 2;
+
+  return (
+    <details
+      className="md-details-section nodrag"
+      open={defaultOpen}
+      style={{
+        border: "1px solid var(--line, rgba(148, 163, 184, 0.35))",
+        borderRadius: 6,
+        margin: "10px 0",
+        background: "var(--panel-sub, rgba(0, 0, 0, 0.02))",
+        overflow: "hidden",
+      }}
+    >
+      <summary
+        className="md-details-summary"
+        style={{
+          padding: "8px 12px",
+          cursor: "pointer",
+          fontWeight: level === 1 ? 700 : 600,
+          fontSize: level === 1 ? 16 : level === 2 ? 14 : 13,
+          userSelect: "none",
+          background: "var(--code-head-bg, rgba(0, 0, 0, 0.03))",
+          borderBottom: "1px solid var(--line, rgba(148, 163, 184, 0.2))",
+          color: "var(--text, inherit)",
+          outline: "none",
+        }}
+      >
+        {displaySummary}
+      </summary>
+      <div style={{ padding: "10px 14px" }}>
+        <ReactMarkdown urlTransform={markdownUrlTransform} components={components}>
+          {preprocessCustomLists(content)}
+        </ReactMarkdown>
+      </div>
+    </details>
+  );
+}
+
 function CodeBlockView({ info, codeText }: { info: string; codeText: string }) {
   const lines = codeText.split("\n");
   const lineCount = lines.length;
@@ -1000,10 +1162,18 @@ export function Markdown({
         // 整段只有一個 YouTube 網址：渲染成嵌入（沒有 remark-gfm，裸網址此時是單一字串）
         const only = Children.toArray(children);
         if (only.length === 1 && typeof only[0] === "string") {
-          const ytId = youtubeIdFromUrl(only[0].trim());
+          const trimmed = only[0].trim();
+          const ytId = youtubeIdFromUrl(trimmed);
           if (ytId) return <YouTubeEmbed id={ytId} title="" />;
+          if (isMarkdownTable(trimmed)) return <MarkdownTableRenderer onOpenCard={onOpenCard} rawText={trimmed} />;
         }
-        return <p>{renderRichChildren(children)}</p>;
+        const fullText = Children.toArray(children)
+          .map((c) => (typeof c === "string" ? c : ""))
+          .join("");
+        if (fullText && isMarkdownTable(fullText)) {
+          return <MarkdownTableRenderer onOpenCard={onOpenCard} rawText={fullText} />;
+        }
+        return <p style={{ whiteSpace: "pre-wrap", margin: "6px 0", lineHeight: 1.6 }}>{renderRichChildren(children)}</p>;
       },
       h1: ({ children }) => <h1>{renderRichChildren(children)}</h1>,
       h2: ({ children }) => <h2>{renderRichChildren(children)}</h2>,
@@ -1072,6 +1242,30 @@ export function Markdown({
     [onOpenCard],
   );
 
+  const docParts = useMemo(() => parseCollapsibleDoc(source), [source]);
+
+  if (docParts.length > 1 || (docParts.length === 1 && docParts[0].kind === "details")) {
+    return (
+      <div className="md">
+        {docParts.map((p, idx) =>
+          p.kind === "details" ? (
+            <CollapsibleDetailsSection
+              key={idx}
+              summary={p.summary ?? ""}
+              content={p.content ?? ""}
+              defaultOpen={p.open}
+              components={components}
+            />
+          ) : (
+            <ReactMarkdown key={idx} urlTransform={markdownUrlTransform} components={components}>
+              {preprocessCustomLists(p.text ?? "")}
+            </ReactMarkdown>
+          ),
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="md">
       <ReactMarkdown urlTransform={markdownUrlTransform} components={components}>
@@ -1080,3 +1274,4 @@ export function Markdown({
     </div>
   );
 }
+

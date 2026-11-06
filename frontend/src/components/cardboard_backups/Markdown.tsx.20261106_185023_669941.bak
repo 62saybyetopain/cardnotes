@@ -567,10 +567,13 @@ function MarkdownTableRenderer({ rawText, onOpenCard }: { rawText: string; onOpe
   const dataRows = lines.slice(2).map(parseCells);
 
   const renderCellMarkdown = (cell: string) => (
-    <ReactMarkdown ({ children components="{{" p: urlTransform="{markdownUrlTransform}"> <>{renderRichChildren(children)}</>,
+    <ReactMarkdown
+      urlTransform={markdownUrlTransform}
+      components={{
+        p: ({ children }) => <>{renderRichChildren(children)}</>,
         a: ({ href, children }) => {
           const cardId = cardIdFromHref(typeof href === "string" ? href : undefined);
-          if (cardId) return <CardRef id="{cardId}" onOpenCard="{onOpenCard}">{children}</CardRef>;
+          if (cardId) return <CardRef id={cardId} onOpenCard={onOpenCard}>{children}</CardRef>;
           return <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>;
         },
       }}
@@ -620,6 +623,86 @@ function MarkdownTableRenderer({ rawText, onOpenCard }: { rawText: string; onOpe
         </tbody>
       </table>
     </div>
+  );
+}
+
+interface CollapsibleDocPart {
+  kind: "markdown" | "details";
+  text?: string;
+  summary?: string;
+  content?: string;
+  open?: boolean;
+}
+
+function parseCollapsibleDoc(source: string): CollapsibleDocPart[] {
+  const parts: CollapsibleDocPart[] = [];
+  const regex = /<details(\s+open)?>\s*<summary>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi;
+  let lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(source)) !== null) {
+    if (m.index > lastIndex) {
+      parts.push({ kind: "markdown", text: source.slice(lastIndex, m.index) });
+    }
+    parts.push({
+      kind: "details",
+      open: Boolean(m[1]),
+      summary: m[2].trim(),
+      content: m[3].replace(/^\n+|\n+$/g, ""),
+    });
+    lastIndex = m.index + m[0].length;
+  }
+  if (lastIndex < source.length) {
+    parts.push({ kind: "markdown", text: source.slice(lastIndex) });
+  }
+  return parts;
+}
+
+function CollapsibleDetailsSection({
+  summary,
+  content,
+  defaultOpen = false,
+  onOpenCard,
+}: {
+  summary: string;
+  content: string;
+  defaultOpen?: boolean;
+  onOpenCard?: (cardId: string) => void;
+}) {
+  const hMatch = summary.match(/^(#{1,6})\s+(.*)$/);
+  const displaySummary = hMatch ? hMatch[2] : summary;
+  const level = hMatch ? hMatch[1].length : 2;
+
+  return (
+    <details
+      className="md-details-section nodrag"
+      open={defaultOpen}
+      style={{
+        border: "1px solid var(--line, #334155)",
+        borderRadius: 6,
+        margin: "8px 0",
+        background: "var(--panel-sub, rgba(255, 255, 255, 0.02))",
+        overflow: "hidden",
+      }}
+    >
+      <summary
+        className="md-details-summary"
+        style={{
+          padding: "6px 10px",
+          cursor: "pointer",
+          fontWeight: level === 1 ? 700 : 600,
+          fontSize: level === 1 ? 16 : level === 2 ? 14 : 13,
+          userSelect: "none",
+          background: "var(--code-head-bg, rgba(255, 255, 255, 0.04))",
+          borderBottom: "1px solid var(--line, #334155)",
+          color: "var(--text, #f1f5f9)",
+        }}
+      >
+        {displaySummary}
+      </summary>
+      <div style={{ padding: "8px 12px" }}>
+        <Markdown source={content} onOpenCard={onOpenCard} />
+      </div>
+    </details>
   );
 }
 
@@ -1078,14 +1161,14 @@ export function Markdown({
         if (only.length === 1 && typeof only[0] === "string") {
           const trimmed = only[0].trim();
           const ytId = youtubeIdFromUrl(trimmed);
-          if (ytId) return <YouTubeEmbed id="{ytId}" title/>;
-          if (isMarkdownTable(trimmed)) return <MarkdownTableRenderer onOpenCard="{onOpenCard}" rawText="{trimmed}"/>;
+          if (ytId) return <YouTubeEmbed id={ytId} title="" />;
+          if (isMarkdownTable(trimmed)) return <MarkdownTableRenderer onOpenCard={onOpenCard} rawText={trimmed} />;
         }
         const fullText = Children.toArray(children)
           .map((c) => (typeof c === "string" ? c : ""))
           .join("");
         if (fullText && isMarkdownTable(fullText)) {
-          return <MarkdownTableRenderer onOpenCard="{onOpenCard}" rawText="{fullText}"/>;
+          return <MarkdownTableRenderer onOpenCard={onOpenCard} rawText={fullText} />;
         }
         return <p>{renderRichChildren(children)}</p>;
       },
@@ -1155,6 +1238,30 @@ export function Markdown({
     }),
     [onOpenCard],
   );
+
+  const docParts = useMemo(() => parseCollapsibleDoc(source), [source]);
+
+  if (docParts.length > 1 || (docParts.length === 1 && docParts[0].kind === "details")) {
+    return (
+      <div className="md">
+        {docParts.map((p, idx) =>
+          p.kind === "details" ? (
+            <CollapsibleDetailsSection
+              key={idx}
+              summary={p.summary ?? ""}
+              content={p.content ?? ""}
+              defaultOpen={p.open}
+              onOpenCard={onOpenCard}
+            />
+          ) : (
+            <ReactMarkdown key={idx} urlTransform={markdownUrlTransform} components={components}>
+              {preprocessCustomLists(p.text ?? "")}
+            </ReactMarkdown>
+          ),
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="md">

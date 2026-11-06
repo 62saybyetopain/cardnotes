@@ -14,7 +14,8 @@ const ALL = "all";
 const UNCITED = "uncited";
 
 // 擷取日期預設為使用者本機日期（後端不自動填，避免時區造成差一天）
-function todayLocal(): string {
+// @depends-on ./LiteraturePicker.tsx（白板上新增文獻沿用此函式；改名或改簽名要一起改）
+export function todayLocal(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;

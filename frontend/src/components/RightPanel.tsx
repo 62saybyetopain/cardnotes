@@ -2,11 +2,13 @@
 // @depends-on ./Editor.tsx (Editor 自動儲存後，onSaved 回傳的 CardDetail 至少含 title/body/updated_at；父層 card 快照必須同步這三項，否則 ContentTab.updateMeta 以舊版本號送出會 409，onReload 重建 Editor 時也會顯示舊內文)
 // @depends-on ../api.ts (patchCard 回傳值含 title/body/updated_at/sources；onSaved 合併進父層 card 快照時也要帶 sources，否則出處欄會被舊值蓋回)
 // @depends-on ./SourcesField.tsx (onSave 失敗時必須 throw，元件靠這個判斷是否已儲存)
+// @depends-on ../lib/pasteHtml.ts (LiteratureEditorPane 的貼上轉換：文獻貼上保留網頁格式；與 Library 內嵌編輯器必須用同一個，否則兩個入口貼出的結果不同)
 // @depends-on ./LiteratureField.tsx (卡片「引用文獻」區塊：獨立於卡片儲存、不經 patchCard，所以不受 editorDirty 限制；dexie 下整個不渲染)
 // @depends-on ./MentionPanel.tsx (loadCardTitles 在它的 effect 依賴陣列內，傳入的函式必須是穩定身分（模組層級或 useCallback）；行內箭頭會讓每次渲染都重抓全部卡片標題，且不會有任何錯誤)
 import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
 import { api } from "../api";
 import { isSameAxisGroup, tagPath } from "../lib/tree";
+import { htmlToMarkdownPaste } from "../lib/pasteHtml";
 import {
   CARD_TYPE_LABELS,
   LINK_STATUS_LABELS,
@@ -415,6 +417,7 @@ function CardEditorPaneInner(props: {
   version: number;
   initialSmartPaste?: string | null;
   onClearInitialSmartPaste?(): void;
+  onReturnToBoard?(): void;
   onSaved(card: CardDetail): void;
   onCardDeleted(id: string): void;
   onLinkAdded?(sourceId: string, targetId: string, extra?: Partial<BoardLink>): void;
@@ -423,7 +426,7 @@ function CardEditorPaneInner(props: {
   report(e: unknown, prefix?: string): void;
   info?(text: string): void;
 }) {
-  const { cardId, tags, version, initialSmartPaste, onClearInitialSmartPaste, onSaved, onCardDeleted, onLinkAdded, onSelectCard, onTagsChanged, report, info } = props;
+  const { cardId, tags, version, initialSmartPaste, onClearInitialSmartPaste, onReturnToBoard, onSaved, onCardDeleted, onLinkAdded, onSelectCard, onTagsChanged, report, info } = props;
 
   const [card, setCard] = useState<CardDetail | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -465,6 +468,7 @@ function CardEditorPaneInner(props: {
       nonce={nonce}
       initialSmartPaste={initialSmartPaste}
       onClearInitialSmartPaste={onClearInitialSmartPaste}
+      onReturnToBoard={onReturnToBoard}
       onReload={() => (setNonce((n) => n + 1), refetch())}
       onSaved={(c) => {
         // 同步所有欄位快照（包含 card_type, curation_status, file_path 等），避免儲存後狀態回退
@@ -670,6 +674,7 @@ function ContentTab(props: {
   hideTopToolbar?: boolean;
   initialSmartPaste?: string | null;
   onClearInitialSmartPaste?(): void;
+  onReturnToBoard?(): void;
   onReload(): void;
   onSaved(card: CardDetail): void;
   onCardDeleted(id: string): void;
@@ -1055,6 +1060,7 @@ function ContentTab(props: {
         hideTopToolbar={props.hideTopToolbar}
         initialSmartPaste={props.initialSmartPaste}
         onClearInitialSmartPaste={props.onClearInitialSmartPaste}
+        onReturnToBoard={props.onReturnToBoard}
         onSaved={props.onSaved}
         onReload={props.onReload}
         onLinkAdded={props.onLinkAdded}
@@ -1218,7 +1224,7 @@ function LiteratureEditorPane(props: {
           return { ...asCard, title: res.title, body: res.body, updated_at: res.updated_at };
         }}
         allowMention={false}
-        plainPaste={true}
+        pasteTransform={htmlToMarkdownPaste}
         onSaved={(c) => {
           onChanged?.(lit.id, { title: c.title, body: c.body });
           info?.("已更新文獻內文");

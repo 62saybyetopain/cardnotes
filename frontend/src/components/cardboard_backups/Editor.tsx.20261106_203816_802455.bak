@@ -4,7 +4,10 @@
 // @depends-on ./Markdown.tsx (Markdown)
 // @depends-on ./LiveSegmentEditor.tsx (LiveSegmentEditor, SegmentHandle；內文編輯改用 CodeMirror，位移一律是 body 的全域字元位移)
 // @depends-on ../lib/liveMarkdown.ts (編輯中的即時渲染；語法規則與 Markdown.tsx 重複一份)
-import { useCallback, useEffect, useRef, useState } from "react";
+// @depends-on ../api.ts::writeCardFile／backend cards.py::write_card_file／RightPanel.tsx::FileLinkBox.handleWrite（後端寫入的是資料庫裡的內文，且要求 expected_updated_at 等於資料庫版本；所以取代後必須等 status 為 saved 才能寫檔，否則會悄悄把舊代碼寫進檔案並回報成功。FILE_CONFLICT 的確認流程與 FileLinkBox 相同，改其一要同步另一邊）
+// @depends-on 全域樣式 .modal 的 z-index（CodeReplaceModal 與「寫入綁定檔案」彈窗已 portal 到 document.body，z-index 必須高於頂部視圖切換列；若樣式使用 `.editor .modal` 這類後代選擇器，portal 後會失效）
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
+import { createPortal } from "react-dom";
 import { api, ApiError } from "../api";
 import {
   BULLET_STYLE_OPTIONS,
@@ -54,6 +57,8 @@ interface Props {
   onLinkAdded?(sourceId: string, targetId: string, extra?: Partial<BoardLink>): void;
   onOpenCard?(cardId: string): void;
   onDirtyChange?(dirty: boolean): void;
+  // 中央編輯器專用：寫檔成功後的「關閉並回到白板」；沒傳（右側面板）就不顯示該按鈕
+  onReturnToBoard?(): void;
   report(e: unknown, prefix?: string): void;
 }
 
@@ -68,9 +73,50 @@ type BodySegment =
       rawEnd: number;
       removeStart: number;
       removeEnd: number;
+    }
+  | {
+      kind: "details";
+      isOpen: boolean;
+      rawTag: string;
+      summary: string;
+      content: string;
+      rawStart: number;
+      rawEnd: number;
+      contentStart: number;
+      contentEnd: number;
     };
 
 const INLINE_MEDIA_RE = /!\[([^\]]*)\]\(media:([0-9a-fA-F-]{36})\)/g;
+// 收摺章節：先比對開標籤＋summary，再以巢狀深度找對應的 </details>（不用惰性比對，巢狀時才不會提早結束）
+const DETAILS_OPEN_RE = /<details(\s+open)?>\s*<summary>([\s\S]*?)<\/summary>/gi;
+const DETAILS_TAG_RE = /<details(?:\s+open)?>|<\/details>/gi;
+
+// 圍欄代碼塊的範圍（含開頭與結尾行）：收摺標籤出現在代碼裡只是代碼文字，不能切段
+function fencedRanges(body: string): [number, number][] {
+  const FENCE = "`".repeat(3);
+  const ranges: [number, number][] = [];
+  let open = -1;
+  let openLen = 0;
+  let pos = 0;
+  while (pos <= body.length) {
+    let nl = body.indexOf("\n", pos);
+    if (nl < 0) nl = body.length;
+    const t = body.slice(pos, nl).trim();
+    if (open < 0) {
+      if (t.startsWith(FENCE)) {
+        openLen = 0;
+        while (t[openLen] === "`") openLen++;
+        open = pos;
+      }
+    } else if (t.length >= openLen && t.replace(/`/g, "") === "") {
+      ranges.push([open, nl]);
+      open = -1;
+    }
+    pos = nl + 1;
+  }
+  if (open >= 0) ranges.push([open, body.length]);
+  return ranges;
+}
 
 // CodeMirror 會把 \r\n 視為單一換行，若 body 留著 \r，全域字元位移會與 view 錯位；載入時統一成 \n
 function normalizeNewlines(s: string): string {
@@ -88,25 +134,93 @@ function extractWidthFromAlt(alt: string): { baseAlt: string; width?: string } {
   return { baseAlt: alt };
 }
 
+type RawMatchItem =
+  | { kind: "media"; index: number; end: number; alt: string; mediaId: string }
+  | {
+      kind: "details";
+      index: number;
+      end: number;
+      isOpen: boolean;
+      rawTag: string;
+      summary: string;
+      content: string;
+      contentStart: number;
+      contentEnd: number;
+    };
+
 function splitBodySegments(body: string): BodySegment[] {
-  const matches: { index: number; end: number; alt: string; mediaId: string }[] = [];
+  const allMatches: RawMatchItem[] = [];
+
   let m: RegExpExecArray | null;
   INLINE_MEDIA_RE.lastIndex = 0;
   while ((m = INLINE_MEDIA_RE.exec(body)) !== null) {
-    matches.push({
+    allMatches.push({
+      kind: "media",
       index: m.index,
       end: m.index + m[0].length,
       alt: m[1] ?? "",
       mediaId: m[2],
     });
   }
-  if (matches.length === 0) {
+
+  const fences = fencedRanges(body);
+  const inFence = (i: number) => fences.some(([a, b]) => i >= a && i < b);
+
+  DETAILS_OPEN_RE.lastIndex = 0;
+  while ((m = DETAILS_OPEN_RE.exec(body)) !== null) {
+    if (inFence(m.index)) continue;
+    const summaryEnd = m.index + m[0].length;
+    let depth = 1;
+    let closeStart = -1;
+    let t: RegExpExecArray | null;
+    DETAILS_TAG_RE.lastIndex = summaryEnd;
+    while ((t = DETAILS_TAG_RE.exec(body)) !== null) {
+      if (inFence(t.index)) continue;
+      depth += t[0].startsWith("</") ? -1 : 1;
+      if (depth === 0) {
+        closeStart = t.index;
+        break;
+      }
+    }
+    // 沒有對應的 </details>：保持一般文字，不切段
+    if (closeStart < 0) continue;
+    const closeEnd = closeStart + "</details>".length;
+
+    // 內文區間必須與 body 逐字對應（LiveSegmentEditor 以全域位移改寫 body）：只收掉頭尾換行，不另做 trim
+    let contentStart = summaryEnd;
+    let contentEnd = closeStart;
+    while (contentStart < contentEnd && body[contentStart] === "\n") contentStart++;
+    while (contentEnd > contentStart && body[contentEnd - 1] === "\n") contentEnd--;
+
+    allMatches.push({
+      kind: "details",
+      index: m.index,
+      end: closeEnd,
+      isOpen: Boolean(m[1]),
+      rawTag: m[1] ? "<details open>" : "<details>",
+      summary: m[2].replace(/<[^>]+>/g, "").trim() || "章節內容",
+      content: body.slice(contentStart, contentEnd),
+      contentStart,
+      contentEnd,
+    });
+    DETAILS_OPEN_RE.lastIndex = closeEnd;
+  }
+
+  if (allMatches.length === 0) {
     return [{ kind: "text", text: body, start: 0, end: body.length }];
   }
 
+  allMatches.sort((a, b) => a.index - b.index);
+
   const segments: BodySegment[] = [];
   let prevEnd = 0;
-  for (const hit of matches) {
+
+  for (const hit of allMatches) {
+    // 落在前一個區塊（例如收摺章節）內部的項目，由該區塊的內文編輯器負責
+    if (hit.index < prevEnd) continue;
+
+    // 沿用原本圖片的規則：區塊前後各一個換行屬於分隔，不放進文字段；
+    // 文字段每次都建立（可為空），游標才能落在圖片、章節的前後
     const sepBefore = hit.index > prevEnd && body[hit.index - 1] === "\n" ? 1 : 0;
     const textEnd = hit.index - sepBefore;
     segments.push({
@@ -117,17 +231,31 @@ function splitBodySegments(body: string): BodySegment[] {
     });
 
     const sepAfter = hit.end < body.length && body[hit.end] === "\n" ? 1 : 0;
-    const { width } = extractWidthFromAlt(hit.alt);
-    segments.push({
-      kind: "media",
-      mediaId: hit.mediaId,
-      alt: hit.alt,
-      explicitWidth: width,
-      rawStart: hit.index,
-      rawEnd: hit.end,
-      removeStart: hit.index - sepBefore,
-      removeEnd: sepBefore === 0 ? hit.end + sepAfter : hit.end,
-    });
+    if (hit.kind === "media") {
+      const { width } = extractWidthFromAlt(hit.alt);
+      segments.push({
+        kind: "media",
+        mediaId: hit.mediaId,
+        alt: hit.alt,
+        explicitWidth: width,
+        rawStart: hit.index,
+        rawEnd: hit.end,
+        removeStart: hit.index - sepBefore,
+        removeEnd: sepBefore === 0 ? hit.end + sepAfter : hit.end,
+      });
+    } else {
+      segments.push({
+        kind: "details",
+        isOpen: hit.isOpen,
+        rawTag: hit.rawTag,
+        summary: hit.summary,
+        content: hit.content,
+        rawStart: hit.index,
+        rawEnd: hit.end,
+        contentStart: hit.contentStart,
+        contentEnd: hit.contentEnd,
+      });
+    }
     prevEnd = hit.end + sepAfter;
   }
 
@@ -253,6 +381,83 @@ const STATUS_TEXT: Record<Status, string> = {
   conflict: "版本衝突",
 };
 
+interface OutlineItem {
+  id: string;
+  title: string;
+  level: number;
+  lineIndex: number;
+  kind: "heading" | "details";
+}
+
+function extractOutlineItems(body: string): OutlineItem[] {
+  const lines = body.split("\n");
+  const items: OutlineItem[] = [];
+  // 代碼圍欄內的 # 與 <summary> 只是代碼文字，不是章節；與 splitBodySegments 共用同一份圍欄判定
+  const fences = fencedRanges(body);
+  let offset = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const lineStart = offset;
+    offset += lines[i].length + 1;
+    if (fences.some(([a, b]) => lineStart >= a && lineStart < b)) continue;
+    const line = lines[i].trim();
+    const hMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    if (hMatch) {
+      items.push({
+        id: `h-${i}`,
+        title: hMatch[2].trim(),
+        level: hMatch[1].length,
+        lineIndex: i,
+        kind: "heading",
+      });
+      continue;
+    }
+    const sumMatch = line.match(/<summary>(.*?)<\/summary>/i);
+    if (sumMatch) {
+      const rawText = sumMatch[1].trim();
+      const innerH = rawText.match(/^(#{1,6})\s+(.*)$/);
+      items.push({
+        id: `d-${i}`,
+        title: innerH ? innerH[2].trim() : rawText,
+        level: innerH ? innerH[1].length : 2,
+        lineIndex: i,
+        kind: "details",
+      });
+    }
+  }
+  return items;
+}
+
+function adjustOutlineLevel(body: string, item: OutlineItem, delta: 1 | -1): EditPatch | null {
+  const lines = body.split("\n");
+  if (item.lineIndex < 0 || item.lineIndex >= lines.length) return null;
+  const line = lines[item.lineIndex];
+  const nextLevel = Math.max(1, Math.min(6, item.level + delta));
+  if (nextLevel === item.level) return null;
+
+  let newLine = line;
+  if (item.kind === "heading") {
+    newLine = `${"#".repeat(nextLevel)} ${item.title}`;
+  } else if (item.kind === "details") {
+    newLine = `<summary>${"#".repeat(nextLevel)} ${item.title}</summary>`;
+  }
+
+  let lineOffset = 0;
+  for (let i = 0; i < item.lineIndex; i++) {
+    lineOffset += lines[i].length + 1;
+  }
+
+  const nextBody = body.slice(0, lineOffset) + newLine + body.slice(lineOffset + line.length);
+  return {
+    text: nextBody,
+    selectionStart: lineOffset + newLine.length,
+    selectionEnd: lineOffset + newLine.length,
+    replaceFrom: lineOffset,
+    replaceTo: lineOffset + line.length,
+    insertText: newLine,
+  };
+}
+
 const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
   { type: "p", label: "段落" },
   { type: "h1", label: "標題 1" },
@@ -260,7 +465,7 @@ const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
   { type: "h3", label: "標題 3" },
 ];
 
-export function Editor({ card, save, allowMention = true, plainPaste = false, pasteTransform = transformPasteContent, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, onDirtyChange, report }: Props) {
+export function Editor({ card, save, allowMention = true, plainPaste = false, pasteTransform = transformPasteContent, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, onDirtyChange, onReturnToBoard, report }: Props) {
   const [title, setTitle] = useState(card.title);
   const [body, setBody] = useState(() => normalizeNewlines(card.body));
   const [cursorPos, setCursorPos] = useState(0);
@@ -277,6 +482,8 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const [scrollbarDots, setScrollbarDots] = useState<{ id: string; topPercent: number; title: string; level: number }[]>([]);
   const [lineMenu, setLineMenu] = useState<{ segStart: number; lineTop: number; lineBottom: number } | null>(null);
 
   // 非 compact 時內文底部留出 35vh 空白：否則捲到底後，游標也無法被抬到視線中段
@@ -316,9 +523,38 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, []);
 
+  const updateScrollbarDots = useCallback(() => {
+    const box = scrollContainerRef.current;
+    if (!box) return;
+    const totalHeight = box.scrollHeight;
+    if (totalHeight <= 0) return;
+
+    const headingEls = box.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6, summary, .md-details-summary");
+    const dots: { id: string; topPercent: number; title: string; level: number }[] = [];
+
+    headingEls.forEach((el, idx) => {
+      if (el.offsetParent === null && el.offsetHeight === 0) return;
+      const topPercent = Math.min(98, Math.max(2, (el.offsetTop / totalHeight) * 100));
+      const text = (el.textContent || "").trim().slice(0, 40);
+      const tagName = el.tagName.toLowerCase();
+      const level = tagName.startsWith("h") ? parseInt(tagName[1], 10) : 2;
+
+      dots.push({
+        id: `dot-${idx}-${el.offsetTop}`,
+        topPercent,
+        title: text || `標題 #${idx + 1}`,
+        level,
+      });
+    });
+
+    setScrollbarDots(dots);
+  }, []);
+
   useEffect(() => {
     checkScrollBottom();
-  }, [body, checkScrollBottom]);
+    const t = setTimeout(updateScrollbarDots, 120);
+    return () => clearTimeout(t);
+  }, [body, previewing, checkScrollBottom, updateScrollbarDots]);
 
   useEffect(() => {
     if (!lineMenu) return;
@@ -436,12 +672,15 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
   // 依「整份 body 的全域位置」找到對應段落並放置選取
   const placeSelection = useCallback((text: string, from: number, to: number) => {
     for (const s of splitBodySegments(text)) {
-      if (s.kind === "text" && from >= s.start && from <= s.end) {
-        const h = segRefs.current.get(s.start);
+      // 一般文字段與收摺章節的內文都是可編輯區間；圖片不是
+      const segStart = s.kind === "text" ? s.start : s.kind === "details" ? s.contentStart : -1;
+      const segEnd = s.kind === "text" ? s.end : s.kind === "details" ? s.contentEnd : -1;
+      if (segStart >= 0 && from >= segStart && from <= segEnd) {
+        const h = segRefs.current.get(segStart);
         if (h) {
           textRef.current = h;
-          const localStart = Math.max(0, from - s.start);
-          const localEnd = Math.max(localStart, Math.min(s.end - s.start, to - s.start));
+          const localStart = Math.max(0, from - segStart);
+          const localEnd = Math.max(localStart, Math.min(segEnd - segStart, to - segStart));
           h.focus();
           h.setSelection(localStart, localEnd);
         }
@@ -490,6 +729,42 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
     const { start: selStart, end: selEnd } = getGlobalSelection();
     const patch = indentListLines(latest.current.body, selStart, selEnd, direction);
     if (patch) applyEditPatch(patch);
+  };
+
+  const handleToolbarFoldSection = () => {
+    const { start: selStart, end: selEnd } = getGlobalSelection();
+    const cur = latest.current.body;
+    const selected = cur.slice(selStart, selEnd).trim();
+
+    let summary = "章節標題";
+    let content = selected;
+
+    if (selected) {
+      const lines = selected.split("\n");
+      const firstLine = lines[0].trim();
+      const cleanFirst = firstLine.replace(/^#{1,6}\s+/, "").replace(/^[*-]\s+/, "").trim();
+      if (cleanFirst) {
+        const headingMatch = firstLine.match(/^(#{1,6})/);
+        summary = headingMatch ? `${headingMatch[1]} ${cleanFirst}` : cleanFirst;
+        content = lines.slice(1).join("\n").trim();
+      }
+    }
+
+    const prefix = selStart > 0 && cur[selStart - 1] !== "\n" ? "\n\n" : "";
+    const suffix = selEnd < cur.length && cur[selEnd] !== "\n" ? "\n\n" : "\n";
+    const block = `${prefix}<details open>\n<summary>${summary}</summary>\n\n${content || "在此輸入段落內容…"}\n</details>${suffix}`;
+
+    const nextBody = cur.slice(0, selStart) + block + cur.slice(selEnd);
+    const newCursor = selStart + block.length;
+
+    applyEditPatch({
+      text: nextBody,
+      selectionStart: newCursor,
+      selectionEnd: newCursor,
+      replaceFrom: selStart,
+      replaceTo: selEnd,
+      insertText: block,
+    });
   };
 
   const openMentionFromToolbar = () => {
@@ -571,6 +846,32 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
     }
   }, [initialSmartPaste]);
 
+  // 取代成功且卡片綁定了本機檔案時詢問是否寫檔；null＝不顯示
+  const [filePrompt, setFilePrompt] = useState<{ writing: boolean; result: string | null } | null>(null);
+
+  const writeBoundFile = async (force = false): Promise<void> => {
+    setFilePrompt({ writing: true, result: null });
+    try {
+      // 後端寫的是資料庫裡的內文；按鈕只在 status 為 saved 時可按，此時 versionRef 就是資料庫版本
+      const res = await api.writeCardFile(card.id, { expected_updated_at: versionRef.current, force });
+      setFilePrompt({
+        writing: false,
+        result: `✓ ${res.message}${res.has_backup ? "（已於 cardboard_backups 保留備份）" : ""}`,
+      });
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "FILE_CONFLICT") {
+        if (window.confirm(`⚠️ ${e.message}\n\n是否仍要強制覆寫？`)) {
+          await writeBoundFile(true);
+          return;
+        }
+        setFilePrompt({ writing: false, result: null });
+        return;
+      }
+      setFilePrompt({ writing: false, result: null });
+      report(e, "寫入檔案失敗");
+    }
+  };
+
   const insertCodeBlock = () => {
     const label = window.prompt("輸入代碼塊名稱或檔名（例如 Board.tsx，可留空）", "");
     if (label === null) return;
@@ -647,6 +948,29 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
   const [selBubble, setSelBubble] = useState<{ segStart: number; left: number; top: number } | null>(null);
   const selTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selPendingSegRef = useRef<number | null>(null);
+
+  // 反白圖標列的實際位置：要等它渲染後量到真實寬高才算得出來（假設固定寬度會讓左側被裁掉）
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  const [bubblePos, setBubblePos] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = bubbleRef.current;
+    const parent = el?.offsetParent;
+    if (!selBubble || !el || !(parent instanceof HTMLElement)) {
+      setBubblePos(null);
+      return;
+    }
+    const boxW = scrollContainerRef.current?.clientWidth ?? parent.clientWidth;
+    const left = Math.max(8, Math.min(selBubble.left - el.offsetWidth / 2, boxW - el.offsetWidth - 8));
+    // 預設放在反白範圍下方（沿用回報的位置）；上方放得下就改放上方，不蓋住往下延伸選取的文字
+    let top = selBubble.top + 6;
+    const sel = window.getSelection();
+    const first = sel && sel.rangeCount > 0 && !sel.isCollapsed ? sel.getRangeAt(0).getClientRects()[0] : undefined;
+    const box = scrollContainerRef.current?.getBoundingClientRect();
+    if (first && first.height > 0 && box && first.top - box.top >= el.offsetHeight + 12) {
+      top = first.top - parent.getBoundingClientRect().top - parent.clientTop - el.offsetHeight - 6;
+    }
+    setBubblePos({ left, top });
+  }, [selBubble, lineMenu]);
 
   const reportSelectionRect = useCallback((segStart: number, rect: { left: number; bottom: number } | null) => {
     if (!rect) {
@@ -942,6 +1266,13 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
         )}
         <button
           type="button"
+          onClick={handleToolbarFoldSection}
+          title="將選取內容設定為可收摺章節"
+        >
+          📁 收摺章節
+        </button>
+        <button
+          type="button"
           onClick={() => setCodePatchOpen(true)}
           title="對卡片內的代碼塊或外部代碼執行精確定位與自動取代"
         >
@@ -950,6 +1281,165 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
       </span>
     </>
   );
+
+  // 切換收摺／展開：只改開標籤，用實際的 ">" 位置界定，不假設標籤寫法（大小寫、空白）
+  const toggleDetailsOpen = (seg: Extract<BodySegment, { kind: "details" }>) => {
+    const cur = latest.current.body;
+    const tagEnd = cur.indexOf(">", seg.rawStart) + 1;
+    onBody(cur.slice(0, seg.rawStart) + (seg.isOpen ? "<details>" : "<details open>") + cur.slice(tagEnd));
+  };
+
+  // 解除收摺：整個區塊還原成「標題＋空行＋內文」的一般文字
+  const unwrapDetailsSeg = (seg: Extract<BodySegment, { kind: "details" }>) => {
+    const cur = latest.current.body;
+    const unwrapped = seg.content ? `${seg.summary}\n\n${seg.content}` : seg.summary;
+    applyEditPatch({
+      text: cur.slice(0, seg.rawStart) + unwrapped + cur.slice(seg.rawEnd),
+      selectionStart: seg.rawStart,
+      selectionEnd: seg.rawStart + unwrapped.length,
+      replaceFrom: seg.rawStart,
+      replaceTo: seg.rawEnd,
+      insertText: unwrapped,
+    });
+  };
+
+  // 大綱跳轉：用內文位移定位，不比對畫面文字（編輯模式的 CodeMirror 不會渲染 h1~h6／summary 元素）
+  const jumpToOutlineItem = (item: OutlineItem) => {
+    const box = scrollContainerRef.current;
+    if (!box) return;
+    const cur = latest.current.body;
+    const lines = cur.split("\n");
+    let offset = 0;
+    for (let i = 0; i < item.lineIndex && i < lines.length; i++) offset += lines[i].length + 1;
+
+    const enclosing = splitBodySegments(cur).find(
+      (s): s is Extract<BodySegment, { kind: "details" }> =>
+        s.kind === "details" && offset >= s.rawStart && offset < s.rawEnd,
+    );
+    // 收摺章節本身，或位在已收摺章節內的標題：內文沒有渲染，只能捲到章節方塊
+    if (enclosing && (item.kind === "details" || !enclosing.isOpen)) {
+      box
+        .querySelector<HTMLElement>(`[data-details-start="${enclosing.rawStart}"]`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+
+    placeSelection(cur, offset, offset);
+    requestAnimationFrame(() => {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return;
+      const range = sel.getRangeAt(0);
+      const host =
+        range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+      const rect = range.getClientRects()[0] ?? host?.getBoundingClientRect();
+      // 拿不到可信座標就不動，不猜
+      if (!rect || (rect.top === 0 && rect.height === 0) || rect.height > 80) return;
+      box.scrollTo({ top: box.scrollTop + rect.top - box.getBoundingClientRect().top - 24, behavior: "smooth" });
+    });
+  };
+
+  // 收摺章節內文編輯器的事件；start 是該內文在整份 body 的全域起點（內容與一般文字段的處理相同）
+  const detailsHandlers = (
+    start: number,
+  ): Pick<
+    ComponentProps<typeof LiveSegmentEditor>,
+    "onFocus" | "onSelectionChange" | "onSelectionRect" | "onToggleLineMenu" | "onDocChange" | "onKeyDown" | "onPaste" | "onDropFiles"
+  > => ({
+    onFocus: () => {
+      const h = segRefs.current.get(start);
+      if (h) textRef.current = h;
+    },
+    onSelectionChange: (from) => setCursorPos(start + from),
+    onSelectionRect: (rect) => reportSelectionRect(start, rect),
+    onToggleLineMenu: (rect) => {
+      setLineMenu((cur) =>
+        cur && cur.segStart === start && Math.abs(cur.lineTop - rect.lineTop) < 4
+          ? null
+          : { segStart: start, lineTop: rect.lineTop, lineBottom: rect.lineBottom },
+      );
+    },
+    onDocChange: (val, prevLen, cursor) => {
+      setLineMenu(null);
+      const cur = latest.current.body;
+      const prevBodyLen = cur.length;
+      const nextBody = cur.slice(0, start) + val + cur.slice(start + prevLen);
+      const globalPos = start + cursor;
+      onBody(nextBody);
+      setCursorPos(globalPos);
+      requestAnimationFrame(keepCaretComfortable);
+      if (allowMention && nextBody.length >= prevBodyLen && globalPos > 0 && nextBody[globalPos - 1] === "@") {
+        const trig = detectAtTrigger(nextBody, globalPos);
+        if (trig && trig.query === "") {
+          setMentionState({ replaceFrom: trig.atIndex, replaceTo: globalPos, initialQuery: "" });
+        }
+      }
+    },
+    onKeyDown: (e, from, to) => {
+      if (e.isComposing || e.keyCode === 229) return false;
+      const gStart = start + from;
+      const gEnd = start + to;
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        const k = e.key.toLowerCase();
+        if (k === "b") {
+          applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "**", "粗體文字"));
+          return true;
+        }
+        if (k === "u") {
+          applyEditPatch(applyInlineWrap(latest.current.body, gStart, gEnd, "++", "底線文字"));
+          return true;
+        }
+      }
+      if (e.key === "Tab") {
+        const patch = indentListLines(latest.current.body, gStart, gEnd, e.shiftKey ? -1 : 1);
+        if (!patch) return false;
+        applyEditPatch(patch);
+        return true;
+      }
+      if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const patch = handleListEnter(latest.current.body, gStart, gEnd);
+        if (!patch) return false;
+        applyEditPatch(patch);
+        requestAnimationFrame(keepCaretComfortable);
+        return true;
+      }
+      return false;
+    },
+    onPaste: (e, from, to) => {
+      const cd = e.clipboardData;
+      if (!cd) return false;
+      const gFrom = start + from;
+      const gTo = start + to;
+      if (cd.files.length) {
+        const files = takeFiles(cd.files);
+        if (files.length) void uploadFiles(files, gFrom);
+        return true;
+      }
+      if (plainPaste) return false;
+      if (extractCodeBlocks(latest.current.body).some((b) => gFrom >= b.contentStart && gFrom <= b.contentEnd)) {
+        return false;
+      }
+      const transformed = pasteTransform(cd.getData("text/plain"), cd.getData("text/html"));
+      if (transformed === null) return false;
+      const cur = latest.current.body;
+      const nextCursor = gFrom + transformed.length;
+      applyEditPatch({
+        text: cur.slice(0, gFrom) + transformed + cur.slice(gTo),
+        selectionStart: nextCursor,
+        selectionEnd: nextCursor,
+        replaceFrom: gFrom,
+        replaceTo: gTo,
+        insertText: transformed,
+      });
+      return true;
+    },
+    onDropFiles: (e, at) => {
+      const dt = e.dataTransfer;
+      if (!dt || !dt.files.length) return false;
+      const files = takeFiles(dt.files);
+      if (files.length) void uploadFiles(files, start + at);
+      return true;
+    },
+  });
 
   return (
     <div className="editor">
@@ -1021,7 +1511,7 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
         />
       )}
 
-      {codePatchOpen && (
+      {codePatchOpen && createPortal(
         <CodeReplaceModal
           cardBody={body}
           cursorPos={cursorPos}
@@ -1033,9 +1523,68 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
           onApplyPatch={(patch) => {
             applyEditPatch(patch);
             onClearInitialSmartPaste?.();
+            if (card.file_path) setFilePrompt({ writing: false, result: null });
           }}
-        />
+        />,
+        document.body,
       )}
+
+      {filePrompt && (() => {
+        const saveReady = status === "saved" && uploading === 0;
+        const saveBroken = status === "error" || status === "conflict";
+        // 彈窗掛到 document.body：脫離編輯器所在面板的層疊情境，不再被頂部視圖切換列蓋住
+        return createPortal(
+          <div className="modal" role="dialog" aria-label="寫入綁定檔案">
+            <div className="modal-card" style={{ maxWidth: 460 }}>
+              <h4 style={{ margin: 0 }}>寫入綁定檔案？</h4>
+              <div style={{ margin: "8px 0", fontSize: 13 }}>
+                <div>代碼已取代並更新到卡片。此卡片綁定了本機檔案：</div>
+                <div style={{ fontFamily: "monospace", fontSize: 12, wordBreak: "break-all", margin: "4px 0" }}>
+                  {card.file_path}
+                </div>
+              </div>
+              {filePrompt.result ? (
+                <div style={{ fontSize: 13 }}>{filePrompt.result}</div>
+              ) : !saveReady ? (
+                <div className="muted" style={{ fontSize: 12 }}>
+                  {saveBroken
+                    ? `卡片尚未存入資料庫（${STATUS_TEXT[status]}），無法寫入檔案`
+                    : "等待卡片儲存完成…"}
+                </div>
+              ) : null}
+              <div className="modal-actions" style={{ marginTop: 12 }}>
+                <button type="button" onClick={() => setFilePrompt(null)} disabled={filePrompt.writing}>
+                  {filePrompt.result ? "關閉" : "不寫入"}
+                </button>
+                {!filePrompt.result && (
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={!saveReady || filePrompt.writing}
+                    onClick={() => void writeBoundFile()}
+                  >
+                    {filePrompt.writing ? "寫入中…" : "⚡ 寫入檔案"}
+                  </button>
+                )}
+                {filePrompt.result && onReturnToBoard && (
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => {
+                      setFilePrompt(null);
+                      setCodePatchOpen(false);
+                      onReturnToBoard();
+                    }}
+                  >
+                    關閉並回到白板
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>,
+          document.body,
+        );
+      })()}
 
       <div
         ref={scrollContainerRef}
@@ -1133,21 +1682,22 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
 
                 {selBubble && !lineMenu && (
                   <div
+                    ref={bubbleRef}
                     className="selection-bubble editor-toolbar"
                     role="toolbar"
                     aria-label="文字格式快捷"
                     style={{
                       position: "absolute",
-                      left: Math.max(
-                        110,
-                        Math.min(selBubble.left, (scrollContainerRef.current?.clientWidth ?? 600) - 110),
-                      ),
-                      top: selBubble.top + 6,
-                      transform: "translateX(-50%)",
+                      // 量到實際寬高前先隱藏，避免先出現在錯的位置再跳過去
+                      visibility: bubblePos ? "visible" : "hidden",
+                      left: bubblePos?.left ?? 0,
+                      top: bubblePos?.top ?? selBubble.top + 6,
+                      width: "max-content",
+                      maxWidth: "calc(100% - 16px)",
                       zIndex: 30,
                       display: "flex",
-                      flexDirection: "column",
-                      alignItems: "flex-start",
+                      flexWrap: "wrap",
+                      alignItems: "center",
                       gap: 6,
                       padding: 6,
                       background: "var(--panel, #1e293b)",
@@ -1175,6 +1725,15 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
                         onClick={() => handleToolbarInlineWrap("++", "底線文字")}
                       >
                         U
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="收摺章節"
+                        title="將選取內容轉為收摺章節"
+                        style={{ ...bubbleBtnStyle, fontSize: 12, width: "auto", padding: "0 5px" }}
+                        onClick={handleToolbarFoldSection}
+                      >
+                        📁 收摺
                       </button>
                       <span
                         aria-hidden="true"
@@ -1213,6 +1772,92 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
                             onBody(cur.slice(0, seg.removeStart) + cur.slice(seg.removeEnd));
                           }}
                         />
+                      </div>
+                    );
+                  }
+
+                  if (seg.kind === "details") {
+                    return (
+                      <div
+                        key={`details-${idx}`}
+                        className="editor-details-block"
+                        data-details-start={seg.rawStart}
+                        style={{
+                          margin: "8px 0",
+                          borderRadius: 6,
+                          border: "1px solid var(--line, rgba(148, 163, 184, 0.35))",
+                          background: "var(--panel-sub, rgba(0, 0, 0, 0.02))",
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            padding: "6px 10px",
+                            background: "var(--code-head-bg, rgba(0, 0, 0, 0.04))",
+                            borderBottom: seg.isOpen ? "1px solid var(--line, rgba(148, 163, 184, 0.2))" : "none",
+                            userSelect: "none",
+                            cursor: "pointer",
+                          }}
+                          onClick={() => toggleDetailsOpen(seg)}
+                        >
+                          <span style={{ fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ fontSize: 10 }}>{seg.isOpen ? "▼" : "▶"}</span>
+                            <span>{seg.summary}</span>
+                          </span>
+                          <button
+                            type="button"
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 4,
+                              fontSize: 11,
+                              padding: "2px 8px",
+                              color: "var(--muted)",
+                              cursor: "pointer",
+                            }}
+                            title="解除收摺（還原為一般文字）"
+                            aria-label="解除收摺"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              unwrapDetailsSeg(seg);
+                            }}
+                          >
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 16 16"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="1.5"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              aria-hidden="true"
+                            >
+                              <path d="M2 8h2M7 8h2M12 8h2" />
+                              <polyline points="5.5 4.5 8 2 10.5 4.5" />
+                              <polyline points="5.5 11.5 8 14 10.5 11.5" />
+                            </svg>
+                            解除
+                          </button>
+                        </div>
+                        {seg.isOpen && (
+                          <div style={{ padding: "6px 10px" }}>
+                            <LiveSegmentEditor
+                              ref={(h) => {
+                                if (h) segRefs.current.set(seg.contentStart, h);
+                                else segRefs.current.delete(seg.contentStart);
+                              }}
+                              value={seg.content}
+                              start={seg.contentStart}
+                              placeholder="章節內容…"
+                              ariaLabel={`章節「${seg.summary}」內容`}
+                              {...detailsHandlers(seg.contentStart)}
+                            />
+                          </div>
+                        )}
                       </div>
                     );
                   }
@@ -1354,6 +1999,239 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
           </div>
         )}
 
+        {scrollbarDots.length > 0 && (
+          <div
+            className="scrollbar-dots-rail nodrag"
+            aria-hidden="true"
+            style={{
+              position: "sticky",
+              top: 10,
+              float: "right",
+              width: 8,
+              height: "calc(100% - 80px)",
+              marginRight: -6,
+              zIndex: 35,
+              pointerEvents: "none",
+            }}
+          >
+            {scrollbarDots.map((dot) => (
+              <div
+                key={dot.id}
+                title={`${"#".repeat(dot.level)} ${dot.title}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const box = scrollContainerRef.current;
+                  if (!box) return;
+                  const targetY = (dot.topPercent / 100) * box.scrollHeight;
+                  box.scrollTo({ top: Math.max(0, targetY - 24), behavior: "smooth" });
+                }}
+                style={{
+                  position: "absolute",
+                  top: `${dot.topPercent}%`,
+                  right: 1,
+                  width: dot.level === 1 ? 8 : dot.level === 2 ? 6 : 5,
+                  height: dot.level === 1 ? 8 : dot.level === 2 ? 6 : 5,
+                  borderRadius: "50%",
+                  background: "var(--accent, #60a5fa)",
+                  boxShadow: "0 0 3px rgba(0, 0, 0, 0.6)",
+                  cursor: "pointer",
+                  pointerEvents: "auto",
+                  opacity: 0.85,
+                  transform: "translateY(-50%)",
+                }}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* 右下角的大綱面板與兩顆工具鈕收進同一個直排容器：靠容器對齊，不再各自用 bottom 數字湊位置 */}
+        <div
+          style={{
+            position: "sticky",
+            bottom: 10,
+            float: "right",
+            marginRight: 10,
+            zIndex: 45,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-end",
+            gap: 8,
+          }}
+        >
+        {outlineOpen && (
+          <div
+            className="editor-outline-popover nodrag"
+            role="dialog"
+            aria-label="章節大綱與層級管理"
+            style={{
+              width: 290,
+              maxHeight: 340,
+              display: "flex",
+              flexDirection: "column",
+              background: "var(--panel, #1e293b)",
+              border: "1px solid var(--line, #475569)",
+              borderRadius: 8,
+              boxShadow: "0 8px 24px rgba(0, 0, 0, 0.4)",
+              padding: 10,
+              boxSizing: "border-box",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: 8,
+                paddingBottom: 6,
+                borderBottom: "1px solid var(--line, #334155)",
+              }}
+            >
+              <span style={{ fontSize: 12, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <line x1="2" y1="3.5" x2="14" y2="3.5" />
+                  <line x1="6" y1="8" x2="14" y2="8" />
+                  <line x1="6" y1="12.5" x2="14" y2="12.5" />
+                </svg>
+                章節大綱與層級管理
+              </span>
+              <button
+                type="button"
+                onClick={() => setOutlineOpen(false)}
+                style={{ fontSize: 11, padding: "1px 6px", cursor: "pointer" }}
+              >
+                ✕ 關閉
+              </button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", minHeight: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+              {(() => {
+                const outline = extractOutlineItems(body);
+                if (outline.length === 0) {
+                  return (
+                    <div className="muted" style={{ fontSize: 12, padding: "8px 4px", lineHeight: 1.5 }}>
+                      目前內文無標題或收摺章節。
+                      <br />
+                      反白文字後點擊工具列「📁 收摺」即可建立。
+                    </div>
+                  );
+                }
+                return outline.map((item) => (
+                  <div
+                    key={item.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "3px 6px",
+                      borderRadius: 4,
+                      background: "rgba(255, 255, 255, 0.03)",
+                      fontSize: 12,
+                      paddingLeft: Math.min(60, 6 + (item.level - 1) * 14),
+                    }}
+                  >
+                    <span
+                      style={{
+                        flex: 1,
+                        cursor: "pointer",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        marginRight: 6,
+                        color: item.level === 1 ? "var(--text)" : "var(--muted, #94a3b8)",
+                        fontWeight: item.level <= 2 ? 600 : 400,
+                      }}
+                      title="點擊跳轉至此標題"
+                      onClick={() => jumpToOutlineItem(item)}
+                    >
+                      {item.kind === "details" ? "▸ " : "• "}
+                      {item.title}
+                    </span>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+                      <span className="muted" style={{ fontSize: 10, marginRight: 2 }}>
+                        H{item.level}
+                      </span>
+                      <button
+                        type="button"
+                        style={{ fontSize: 10, padding: "1px 4px", cursor: "pointer" }}
+                        title="提升層級（例如 H2 升為 H1）"
+                        disabled={item.level <= 1}
+                        onClick={() => {
+                          const patch = adjustOutlineLevel(latest.current.body, item, -1);
+                          if (patch) applyEditPatch(patch);
+                        }}
+                      >
+                        ◀
+                      </button>
+                      <button
+                        type="button"
+                        style={{ fontSize: 10, padding: "1px 4px", cursor: "pointer" }}
+                        title="降低層級（設為下層子標題）"
+                        disabled={item.level >= 6}
+                        onClick={() => {
+                          const patch = adjustOutlineLevel(latest.current.body, item, 1);
+                          if (patch) applyEditPatch(patch);
+                        }}
+                      >
+                        ▶
+                      </button>
+                    </span>
+                  </div>
+                ));
+              })()}
+            </div>
+          </div>
+        )}
+
+        <button
+          type="button"
+          className="outline-toggle-btn nodrag"
+          onClick={() => setOutlineOpen((o) => !o)}
+          onMouseDown={(e) => e.preventDefault()}
+          title="開啟章節大綱與層級管理"
+          aria-label="章節大綱與層級管理"
+          style={{
+            width: 28,
+            height: 28,
+            padding: 0,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            borderRadius: 6,
+            background: outlineOpen ? "var(--accent, #60a5fa)" : "var(--panel, #1e293b)",
+            color: outlineOpen ? "#fff" : "var(--muted, #64748b)",
+            border: "1px solid var(--line, #334155)",
+            boxShadow: "0 1px 4px rgba(0, 0, 0, 0.12)",
+            opacity: 0.9,
+            cursor: "pointer",
+          }}
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <line x1="2" y1="3.5" x2="14" y2="3.5" />
+            <line x1="6" y1="8" x2="14" y2="8" />
+            <line x1="6" y1="12.5" x2="14" y2="12.5" />
+          </svg>
+        </button>
+
         {showScrollBottom && (
           <button
             type="button"
@@ -1363,11 +2241,6 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
             title="滾動至最底部"
             aria-label="滾動至最底部"
             style={{
-              position: "sticky",
-              bottom: 10,
-              float: "right",
-              marginRight: 10,
-              zIndex: 40,
               width: 28,
               height: 28,
               padding: 0,
@@ -1400,10 +2273,12 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
             </svg>
           </button>
         )}
+        </div>
       </div>
     </div>
   );
 }
+
 // ---- 表格偵測、Word 式選取與行列智慧增減 ----
 
 interface TableCursorInfo {
@@ -1721,56 +2596,42 @@ interface ParsedCodeBlock {
   lineCount: number;
 }
 
+// 與 fencedRanges 同一套逐行規則：開頭行以 3 個以上反引號起頭（可縮排、可帶說明），
+// 結尾行只能是不少於開頭長度的反引號；沒有結尾的圍欄不算代碼塊（不把後面整份內文當代碼）
 function extractCodeBlocks(markdown: string): ParsedCodeBlock[] {
   const blocks: ParsedCodeBlock[] = [];
+  let open: { len: number; info: string; contentStart: number } | null = null;
   let pos = 0;
-  let idx = 0;
-  while (pos < markdown.length) {
-    const openTick = markdown.indexOf("```", pos);
-    if (openTick < 0) break;
-    const isLineStart = openTick === 0 || markdown[openTick - 1] === "\n";
-    if (!isLineStart) {
-      pos = openTick + 3;
-      continue;
-    }
-    const lineEnd = markdown.indexOf("\n", openTick + 3);
-    if (lineEnd < 0) break;
-    const info = markdown.slice(openTick + 3, lineEnd).trim();
-    const contentStart = lineEnd + 1;
-
-    let closeSearch = contentStart;
-    let contentEnd = -1;
-    let nextPos = -1;
-    while (closeSearch <= markdown.length) {
-      const closeTick = markdown.indexOf("```", closeSearch);
-      if (closeTick < 0) break;
-      const atStart = closeTick === 0 || markdown[closeTick - 1] === "\n";
-      const afterClose = markdown.indexOf("\n", closeTick + 3);
-      const restLine =
-        afterClose >= 0 ? markdown.slice(closeTick + 3, afterClose).trim() : markdown.slice(closeTick + 3).trim();
-      if (atStart && restLine === "") {
-        contentEnd = closeTick > contentStart && markdown[closeTick - 1] === "\n" ? closeTick - 1 : closeTick;
-        nextPos = afterClose >= 0 ? afterClose + 1 : markdown.length;
-        break;
+  while (pos <= markdown.length) {
+    let nl = markdown.indexOf("\n", pos);
+    if (nl < 0) nl = markdown.length;
+    const t = markdown.slice(pos, nl).trim();
+    if (open === null) {
+      if (t.startsWith("```")) {
+        let len = 0;
+        while (t[len] === "`") len++;
+        const info = t.slice(len).trim();
+        // 說明文字裡還有反引號的是行內程式碼（例如單行 ```x```），不是圍欄
+        if (!info.includes("`")) open = { len, info, contentStart: nl + 1 };
       }
-      closeSearch = closeTick + 3;
+    } else if (t.length >= open.len && t.replace(/`/g, "") === "") {
+      const contentEnd = pos > open.contentStart ? pos - 1 : pos;
+      const content = markdown.slice(open.contentStart, contentEnd);
+      const colonIdx = open.info.indexOf(":");
+      const label =
+        colonIdx >= 0 ? open.info.slice(colonIdx + 1).trim() : open.info || "代碼塊 #" + String(blocks.length + 1);
+      blocks.push({
+        index: blocks.length,
+        info: open.info,
+        label,
+        content,
+        contentStart: open.contentStart,
+        contentEnd,
+        lineCount: content.split("\n").length,
+      });
+      open = null;
     }
-
-    if (contentEnd < 0) break;
-    const content = markdown.slice(contentStart, contentEnd);
-    const colonIdx = info.indexOf(":");
-    const label = colonIdx >= 0 ? info.slice(colonIdx + 1).trim() : info || "代碼塊 #" + String(idx + 1);
-    blocks.push({
-      index: idx,
-      info,
-      label,
-      content,
-      contentStart,
-      contentEnd,
-      lineCount: content.split("\n").length,
-    });
-    idx += 1;
-    pos = nextPos;
+    pos = nl + 1;
   }
   return blocks;
 }
@@ -2147,6 +3008,11 @@ function CodeReplaceModal(props: {
 }) {
   const { cardBody, cursorPos, initialSmartPaste, onClose, onApplyPatch } = props;
   const blocks = extractCodeBlocks(cardBody);
+  // 找不到任何代碼塊時，列出內文裡實際的圍欄行，讓失敗原因看得見
+  const fenceLines =
+    blocks.length === 0
+      ? cardBody.split("\n").flatMap((l, i) => (l.trim().startsWith("```") ? [`第 ${i + 1} 行：${l.trim().slice(0, 40)}`] : []))
+      : [];
 
   // 預設選中游標所在的代碼塊，否則選第 1 個，若無代碼塊則為 "__new__"
   const initialTarget = () => {
@@ -2420,6 +3286,22 @@ function CodeReplaceModal(props: {
             </div>
           </div>
 
+          {blocks.length === 0 && (
+            <div className="banner warn" role="alert" style={{ flexShrink: 0, flexDirection: "column", alignItems: "flex-start" }}>
+              {fenceLines.length === 0 ? (
+                <div>卡片內文（{cardBody.length} 字）沒有任何以反引號開頭的圍欄行：這張卡片裡沒有代碼塊，或定位取代開在別張卡片上。</div>
+              ) : (
+                <>
+                  <div>內文有 {fenceLines.length} 行圍欄標記，但沒有成功配對成代碼塊（可能缺少結尾圍欄）：</div>
+                  {fenceLines.slice(0, 6).map((l) => (
+                    <div key={l} style={{ fontFamily: "monospace", fontSize: 12 }}>
+                      {l}
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
           {targetKey === "__new__" ? (
             <label className="field-row" style={{ flexShrink: 0 }}>
               <span className="muted">貼上原版（全文代碼）：</span>

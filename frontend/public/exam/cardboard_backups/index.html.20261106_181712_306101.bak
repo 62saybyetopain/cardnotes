@@ -587,6 +587,8 @@ const ICON={
   moon:'<svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>'
 };
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+// 原因：會計題的「$50」「$13,500」是貨幣，但 KaTeX 自動排版把任兩個 $ 當成算式的頭尾，中間整段中文被排成不換行的算式（字型變大、橫向溢出），$ 本身也消失。貨幣的 $ 後面是數字、再接非算式字元；把它包進獨立的 <span>，就成為單獨的文字節點，KaTeX 找不到配對。「$2x^{2}$」「$50$」數字後面接算式字元，不會被誤判。
+const escm=s=>esc(s).replace(/\$(?=\d[\d,]*(?:\.\d+)?(?![\d,.A-Za-z\\^_{}=+*\/<>|$-]))/g,()=>'<span>$</span>');
 const P=()=>S.papers.find(p=>p.id===S.cur);
 const norm=s=>[...String(s).toUpperCase().replace(/\s/g,'')].sort().join('');
 const cid=(p,q)=>'exam:'+p.id+':q'+q.no;
@@ -594,7 +596,7 @@ const qtext=q=>q.blocks.filter(b=>b.t==='text'||b.t==='code').map(b=>b.v).join('
 const LET=p=>{const s=new Set();p.questions.forEach(q=>q.options.forEach(o=>s.add(o.k)));return s.size?[...s].sort():[...'ABCD']};
 const safe=h=>h.replace(/<(?!\/?(?:table|thead|tbody|tr|td|th)\b)[^>]*>/gi,'').replace(/<(table|thead|tbody|tr|td|th)\b([^>]*)>/gi,(m,t,a)=>'<'+t+(a.match(/(?:row|col)span="\d+"/g)||[]).map(x=>' '+x).join('')+'>');
 function blk(b,pre){
-  if(b.t==='text')return'<p class="stem">'+(pre||'')+esc(b.v)+'</p>';
+  if(b.t==='text')return'<p class="stem">'+(pre||'')+escm(b.v)+'</p>';
   if(b.t==='code')return'<pre>'+esc(b.v)+'</pre>';
   if(U[b.id])return'<img class="fig" data-a="zoom" data-src="'+U[b.id]+'" src="'+U[b.id]+'" alt="">';
   if(b.html)return'<div class="tbl">'+safe(b.html)+'</div>';
@@ -1158,7 +1160,11 @@ async function create(){
   const bundles=PENDING;
   const nm=$('#nm').value.trim();
   // 原因：(1)一份失敗不該中止整批，成功的要照樣存檔並顯示，失敗的逐份大聲列出；(2)不再改動 PENDING（圖片鍵改存在副本），重試才不會疊上第二層前綴；(3)先確認解析成功再寫圖，並確認圖片真的寫入成功，失敗就不加入該份考卷。
-  const made=[],failed=[];
+  const made=[],failed=[],skipped=[];
+  // 原因：批次選母資料夾會把已匯入過的年份再匯一次；用匯入時的資料夾名稱（impKey）比對略過，並明說略過了哪些。只比匯入來的考卷（重做、抽題卷不算）。
+  // 不含科目：單份匯入時選的是考卷資料夾本身，沒有上一層，匯入當下 subj 是空的，事後才手動移進分類；鍵若含科目，批次永遠對不上。
+  // @depends-on impKey＝資料夾名稱：這裡的舊卷退回寫法（x.name）、下面的 ik、p.impKey 三處必須一致。
+  const have=new Set(S.papers.filter(x=>x.source!=='compose').map(x=>x.impKey||x.name));
   for(const top of bundles){
     // 原因：lazyZip 到這裡才展開，一次只留一份在記憶體；展開失敗只算這個 zip 失敗，不影響其他份。
     let units;
@@ -1167,12 +1173,15 @@ async function create(){
   for(const src of units){
     const isSingle=bundles.length===1&&units.length===1;
     const name=(isSingle&&nm)||src.name||'未命名考卷';
+    const ik=src.name||'未命名考卷'; // 原因：用資料夾原名而非 name，單份匯入時自訂的考卷名稱不會影響比對。
+    // 原因：單份匯入是使用者明確選的，不擋；只擋批次（多資料夾或多 zip）。
+    if(!isSingle&&have.has(ik)){skipped.push((src.subj?src.subj+'／':'')+name);continue}
     const key=src.key||'';
     const pid=uid(),scoped={};
     for(const raw in src.images)scoped[pid+'__'+raw]=src.images[raw];
     try{
       const p=importBundle({...src,images:scoped,key},name,pid);
-      p.subj=src.subj||'';
+      p.subj=src.subj||'';p.impKey=ik;
       // 原因：同一份考卷的圖片放在同一個 transaction 寫入，減少 50 份匯入時的交易開銷，且中途失敗不會留下半套孤兒圖。
       const entries=Object.entries(scoped);
       if(entries.length)await tx('assets','readwrite',s=>{for(const [id,blob] of entries)s.put(blob,id)});
@@ -1180,12 +1189,12 @@ async function create(){
     }catch(e){failed.push('「'+name+'」：'+(e&&e.message||e))}
   }
   }
-  if(!made.length)return msg('匯入失敗（共 '+failed.length+' 份）：'+failed.join('；'),true);
+  if(!made.length)return failed.length||!skipped.length?msg('匯入失敗（共 '+failed.length+' 份）：'+failed.join('；')+(skipped.length?'；另有 '+skipped.length+' 份已匯入過而略過':''),true):msg('沒有新增：這 '+skipped.length+' 份都已匯入過（'+skipped.join('、')+'）');
   const prevPapers=[...S.papers],prevCur=S.cur,prevView=S.view,prevSubjs=[...S.subjs];
   S.papers.unshift(...made);
   // 原因：批次遇到的新科目接在分類清單最後；存檔失敗時下面一併還原，不留下沒有考卷的空分類。
   made.forEach(x=>{if(x.subj&&!S.subjs.includes(x.subj))S.subjs.push(x.subj)});
-  const one=made.length===1&&!failed.length;
+  const one=made.length===1&&!failed.length&&!skipped.length; // 原因：有略過時留在清單頁，略過訊息才不會被考卷頁的 4 秒提示條蓋掉。
   S.cur=one?made[0].id:null;S.view=one?'paper':'list';
   const r0=REV;await save();
   if(REV===r0){
@@ -1195,7 +1204,7 @@ async function create(){
     return;
   }
   PENDING=null;if(one)await loadAssets(made[0]);render();scrollTo(0,0);
-  msg('成功匯入 '+made.length+' 份考卷'+(failed.length?'；失敗 '+failed.length+' 份：'+failed.join('；'):''),failed.length>0);
+  msg('成功匯入 '+made.length+' 份考卷'+(skipped.length?'；略過已匯入過的 '+skipped.length+' 份：'+skipped.join('、'):'')+(failed.length?'；失敗 '+failed.length+' 份：'+failed.join('；'):''),failed.length>0);
 }
 
 /* ---------- backup & restore ---------- */
@@ -1419,8 +1428,10 @@ const orph=p=>{
 };
 const orphUI=p=>{
   const keySet=new Set(p.keyImgs||[]);
-  const o=orph(p).filter(id=>!keySet.has(id));if(!o.length)return'';
-  return'<details open><summary>未被使用的圖片 '+o.length+' 張（檔案在，但沒有放進任何題目或詳解）</summary>'+o.map(id=>'<div class="tg">'+(U[id]?'<img class="fig" data-a="zoom" data-src="'+U[id]+'" src="'+U[id]+'" alt="">':'<p class="miss">圖片讀取失敗：'+esc(id.slice(-24))+'</p>')+'<div class="mk">加到第 <input class="num" type="number" min="1" max="'+p.questions.length+'"> 題 <button data-a="useorph" data-id="'+esc(id)+'">加入題目</button> <button data-a="useorphx" data-id="'+esc(id)+'">加入詳解</button> <button data-a="setkeyimg" data-id="'+esc(id)+'">設為檢討答案圖</button></div></div>').join('')+'</details>';
+  // 原因：有些圖片本來就不屬於任何題目（裝飾圖、頁首圖），留在面板裡永遠清不掉；使用者按「忽略」後記在 p.ignImgs，面板不再列出，可隨時還原。
+  const ign=new Set(p.ignImgs||[]),o=orph(p).filter(id=>!keySet.has(id)&&!ign.has(id)),nig=orph(p).filter(id=>ign.has(id)).length;
+  if(!o.length)return nig?'<p class="hint">已忽略 '+nig+' 張未使用的圖片 <button class="ghost" data-a="unign">全部還原</button></p>':'';
+  return'<details open><summary>未被使用的圖片 '+o.length+' 張（檔案在，但沒有放進任何題目或詳解）</summary><div class="mk"><button data-a="ignall">全部忽略這些圖片</button></div>'+o.map(id=>'<div class="tg">'+(U[id]?'<img class="fig" data-a="zoom" data-src="'+U[id]+'" src="'+U[id]+'" alt="">':'<p class="miss">圖片讀取失敗：'+esc(id.slice(-24))+'</p>')+'<div class="mk">加到第 <input class="num" type="number" min="1" max="'+p.questions.length+'"> 題 <button data-a="useorph" data-id="'+esc(id)+'">加入題目</button> <button data-a="useorphx" data-id="'+esc(id)+'">加入詳解</button> <button data-a="setkeyimg" data-id="'+esc(id)+'">設為檢討答案圖</button> <button data-a="ign" data-id="'+esc(id)+'">忽略</button></div></div>').join('')+(nig?'<p class="hint">已忽略 '+nig+' 張 <button class="ghost" data-a="unign">全部還原</button></p>':'')+'</details>';
 };
 
 const keyImgUI=p=>{
@@ -1449,8 +1460,9 @@ function editPanel(p,q,i,k){
   (k?'<small>正解（字母）</small><input data-f="key" data-i="'+i+'" value="'+esc(q.key)+'">':'')+
   // 原因：MinerU 漏切的圖沒有位址可對，改成直接把截圖或相簿圖接在這一題後面（接在最後；選項整張被漏掉時，可截圖整個選項區）。
   '<small>補圖片（接在題目最後）</small><input type="file" accept="image/*" multiple data-addimg data-i="'+i+'">'+
-  q.blocks.map((b,j)=>b.t==='img'?imgDel('rmimg',i,j,b,'題目圖片 '+(j+1)):'').join('')+
-  (q.exp||[]).map((b,j)=>b.t==='img'?imgDel('rmximg',i,j,b,'詳解圖片 '+(j+1)):'').join('')+'</div>';
+  // 原因：MinerU 的表格區塊（t:'tbl'）帶 image_path 時 blk() 會畫成圖，但這裡只認 'img'，導致這類圖永遠沒有移除鈕。凡是 blk() 會畫出來的非文字區塊都要能移除。
+  q.blocks.map((b,j)=>b.t==='img'||b.t==='tbl'?imgDel('rmimg',i,j,b,(b.t==='img'||U[b.id]?'題目圖片 ':'題目表格 ')+(j+1)):'').join('')+
+  (q.exp||[]).map((b,j)=>b.t==='img'||b.t==='tbl'?imgDel('rmximg',i,j,b,(b.t==='img'||U[b.id]?'詳解圖片 ':'詳解表格 ')+(j+1)):'').join('')+'</div>';
 }
 // 原因：datalist 依欄位目前文字過濾，填了「商業概論」就看不到其他科目，要改選得先刪字。改成輸入框（手打）旁加一顆下拉鈕，永遠列出科目樹的全部科目；兩者都走同一個 data-f="sub"，寫入路徑不變。占位項 disabled，不會被選成「清空科目」。
 const tagBox=(q,i)=>'<div class="tg"><div class="mk"><input class="grow" data-f="sub" data-i="'+i+'" value="'+esc(q.sub)+'" placeholder="科目（手動輸入，或點右邊選擇）">'+
@@ -1517,7 +1529,7 @@ function rev(p,q,i){
   const notesContent=isMod?modFields:normalFields;
 
   return'<article id="q'+q.no+'" class="'+(w?'ng':'')+'">'+(ps?'<details'+(S.pedit===p.id+':'+ps.id+':'+i?' open':'')+'><summary>題組文章</summary>'+blks(ps.blocks)+pEb(i)+(S.pedit===p.id+':'+ps.id+':'+i?passagePanel(p,ps,i):'')+'</details>':'')+ref(q)+blks(q.blocks,'<b>'+q.no+'.</b> ')+wr(p,q)+
-  q.options.map(o=>'<div class="opt '+(q.key.includes(o.k)?'k':q.mine.includes(o.k)?'m':'')+'"><b>'+o.k+'</b>'+esc(o.v)+'</div>').join('')+
+  q.options.map(o=>'<div class="opt '+(q.key.includes(o.k)?'k':q.mine.includes(o.k)?'m':'')+'"><b>'+o.k+'</b>'+escm(o.v)+'</div>').join('')+
   '<div class="mk vrow">'+stBadge(q,i)+
   '<span class="vs">我的 <b>'+esc(q.mine||'—')+'</b>・正解 <b>'+esc(q.key||'無')+'</b></span>'+
   '<div class="vr">'+(S.skip&&S.skip[k]?'<em class="nd" title="這題不會寫入卡片軟體">不匯出</em>':'')+
@@ -1557,7 +1569,7 @@ function vPaper(){
     const ps=po(p,q),first=ps&&(!qs[i-1]||qs[i-1].pid!==q.pid);
     return(first?'<article class="ps"><small>題組：第 '+ps.from+'–'+ps.to+' 題</small>'+blks(ps.blocks)+(p.started?'':pEb(i)+(S.pedit===p.id+':'+ps.id+':'+i?passagePanel(p,ps,i):''))+'</article>':'')+
     '<article id="q'+q.no+'">'+ref(q)+blks(q.blocks,'<b>'+q.no+'.</b> ')+wr(p,q)+
-    (q.options.length?q.options.map(o=>'<button class="opt '+(q.mine.includes(o.k)?'sel':'')+'" data-a="pick" data-i="'+i+'" data-k="'+o.k+'"><b>'+o.k+'</b>'+esc(o.v)+'</button>').join(''):
+    (q.options.length?q.options.map(o=>'<button class="opt '+(q.mine.includes(o.k)?'sel':'')+'" data-a="pick" data-i="'+i+'" data-k="'+o.k+'"><b>'+o.k+'</b>'+escm(o.v)+'</button>').join(''):
     '<div class="mk">'+L.map(k=>'<button class="opt lt '+(q.mine.includes(k)?'sel':'')+'" data-a="pick" data-i="'+i+'" data-k="'+k+'"><b>'+k+'</b></button>').join('')+'</div>')+
     (p.started?'':eb(i)+(S.edit===p.id+':'+i?editPanel(p,q,i,0):''))+'</article>';
   }).join('')+nmUI(p,0)+(p.started?'<button class="pri" data-a="submit">交卷</button>':'<button class="pri" data-a="st" data-n="2">對答案</button>')+qnavUI(p);
@@ -1750,6 +1762,9 @@ document.addEventListener('click',async e=>{
     case'compose':{const np=compose(d.k);if(!np){msg('沒有符合的題目', true);return}S.papers.unshift(np);S.cur=np.id;S.view='paper';await loadAssets(np);break}
     case'start':p.started=true;p.stage=1;S.edit=null;break;
     case'submit':{p.started=false;if(!p.graded)grade(p);p.stage=2;loadCardView(p,true);break}
+    case'ign':p.ignImgs=[...new Set([...(p.ignImgs||[]),d.id])];break;
+    case'ignall':{const kp=new Set(p.keyImgs||[]);p.ignImgs=[...new Set([...(p.ignImgs||[]),...orph(p).filter(id=>!kp.has(id))])];break}
+    case'unign':p.ignImgs=[];break;
     case'pedit':{const ps=po(p,q);if(!ps)break;const k=p.id+':'+ps.id+':'+d.i;S.pedit=S.pedit===k?null:k;break}
     case'addptxt':{const ps=po(p,q);if(!ps)break;pTw(p,ps).forEach(([x,z])=>z.blocks.push({t:'text',v:''}));break}
     case'rmpblk':{
@@ -1801,12 +1816,15 @@ document.addEventListener('click',async e=>{
       if(r.opts.length<2){msg('題幹文字裡找不到 (A)(B)… 這樣的選項標記，切不出選項',true);return}
       q.blocks[j].v=wrapBareLatex(r.stem);q.options=r.opts.map(o=>({k:o.k,v:wrapBareLatex(o.v)}));validate(p);break}
     case'rmximg':{
-      const b=q.exp&&q.exp[+d.j];if(!b||b.t!=='img')break;
-      [[p,q],...twins(p,q)].forEach(([x,y])=>{y.exp=(y.exp||[]).filter(z=>z.id!==b.id);if(!y.exp.length)delete y.exp;validate(x)});
+      const b=q.exp&&q.exp[+d.j];if(!b||(b.t!=='img'&&b.t!=='tbl'))break;
+      // 原因：純 HTML 表格的 id 是空字串，只比 id 會連其他純 HTML 表格一起刪；改以 t／id／html 三者完全相同才算同一個區塊。
+      const sm=z=>z.t===b.t&&(z.id||'')===(b.id||'')&&(z.html||'')===(b.html||'');
+      [[p,q],...twins(p,q)].forEach(([x,y])=>{y.exp=(y.exp||[]).filter(z=>!sm(z));if(!y.exp.length)delete y.exp;validate(x)});
       break}
     case'rmimg':{
-      const b=q.blocks[+d.j];if(!b||b.t!=='img')break;
-      [[p,q],...twins(p,q)].forEach(([x,y])=>{y.blocks=y.blocks.filter(z=>z.id!==b.id);validate(x)});
+      const b=q.blocks[+d.j];if(!b||(b.t!=='img'&&b.t!=='tbl'))break;
+      const sm=z=>z.t===b.t&&(z.id||'')===(b.id||'')&&(z.html||'')===(b.html||'');
+      [[p,q],...twins(p,q)].forEach(([x,y])=>{y.blocks=y.blocks.filter(z=>!sm(z));validate(x)});
       break}
     case'setkeyimg':{
       p.keyImgs=p.keyImgs||[];
@@ -1831,7 +1849,7 @@ document.addEventListener('click',async e=>{
     }
   }
   save();render();
-  if(['pick','mark','auto','nmmark','edit','start','rmpblk','pedit','addptxt','addopt','rmopt','resplit','addtxt','addxtxt','rmcon','rmimg','useorph','useorphx','rmximg','sort','ren','rok','rcx','catpool','catclear','gtog','subjadd','sdel','del'].includes(d.a))scrollTo(0,y);else scrollTo(0,0);
+  if(['pick','mark','auto','nmmark','edit','start','rmpblk','pedit','addptxt','ign','ignall','unign','addopt','rmopt','resplit','addtxt','addxtxt','rmcon','rmimg','useorph','useorphx','rmximg','sort','ren','rok','rcx','catpool','catclear','gtog','subjadd','sdel','del'].includes(d.a))scrollTo(0,y);else scrollTo(0,0);
 });
 
 document.addEventListener('change',async e=>{
