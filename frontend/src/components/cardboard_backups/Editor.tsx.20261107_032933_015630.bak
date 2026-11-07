@@ -1,12 +1,12 @@
 // @depends-on ../lib/markdown.ts (BULLET_STYLE_OPTIONS, HIGHLIGHT_COLOR_OPTIONS, ORDERED_STYLE_OPTIONS, applyHighlight, applyInlineWrap, applyLineType, detectAtTrigger, detectLineType, detectListStyleAtCursor, formatCardRef, handleListEnter, indentListLines, transformPasteContent)
 // @depends-on ./MentionPopup.tsx (MentionPopup)
 // @depends-on ./LiteratureLibrary.tsx, ./RightPanel.tsx::LiteratureEditorPane (save／allowMention／pasteTransform：文獻編輯用的選填 prop；未傳時行為與卡片完全相同。plainPaste 目前沒有呼叫端使用，確認沒有其他呼叫端後可刪。文獻以 asEditorCard 轉接成 CardDetail，Editor 只用到 id／title／body／updated_at／warnings)
-// @depends-on ./Markdown.tsx (Markdown)
+// @depends-on ./Markdown.tsx (Markdown；parseCollapsibleDoc 重寫了 fencedRanges／splitBodySegments 的章節切分規則，改這兩個函式要同步改那邊)
 // @depends-on ./LiveSegmentEditor.tsx (LiveSegmentEditor, SegmentHandle；內文編輯改用 CodeMirror，位移一律是 body 的全域字元位移)
 // @depends-on ../lib/liveMarkdown.ts (編輯中的即時渲染；語法規則與 Markdown.tsx 重複一份)
 // @depends-on ../api.ts::writeCardFile／backend cards.py::write_card_file／RightPanel.tsx::FileLinkBox.handleWrite（後端寫入的是資料庫裡的內文，且要求 expected_updated_at 等於資料庫版本；所以取代後必須等 status 為 saved 才能寫檔，否則會悄悄把舊代碼寫進檔案並回報成功。FILE_CONFLICT 的確認流程與 FileLinkBox 相同，改其一要同步另一邊）
 // @depends-on 全域樣式 .modal 的 z-index（CodeReplaceModal 與「寫入綁定檔案」彈窗已 portal 到 document.body，z-index 必須高於頂部視圖切換列；若樣式使用 `.editor .modal` 這類後代選擇器，portal 後會失效）
-import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import { createPortal } from "react-dom";
 import { api, ApiError } from "../api";
 import {
@@ -849,6 +849,12 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
   // 取代成功且卡片綁定了本機檔案時詢問是否寫檔；null＝不顯示
   const [filePrompt, setFilePrompt] = useState<{ writing: boolean; result: string | null } | null>(null);
 
+  // 原因：取代後內文是 dirty，要等 1 秒自動存檔計時才會 saved，這段時間寫檔按鈕是 disabled，
+  // 使用者按下去會被吞掉。彈窗開著時改成立刻存檔；saveRef 內已有 savingRef 防重入，不會重複存。
+  useEffect(() => {
+    if (filePrompt && status === "dirty" && uploading === 0) void saveRef.current?.();
+  }, [filePrompt, status, uploading]);
+
   const writeBoundFile = async (force = false): Promise<void> => {
     setFilePrompt({ writing: true, result: null });
     try {
@@ -948,6 +954,29 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
   const [selBubble, setSelBubble] = useState<{ segStart: number; left: number; top: number } | null>(null);
   const selTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selPendingSegRef = useRef<number | null>(null);
+
+  // 反白圖標列的實際位置：要等它渲染後量到真實寬高才算得出來（假設固定寬度會讓左側被裁掉）
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  const [bubblePos, setBubblePos] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = bubbleRef.current;
+    const parent = el?.offsetParent;
+    if (!selBubble || !el || !(parent instanceof HTMLElement)) {
+      setBubblePos(null);
+      return;
+    }
+    const boxW = scrollContainerRef.current?.clientWidth ?? parent.clientWidth;
+    const left = Math.max(8, Math.min(selBubble.left - el.offsetWidth / 2, boxW - el.offsetWidth - 8));
+    // 預設放在反白範圍下方（沿用回報的位置）；上方放得下就改放上方，不蓋住往下延伸選取的文字
+    let top = selBubble.top + 6;
+    const sel = window.getSelection();
+    const first = sel && sel.rangeCount > 0 && !sel.isCollapsed ? sel.getRangeAt(0).getClientRects()[0] : undefined;
+    const box = scrollContainerRef.current?.getBoundingClientRect();
+    if (first && first.height > 0 && box && first.top - box.top >= el.offsetHeight + 12) {
+      top = first.top - parent.getBoundingClientRect().top - parent.clientTop - el.offsetHeight - 6;
+    }
+    setBubblePos({ left, top });
+  }, [selBubble, lineMenu]);
 
   const reportSelectionRect = useCallback((segStart: number, rect: { left: number; bottom: number } | null) => {
     if (!rect) {
@@ -1659,21 +1688,22 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
 
                 {selBubble && !lineMenu && (
                   <div
+                    ref={bubbleRef}
                     className="selection-bubble editor-toolbar"
                     role="toolbar"
                     aria-label="文字格式快捷"
                     style={{
                       position: "absolute",
-                      left: Math.max(
-                        110,
-                        Math.min(selBubble.left, (scrollContainerRef.current?.clientWidth ?? 600) - 110),
-                      ),
-                      top: selBubble.top + 6,
-                      transform: "translateX(-50%)",
+                      // 量到實際寬高前先隱藏，避免先出現在錯的位置再跳過去
+                      visibility: bubblePos ? "visible" : "hidden",
+                      left: bubblePos?.left ?? 0,
+                      top: bubblePos?.top ?? selBubble.top + 6,
+                      width: "max-content",
+                      maxWidth: "calc(100% - 16px)",
                       zIndex: 30,
                       display: "flex",
-                      flexDirection: "column",
-                      alignItems: "flex-start",
+                      flexWrap: "wrap",
+                      alignItems: "center",
                       gap: 6,
                       padding: 6,
                       background: "var(--panel, #1e293b)",

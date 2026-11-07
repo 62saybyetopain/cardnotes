@@ -6,9 +6,10 @@
 // @depends-on ../lib/liveMarkdown.ts (編輯中的即時渲染；語法規則與 Markdown.tsx 重複一份)
 // @depends-on ../api.ts::writeCardFile／backend cards.py::write_card_file／RightPanel.tsx::FileLinkBox.handleWrite（後端寫入的是資料庫裡的內文，且要求 expected_updated_at 等於資料庫版本；所以取代後必須等 status 為 saved 才能寫檔，否則會悄悄把舊代碼寫進檔案並回報成功。FILE_CONFLICT 的確認流程與 FileLinkBox 相同，改其一要同步另一邊）
 // @depends-on 全域樣式 .modal 的 z-index（CodeReplaceModal 與「寫入綁定檔案」彈窗已 portal 到 document.body，z-index 必須高於頂部視圖切換列；若樣式使用 `.editor .modal` 這類後代選擇器，portal 後會失效）
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useMemo, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import { createPortal } from "react-dom";
 import { api, ApiError } from "../api";
+import { findRanges } from "../lib/findInText";
 import {
   BULLET_STYLE_OPTIONS,
   HIGHLIGHT_COLOR_OPTIONS,
@@ -52,6 +53,8 @@ interface Props {
   hideTopToolbar?: boolean;
   initialSmartPaste?: string | null;
   onClearInitialSmartPaste?(): void;
+  initialFind?: string | null; // 從搜尋結果進來時帶入的搜尋詞：開啟尋找列並跳到第一筆
+  onClearInitialFind?(): void;
   onSaved(card: CardDetail): void;
   onReload(): void;
   onLinkAdded?(sourceId: string, targetId: string, extra?: Partial<BoardLink>): void;
@@ -268,6 +271,17 @@ function splitBodySegments(body: string): BodySegment[] {
   return segments;
 }
 
+// 全文尋找：只在文字段落內找（圖片語法不算、命中不跨段），回傳命中的全域位移。找的是 body 字串，不是 DOM
+function findInBody(text: string, query: string): number[] {
+  if (!query) return [];
+  const out: number[] = [];
+  for (const s of splitBodySegments(text)) {
+    if (s.kind !== "text") continue;
+    for (const r of findRanges(s.text, query)) out.push(s.start + r.from);
+  }
+  return out;
+}
+
 // 分割按鈕：左側主按鈕直接套用，右側 ▾ 展開樣式選單；兩者貼合成同一個控制項，避免被誤認為兩個獨立功能
 function SplitMenuButton(props: {
   open: boolean;
@@ -465,7 +479,7 @@ const LINE_TYPE_BUTTONS: readonly { type: LineType; label: string }[] = [
   { type: "h3", label: "標題 3" },
 ];
 
-export function Editor({ card, save, allowMention = true, plainPaste = false, pasteTransform = transformPasteContent, compact = false, initialSmartPaste, onClearInitialSmartPaste, onSaved, onReload, onLinkAdded, onOpenCard, onDirtyChange, onReturnToBoard, report }: Props) {
+export function Editor({ card, save, allowMention = true, plainPaste = false, pasteTransform = transformPasteContent, compact = false, initialSmartPaste, onClearInitialSmartPaste, initialFind, onClearInitialFind, onSaved, onReload, onLinkAdded, onOpenCard, onDirtyChange, onReturnToBoard, report }: Props) {
   const [title, setTitle] = useState(card.title);
   const [body, setBody] = useState(() => normalizeNewlines(card.body));
   const [cursorPos, setCursorPos] = useState(0);
@@ -698,6 +712,80 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
     },
     [placeSelection],
   );
+
+  // ---- 全文尋找：在整份 body 裡找，所以 CodeMirror 沒渲染到的行也找得到；標示只改外觀，不改文件 ----
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findIdx, setFindIdx] = useState(0);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const findMatches = useMemo(() => (findOpen ? findInBody(body, findQuery) : []), [findOpen, body, findQuery]);
+  const findCur = findMatches.length ? Math.min(findIdx, findMatches.length - 1) : -1;
+
+  // 只捲動，不選取、不搶焦點：輸入框裡連按 Enter 才能連續找下一個，也不會有任何字被誤蓋掉
+  const revealAt = useCallback((globalPos: number) => {
+    for (const s of splitBodySegments(latest.current.body)) {
+      if (s.kind === "text" && globalPos >= s.start && globalPos <= s.end) {
+        segRefs.current.get(s.start)?.reveal(globalPos - s.start);
+        return;
+      }
+    }
+  }, []);
+
+  const openFind = () => {
+    const { start, end } = getGlobalSelection();
+    const picked = latest.current.body.slice(start, end);
+    if (picked && picked.length <= 200 && !picked.includes("\n")) {
+      const hits = findInBody(latest.current.body, picked);
+      const first = Math.max(0, hits.findIndex((h) => h >= start));
+      setFindQuery(picked);
+      setFindIdx(first);
+      if (hits.length) requestAnimationFrame(() => revealAt(hits[first]));
+    }
+    setFindOpen(true);
+    requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+  };
+
+  const changeFindQuery = (v: string) => {
+    setFindQuery(v);
+    setFindIdx(0);
+    const hits = findInBody(latest.current.body, v);
+    if (hits.length) revealAt(hits[0]);
+  };
+
+  const stepFind = (dir: 1 | -1) => {
+    if (findMatches.length === 0) return;
+    const next = (findCur + dir + findMatches.length) % findMatches.length;
+    setFindIdx(next);
+    revealAt(findMatches[next]);
+  };
+
+  const closeFind = () => {
+    setFindOpen(false);
+    textRef.current?.focus();
+  };
+
+  useEffect(() => {
+    if (!initialFind) return;
+    setFindQuery(initialFind);
+    setFindIdx(0);
+    setFindOpen(true);
+    const hits = findInBody(latest.current.body, initialFind);
+    if (hits.length) requestAnimationFrame(() => revealAt(hits[0]));
+    onClearInitialFind?.();
+  }, [initialFind]);
+
+  // 預覽模式整篇都在 DOM 裡，瀏覽器原生 Ctrl+F 就搜得到，所以不攔截
+  const onEditorKeyDown = (e: React.KeyboardEvent) => {
+    if (previewing || e.nativeEvent.isComposing) return;
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      if (e.target === findInputRef.current) findInputRef.current?.select();
+      else openFind();
+    }
+  };
 
   const [bulletStyle, setBulletStyle] = useState<BulletStyle>("dash");
   const [orderedStyle, setOrderedStyle] = useState<OrderedStyle>("decimal");
@@ -1448,7 +1536,7 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
   });
 
   return (
-    <div className="editor">
+    <div className="editor" onKeyDown={onEditorKeyDown}>
       <div className="editor-head">
         <input
           className="title-input"
@@ -1477,6 +1565,17 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
         >
           {previewing ? "✎ 返回編輯" : "👁 預覽"}
         </button>
+        {!previewing && (
+          <button
+            type="button"
+            className={findOpen ? "on" : ""}
+            style={{ fontSize: 11, padding: "2px 8px", marginLeft: 6 }}
+            onClick={() => (findOpen ? closeFind() : openFind())}
+            title="在全文中尋找（Ctrl+F）"
+          >
+            🔍 尋找
+          </button>
+        )}
       </div>
       {status === "conflict" && (
         <div className="banner danger" role="alert">
@@ -1499,6 +1598,55 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
       {missingCardCount > 0 && (
         <div className="banner warn" role="alert">
           內文引用了 {missingCardCount} 張不存在的卡片。
+        </div>
+      )}
+      {findOpen && !previewing && (
+        <div
+          className="find-bar"
+          role="search"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "4px 8px",
+            margin: "4px 0",
+            border: "1px solid var(--line, #334155)",
+            borderRadius: 6,
+            background: "var(--panel, #1e293b)",
+          }}
+        >
+          <input
+            ref={findInputRef}
+            value={findQuery}
+            onChange={(e) => changeFindQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (e.key === "Enter") {
+                e.preventDefault();
+                stepFind(e.shiftKey ? -1 : 1);
+              } else if (e.key === "Escape") {
+                // 只關尋找列，不讓 Esc 冒泡到 App 把整個中央編輯關掉
+                e.preventDefault();
+                e.stopPropagation();
+                closeFind();
+              }
+            }}
+            placeholder="在全文中尋找（Enter 下一個，Shift+Enter 上一個）"
+            aria-label="在全文中尋找"
+            style={{ flex: 1, minWidth: 0 }}
+          />
+          <span className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }} aria-live="polite">
+            {!findQuery ? "" : findMatches.length === 0 ? "找不到" : `${findCur + 1} / ${findMatches.length}`}
+          </span>
+          <button type="button" onClick={() => stepFind(-1)} disabled={findMatches.length === 0} aria-label="上一個" title="上一個（Shift+Enter）">
+            ▲
+          </button>
+          <button type="button" onClick={() => stepFind(1)} disabled={findMatches.length === 0} aria-label="下一個" title="下一個（Enter）">
+            ▼
+          </button>
+          <button type="button" onClick={closeFind} aria-label="關閉尋找" title="關閉（Esc）">
+            ✕
+          </button>
         </div>
       )}
 
@@ -1887,6 +2035,17 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
                           : "繼續輸入段落內容（支援 Markdown 語法）…"
                       }
                       ariaLabel={idx === 0 ? "卡片內文" : `卡片內文段落 ${idx + 1}`}
+                      find={
+                        findOpen && findQuery
+                          ? {
+                              query: findQuery,
+                              current:
+                                findCur >= 0 && findMatches[findCur] >= seg.start && findMatches[findCur] < seg.end
+                                  ? findMatches[findCur] - seg.start
+                                  : null,
+                            }
+                          : undefined
+                      }
                       onFocus={() => {
                         const h = segRefs.current.get(seg.start);
                         if (h) textRef.current = h;

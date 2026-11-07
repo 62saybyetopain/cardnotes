@@ -72,6 +72,7 @@ export default function App() {
   const [previewCardId, setPreviewCardId] = useState<string | null>(null);
   const [centerEditing, setCenterEditing] = useState(false);
   const [pendingSmartPaste, setPendingSmartPaste] = useState<string | null>(null);
+  const [pendingFind, setPendingFind] = useState<string | null>(null);
   const [literatureFocusId, setLiteratureFocusId] = useState<string | null>(null);
   const [literatureTick, setLiteratureTick] = useState(0);
   const [viewMode, setViewMode] = useState<ViewMode>(initialView.viewMode);
@@ -331,9 +332,10 @@ export default function App() {
     setTab("search");
   }, []);
 
-  const openCardInCenter = useCallback((id: string, options?: { smartPasteText?: string }) => {
+  const openCardInCenter = useCallback((id: string, options?: { smartPasteText?: string; findText?: string }) => {
     setSelected(id);
     setPendingSmartPaste(options?.smartPasteText ?? null);
+    setPendingFind(options?.findText ?? null);
     setCenterEditing(true);
     setTab("content");
   }, []);
@@ -845,6 +847,8 @@ export default function App() {
                   version={version}
                   initialSmartPaste={pendingSmartPaste}
                   onClearInitialSmartPaste={() => setPendingSmartPaste(null)}
+                  initialFind={pendingFind}
+                  onClearInitialFind={() => setPendingFind(null)}
                   onReturnToBoard={closeCenterEditor}
                   onSaved={onCenterSaved}
                   onCardDeleted={onCardDeleted}

@@ -7,6 +7,7 @@
 // @depends-on ./MentionPanel.tsx (loadCardTitles 在它的 effect 依賴陣列內，傳入的函式必須是穩定身分（模組層級或 useCallback）；行內箭頭會讓每次渲染都重抓全部卡片標題，且不會有任何錯誤)
 import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
 import { api } from "../api";
+import { getPreferredDriverType } from "../lib/storage";
 import { isSameAxisGroup, tagPath } from "../lib/tree";
 import { htmlToMarkdownPaste } from "../lib/pasteHtml";
 import {
@@ -23,6 +24,7 @@ import {
   type CardType,
   type CurationStatus,
   type LinkStatus,
+  type LiteratureSummary,
   type RelationType,
   type Tag,
   type TagResolveResponse,
@@ -360,7 +362,7 @@ interface Props {
   onResizeStart?(e: React.MouseEvent): void;
   onTab(t: TabKey): void;
   onClearFilter(): void;
-  onSelectCard(id: string): void;
+  onSelectCard(id: string, options?: { findText?: string }): void;
   onPreviewCard?(id: string | null): void;
   onCreateCard?(): void;
   onAddToBoard(id: string): void;
@@ -402,6 +404,8 @@ export function CardEditorPane(
         key={rest.cardId}
         litId={rest.cardId.slice("lit:".length)}
         onChanged={onLiteratureChanged}
+        initialFind={rest.initialFind}
+        onClearInitialFind={rest.onClearInitialFind}
         report={rest.report}
         info={rest.info}
       />
@@ -417,6 +421,8 @@ function CardEditorPaneInner(props: {
   version: number;
   initialSmartPaste?: string | null;
   onClearInitialSmartPaste?(): void;
+  initialFind?: string | null;
+  onClearInitialFind?(): void;
   onReturnToBoard?(): void;
   onSaved(card: CardDetail): void;
   onCardDeleted(id: string): void;
@@ -426,7 +432,7 @@ function CardEditorPaneInner(props: {
   report(e: unknown, prefix?: string): void;
   info?(text: string): void;
 }) {
-  const { cardId, tags, version, initialSmartPaste, onClearInitialSmartPaste, onReturnToBoard, onSaved, onCardDeleted, onLinkAdded, onSelectCard, onTagsChanged, report, info } = props;
+  const { cardId, tags, version, initialSmartPaste, onClearInitialSmartPaste, initialFind, onClearInitialFind, onReturnToBoard, onSaved, onCardDeleted, onLinkAdded, onSelectCard, onTagsChanged, report, info } = props;
 
   const [card, setCard] = useState<CardDetail | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -468,6 +474,8 @@ function CardEditorPaneInner(props: {
       nonce={nonce}
       initialSmartPaste={initialSmartPaste}
       onClearInitialSmartPaste={onClearInitialSmartPaste}
+      initialFind={initialFind}
+      onClearInitialFind={onClearInitialFind}
       onReturnToBoard={onReturnToBoard}
       onReload={() => (setNonce((n) => n + 1), refetch())}
       onSaved={(c) => {
@@ -674,6 +682,8 @@ function ContentTab(props: {
   hideTopToolbar?: boolean;
   initialSmartPaste?: string | null;
   onClearInitialSmartPaste?(): void;
+  initialFind?: string | null;
+  onClearInitialFind?(): void;
   onReturnToBoard?(): void;
   onReload(): void;
   onSaved(card: CardDetail): void;
@@ -1060,6 +1070,8 @@ function ContentTab(props: {
         hideTopToolbar={props.hideTopToolbar}
         initialSmartPaste={props.initialSmartPaste}
         onClearInitialSmartPaste={props.onClearInitialSmartPaste}
+        initialFind={props.initialFind}
+        onClearInitialFind={props.onClearInitialFind}
         onReturnToBoard={props.onReturnToBoard}
         onSaved={props.onSaved}
         onReload={props.onReload}
@@ -1173,11 +1185,13 @@ function NoteEditorPane(props: {
 
 function LiteratureEditorPane(props: {
   litId: string;
+  initialFind?: string | null;
+  onClearInitialFind?(): void;
   onChanged?(litId: string, patch: LiteraturePatch): void;
   report(e: unknown, prefix?: string): void;
   info?(text: string): void;
 }) {
-  const { litId, onChanged, report, info } = props;
+  const { litId, onChanged, initialFind, onClearInitialFind, report, info } = props;
   const [lit, setLit] = useState<import("../types").Literature | null>(null);
   const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
@@ -1230,11 +1244,16 @@ function LiteratureEditorPane(props: {
           info?.("已更新文獻內文");
         }}
         onReload={() => setNonce((n) => n + 1)}
+        initialFind={initialFind}
+        onClearInitialFind={onClearInitialFind}
         report={report}
       />
     </div>
   );
 }
+
+// 搜尋欄預覽區的內容：卡片或文獻都只用到這三欄；文獻的 id 一律帶 "lit:" 前綴，與 selectedCardId 的約定相同
+type PreviewDoc = { id: string; title: string; body: string };
 
 function useDebounced<T>(value: T, ms: number): T {
   const [v, setV] = useState(value);
@@ -1253,12 +1272,29 @@ function SearchTab(p: Props) {
   const [err, setErr] = useState("");
   const [localPreviewId, setLocalPreviewId] = useState<string | null>(p.previewCardId ?? null);
   const [paneOpen, setPaneOpen] = useState<boolean>(!!p.previewCardId);
-  const [previewCard, setPreviewCard] = useState<CardDetail | null>(null);
+  const [previewCard, setPreviewCard] = useState<PreviewDoc | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewErr, setPreviewErr] = useState("");
   const [boardLocations, setBoardLocations] = useState<Map<string, string[]>>(new Map());
   const seq = useRef(0);
   const { tagId, unclassified, curationStatus } = p.filter;
+
+  // 文獻：另一個 API、另一份清單。標籤／位置／收件夾篩選只作用在卡片，文獻沒有這些屬性，篩選中就不顯示文獻
+  const [litItems, setLitItems] = useState<LiteratureSummary[]>([]);
+  const litSeq = useRef(0);
+  const filtering = !!(tagId || unclassified || curationStatus);
+  useEffect(() => {
+    const text = dq.trim();
+    const my = ++litSeq.current;
+    if (!text || filtering || getPreferredDriverType() === "dexie") {
+      setLitItems([]);
+      return;
+    }
+    api
+      .listLiterature({ q: text, limit: 50 })
+      .then((r) => my === litSeq.current && setLitItems(r.items))
+      .catch((e) => my === litSeq.current && p.report(e, "搜尋文獻失敗"));
+  }, [dq, filtering, p.version]);
 
   // 快取白板與分組框拓撲資訊，聚合每張卡片的所在白板與分組框
   useEffect(() => {
@@ -1324,8 +1360,12 @@ function SearchTab(p: Props) {
     let alive = true;
     setPreviewLoading(true);
     setPreviewErr("");
-    api
-      .getCard(localPreviewId)
+    const req: Promise<PreviewDoc> = localPreviewId.startsWith("lit:")
+      ? api
+          .getLiterature(localPreviewId.slice("lit:".length))
+          .then((l) => ({ id: localPreviewId, title: l.title, body: l.body }))
+      : api.getCard(localPreviewId);
+    req
       .then((c) => {
         if (alive) setPreviewCard(c);
       })
@@ -1375,7 +1415,7 @@ function SearchTab(p: Props) {
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="關鍵字或標籤別名搜尋卡片"
+            placeholder="關鍵字或標籤別名搜尋卡片（含文獻）"
             aria-label="關鍵字搜尋"
             autoFocus
             style={{ flex: 1 }}
@@ -1465,7 +1505,7 @@ function SearchTab(p: Props) {
                 </button>
                 <button
                   onClick={() => {
-                    p.onSelectCard(c.id);
+                    p.onSelectCard(c.id, { findText: dq.trim() || undefined });
                     if (!p.hideContentTab) p.onTab("content");
                   }}
                   title="跳轉至此卡片進行編輯"
@@ -1477,6 +1517,44 @@ function SearchTab(p: Props) {
             );
           })}
         </ul>
+        {litItems.length > 0 && (
+          <>
+            <div className="filter-badge">文獻（{litItems.length}）</div>
+            <ul className="results">
+              {litItems.map((it) => {
+                const litKey = `lit:${it.id}`;
+                return (
+                  <li key={it.id} className={paneOpen && localPreviewId === litKey ? "previewing-row" : undefined}>
+                    <button
+                      className="result-main"
+                      onClick={() => {
+                        // 不呼叫 onPreviewCard：App 會拿它去 cardTitle 驗證，文獻 id 一定失敗而被清掉
+                        setLocalPreviewId(litKey);
+                        setPaneOpen(true);
+                      }}
+                      title="點擊在下方預覽區查看與複製內容"
+                    >
+                      <strong>📖 {it.title || "（無標題）"}</strong>
+                      <span className="snippet">
+                        {[it.author, it.captured_on].filter(Boolean).join(" · ") || "\u00A0"}
+                      </span>
+                      <span className="snippet">{it.snippet || "\u00A0"}</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        p.onSelectCard(litKey, { findText: dq.trim() || undefined });
+                        if (!p.hideContentTab) p.onTab("content");
+                      }}
+                      title="以中央編輯開啟這份文獻，並跳到命中處"
+                    >
+                      編輯
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )}
       </div>
 
       {paneOpen && (
@@ -1495,7 +1573,7 @@ function SearchTab(p: Props) {
                     type="button"
                     className="primary"
                     onClick={() => {
-                      p.onSelectCard(previewCard.id);
+                      p.onSelectCard(previewCard.id, { findText: dq.trim() || undefined });
                       if (!p.hideContentTab) p.onTab("content");
                     }}
                     title="跳轉到這張卡片進行編輯"

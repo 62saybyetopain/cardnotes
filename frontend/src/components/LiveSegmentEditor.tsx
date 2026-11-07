@@ -5,6 +5,7 @@ import { defaultKeymap, history, historyKeymap, insertNewline } from "@codemirro
 import { Annotation, EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap, placeholder as cmPlaceholder } from "@codemirror/view";
 import { useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
+import { findExtension, setFind } from "../lib/cmFind";
 import { liveMarkdown } from "../lib/liveMarkdown";
 import { subscribeCardTitle } from "./Markdown";
 
@@ -14,6 +15,7 @@ export interface SegmentHandle {
   getSelection(): { from: number; to: number };
   focus(): void;
   setSelection(from: number, to: number): void;
+  reveal(pos: number): void; // 只捲動到該位置，不改選取、不搶焦點（全文尋找跳轉用）
 }
 
 interface Props {
@@ -28,6 +30,8 @@ interface Props {
   onKeyDown(e: KeyboardEvent, from: number, to: number): boolean;
   onPaste(e: ClipboardEvent, from: number, to: number): boolean;
   onDropFiles(e: DragEvent, at: number): boolean;
+  // 全文尋找的標示：query 非空才標示；current＝區段內目前這一筆的起點位移，不在本區段為 null
+  find?: { query: string; current: number | null };
   onToggleLineMenu?(rect: { lineTop: number; lineBottom: number }): void;
   // 反白範圍末端的位置（以 live-editor 為原點）；沒有反白或失去焦點時回報 null
   onSelectionRect?(rect: { left: number; bottom: number } | null): void;
@@ -65,6 +69,11 @@ export function LiveSegmentEditor(props: Props) {
         const len = v.state.doc.length;
         v.dispatch({ selection: { anchor: Math.min(from, len), head: Math.min(to, len) } });
       },
+      reveal(pos) {
+        const v = viewRef.current;
+        if (!v) return;
+        v.dispatch({ effects: EditorView.scrollIntoView(Math.min(pos, v.state.doc.length), { y: "center" }) });
+      },
     }),
     [],
   );
@@ -87,6 +96,7 @@ export function LiveSegmentEditor(props: Props) {
           EditorView.contentAttributes.of({ "aria-label": p0.ariaLabel }),
           ...(p0.placeholder ? [cmPlaceholder(p0.placeholder)] : []),
           liveMarkdown(subscribeCardTitle),
+          findExtension,
           Prec.highest(
             EditorView.domEventHandlers({
               keydown: (e, v) => {
@@ -190,6 +200,13 @@ export function LiveSegmentEditor(props: Props) {
       annotations: External.of(true),
     });
   }, [props.value]);
+
+  // 全文尋找的標示：query／current 變了才送出，不碰文件內容與選取
+  const findQuery = props.find?.query ?? "";
+  const findCurrent = props.find?.current ?? null;
+  useLayoutEffect(() => {
+    viewRef.current?.dispatch({ effects: setFind.of(findQuery ? { query: findQuery, current: findCurrent } : null) });
+  }, [findQuery, findCurrent]);
 
   return (
     <div
