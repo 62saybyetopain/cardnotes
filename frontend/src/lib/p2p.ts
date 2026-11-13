@@ -422,8 +422,10 @@ export async function pullIpadPackageFromCloud(credentialInput?: string): Promis
 export function sendP2PPackage(
   credentialInput: string,
   pkg: SyncPackage,
-  onSuccess: () => void,
+  onSuccess: (mediaReport?: { uploaded: number; missing: string[] }) => void,
   onError: (err: unknown) => void,
+  // 修正 TypeScript 聯集型別語法為 Blob | null
+  loadLocalBlob?: (id: string) => Promise<Blob | null>,
 ): void {
   void (async () => {
     try {
@@ -447,8 +449,39 @@ export function sendP2PPackage(
           }
         }
       }
-      await uploadJsonToDrive(token, IPAD_SYNC_FILENAME, pkg);
-      onSuccess();
+
+      // 若提供本機媒體讀取器，掃描待同步卡片引用的媒體並上傳至 Drive cardboard-media 資料夾
+      const media: SyncMediaEntry[] = [];
+      const missing: string[] = [];
+      let uploaded = 0;
+      if (loadLocalBlob) {
+        const ids = collectMediaIds(pkg);
+        if (ids.length > 0) {
+          const folderId = await ensureMediaFolder(token);
+          for (const id of ids) {
+            const found = await findDriveMedia(token, id);
+            if (found) await moveIntoFolder(token, found, folderId);
+            if (found && found.size > 0) {
+              media.push({ id, kind: kindOfMime(found.mime), mime: found.mime, byte_size: found.size });
+              continue;
+            }
+            const blob = await loadLocalBlob(id);
+            if (!blob) {
+              missing.push(id);
+              continue;
+            }
+            if (!/^(image|video)\//.test(blob.type)) {
+              throw new Error(`iPad 媒體 ${id} 沒有有效的媒體類型（${blob.type || "空白"}），未上傳`);
+            }
+            await putDriveMedia(token, id, blob, found ? found.fileId : null, folderId);
+            media.push({ id, kind: kindOfMime(blob.type), mime: blob.type, byte_size: blob.size });
+            uploaded += 1;
+          }
+        }
+      }
+
+      await uploadJsonToDrive(token, IPAD_SYNC_FILENAME, media.length > 0 ? { ...pkg, media } : pkg);
+      onSuccess({ uploaded, missing });
     } catch (err) {
       onError(err);
     }

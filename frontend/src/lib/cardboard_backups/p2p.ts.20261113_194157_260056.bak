@@ -422,14 +422,66 @@ export async function pullIpadPackageFromCloud(credentialInput?: string): Promis
 export function sendP2PPackage(
   credentialInput: string,
   pkg: SyncPackage,
-  onSuccess: () => void,
+  onSuccess: (mediaReport?: { uploaded: number; missing: string[] }) => void,
   onError: (err: unknown) => void,
+  // 修正 TypeScript 聯集型別語法為 Blob | null
+  loadLocalBlob?: (id: string) => Promise<Blob null |>,
 ): void {
   void (async () => {
     try {
       const token = await resolveAccessToken(credentialInput);
-      await uploadJsonToDrive(token, IPAD_SYNC_FILENAME, pkg);
-      onSuccess();
+      // 檢查雲端是否已有未合併的 iPad 封包：若既有封包包含本次未涵蓋的卡片，強制要求使用者確認才覆寫，避免連續上傳蓋掉前次未同步變更。
+      const existingId = await findDriveFileId(token, IPAD_SYNC_FILENAME);
+      if (existingId) {
+        const prevPkg = await downloadJsonFromDrive(token, IPAD_SYNC_FILENAME).catch(() => null);
+        if (prevPkg && Array.isArray(prevPkg.cards) && prevPkg.cards.length > 0) {
+          const nextIds = new Set(pkg.cards.map((c) => c.id));
+          const dropped = prevPkg.cards.filter((c) => !nextIds.has(c.id));
+          if (dropped.length > 0) {
+            const ok = window.confirm(
+              `⚠️ 雲端上已有一份 iPad 同步檔（匯出時間：${new Date(prevPkg.exported_at).toLocaleString()}），其中包含 ${dropped.length} 張本次未包含的卡片。\n` +
+                "若電腦端尚未拉取該份資料，直接上傳將會覆蓋它並導致這幾張卡片的變更遺失。\n\n確定要覆蓋雲端檔案嗎？",
+            );
+            if (!ok) {
+              onError(new Error("已取消上傳，雲端既有同步封包已保留"));
+              return;
+            }
+          }
+        }
+      }
+
+      // 若提供本機媒體讀取器，掃描待同步卡片引用的媒體並上傳至 Drive cardboard-media 資料夾
+      const media: SyncMediaEntry[] = [];
+      const missing: string[] = [];
+      let uploaded = 0;
+      if (loadLocalBlob) {
+        const ids = collectMediaIds(pkg);
+        if (ids.length > 0) {
+          const folderId = await ensureMediaFolder(token);
+          for (const id of ids) {
+            const found = await findDriveMedia(token, id);
+            if (found) await moveIntoFolder(token, found, folderId);
+            if (found && found.size > 0) {
+              media.push({ id, kind: kindOfMime(found.mime), mime: found.mime, byte_size: found.size });
+              continue;
+            }
+            const blob = await loadLocalBlob(id);
+            if (!blob) {
+              missing.push(id);
+              continue;
+            }
+            if (!/^(image|video)\//.test(blob.type)) {
+              throw new Error(`iPad 媒體 ${id} 沒有有效的媒體類型（${blob.type || "空白"}），未上傳`);
+            }
+            await putDriveMedia(token, id, blob, found ? found.fileId : null, folderId);
+            media.push({ id, kind: kindOfMime(blob.type), mime: blob.type, byte_size: blob.size });
+            uploaded += 1;
+          }
+        }
+      }
+
+      await uploadJsonToDrive(token, IPAD_SYNC_FILENAME, media.length > 0 ? { ...pkg, media } : pkg);
+      onSuccess({ uploaded, missing });
     } catch (err) {
       onError(err);
     }

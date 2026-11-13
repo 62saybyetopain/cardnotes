@@ -78,6 +78,11 @@ export interface DbMedia {
   created_at: string;
 }
 
+export interface DbSyncMeta {
+  key: string;
+  value: unknown;
+}
+
 export class CardboardDatabase extends Dexie {
   cards!: Table<DbCard, string>;
   tags!: Table<DbTag, string>;
@@ -89,6 +94,7 @@ export class CardboardDatabase extends Dexie {
   board_groups!: Table<BoardGroup, string>;
   board_notes!: Table<BoardNote, string>;
   media!: Table<DbMedia, string>;
+  sync_meta!: Table<DbSyncMeta, string>;
 
   constructor() {
     super("cardboard_db");
@@ -126,6 +132,10 @@ export class CardboardDatabase extends Dexie {
     // @depends-on indexedDbDriver.ts::listAllCardTitles（orderBy("[title+id]")，索引改名或移除時一起改）
     this.version(4).stores({
       cards: "id, updated_at, card_type, curation_status, [title+id]",
+    });
+    // v5：新增 sync_meta 存放同步基準線，確保與卡片資料同存於 IndexedDB，不會因 Safari 單獨清理 localStorage 而遺失
+    this.version(5).stores({
+      sync_meta: "key",
     });
   }
 }

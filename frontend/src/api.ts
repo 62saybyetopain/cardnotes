@@ -308,6 +308,7 @@ export const httpApi = {
       restored: boolean;
       cards_count: number;
       daily_pruned: { bindings: number; converted_refs: number };
+      notes_pruned: number;
       questions_pruned: number;
       relations_pruned: number;
       images_pruned: number;

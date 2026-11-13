@@ -1037,6 +1037,13 @@ export class IndexedDbDriver implements StorageDriver {
     if (!pkg || !Array.isArray(pkg.cards)) {
       throw new ApiError("VALIDATION_ERROR", "無效的備份封包格式", 422);
     }
+    if (pkg.is_partial) {
+      throw new ApiError(
+        "VALIDATION_ERROR",
+        "此檔案為「篩選變更差異封包」（僅含部分卡片），不可用於整庫覆蓋還原！請改用「合併匯入」或選取完整備份檔。",
+        422,
+      );
+    }
 
     await db.transaction(
       "rw",
@@ -1494,6 +1501,48 @@ export class IndexedDbDriver implements StorageDriver {
       width: null,
       height: null,
     };
+  }
+
+  // 供 Google Drive 雲端同步讀取 iPad 本機 IndexedDB 儲存的媒體二進位檔
+  async getMediaBlob(id: string): Promise<Blob | null> {
+    const m = await db.media.get(id);
+    return m?.data_blob ?? null;
+  }
+
+  // ---- iPad 同步基準線（存於 IndexedDB sync_meta，並自動遷移舊版 localStorage 快照） ----
+  async getSyncBaseline<T = unknown>(): Promise<T | null> {
+    const row = await db.sync_meta.get("ipad_sync_baseline");
+    if (row && row.value) return row.value as T;
+    try {
+      const legacyRaw = localStorage.getItem("cardboard:ipad-sync-baseline");
+      if (legacyRaw) {
+        const parsed = JSON.parse(legacyRaw) as T;
+        await db.sync_meta.put({ key: "ipad_sync_baseline", value: parsed });
+        localStorage.removeItem("cardboard:ipad-sync-baseline");
+        return parsed;
+      }
+    } catch {
+      /* 忽略舊版 localStorage 損毀或存取限制 */
+    }
+    return null;
+  }
+
+  async setSyncBaseline(baseline: unknown): Promise<void> {
+    await db.sync_meta.put({ key: "ipad_sync_baseline", value: baseline });
+    try {
+      localStorage.removeItem("cardboard:ipad-sync-baseline");
+    } catch {
+      /* 忽略 localStorage 存取限制 */
+    }
+  }
+
+  async clearSyncBaseline(): Promise<void> {
+    await db.sync_meta.delete("ipad_sync_baseline");
+    try {
+      localStorage.removeItem("cardboard:ipad-sync-baseline");
+    } catch {
+      /* 忽略 localStorage 存取限制 */
+    }
   }
 
   async cleanupMedia(): Promise<CleanupResult> {

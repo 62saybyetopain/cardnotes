@@ -528,6 +528,7 @@ export interface CardRecommendation {
   curation_status: CurationStatus;
   updated_at: string;
   reasons: RecommendReason[];
+  related_boards?: { id: string; name: string; kind: "tree" | "relation" }[]; // 這張卡片還在哪些相關白板上（同支或人工關聯）；必須等於 boards.py::_related_boards
 }
 export interface LiteratureRecommendation {
   id: string;
@@ -604,7 +605,10 @@ export interface SyncPackage {
   question_relations?: { id: string; board_a: string; board_b: string; relation_type: QuestionRelationType; created_at: string }[];
   // 沒有此欄＝舊版匯出；覆蓋匯入時要保留本機原有的便利貼，不可當成「清空」
   board_notes?: BoardNote[];
-  // 電腦端雲端備份才有：卡片引用的圖片清單，iPad 據此下載缺少的圖片
+  // 白板圖片（僅電腦端）。沒有這兩欄＝舊備份或 iPad 封包，覆蓋時保留本機原有的；兩欄必須同進同出（後端 schemas.SyncPackage 驗證）
+  board_images?: BoardImage[];
+  board_image_links?: { image_id: string; card_id: string; created_at: string }[];
+  // 電腦端雲端備份才有：卡片內文與白板圖片引用的圖檔清單；iPad 據此下載缺少的圖片（iPad 不渲染白板圖片，不會下載它們）
   media?: SyncMediaEntry[];
 }
 

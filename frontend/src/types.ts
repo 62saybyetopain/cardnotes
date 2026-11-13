@@ -594,6 +594,8 @@ export interface SyncPackage {
   version: number;
   exported_at: string;
   source_device: string;
+  // true 代表僅包含篩選變更的局部差異封包，嚴禁用於整庫覆蓋還原
+  is_partial?: boolean;
   cards: CardDetail[];
   tags: Tag[];
   card_tags: { card_id: string; tag_id: string }[];

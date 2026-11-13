@@ -372,11 +372,16 @@ export function IPadCardView({
         info("已取消載入示範資料，iPad 上的資料沒有任何變動。");
         return;
       }
-      // 整庫已被示範資料覆蓋，舊同步基準線已失效，必須清除以免後續同步誤判差異
-      try {
-        localStorage.removeItem("cardboard:ipad-sync-baseline");
-      } catch {
-        /* 忽略 localStorage 存取限制 */
+      // 整庫已被示範資料覆蓋，同步清除 IndexedDB 與 localStorage 中的舊同步基準線
+      const drv = storage as unknown as { clearSyncBaseline?: () => Promise<void> };
+      if (typeof drv.clearSyncBaseline === "function") {
+        await drv.clearSyncBaseline();
+      } else {
+        try {
+          localStorage.removeItem("cardboard:ipad-sync-baseline");
+        } catch {
+          /* 忽略 localStorage 存取限制 */
+        }
       }
       info("已成功載入示範資料！已建立收納抽屜、概念標籤與關聯卡片。");
       onRefresh();

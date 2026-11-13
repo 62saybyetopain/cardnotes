@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { mediaUrl } from "../lib/media";
 import {
+  downloadMediaFromCloud,
   getSavedCloudCredential,
   pullIpadPackageFromCloud,
   pullP2PPackageFromPc,
@@ -126,7 +127,19 @@ function cardSignature(
   return `${c.updated_at}|${c.title}|${c.body}|${c.card_type}|${c.curation_status}|${srcs}|${tids}|${lids}|${bids}`;
 }
 
-function loadIpadBaseline(): IpadSyncBaseline | null {
+type BaselineStorageDriver = {
+  // 原因:泛型預設值與聯集型別被打亂導致語法錯誤；還原為標準寫法。
+  getSyncBaseline?: <T = unknown>() => Promise<T | null>;
+  setSyncBaseline?: (baseline: unknown) => Promise<void>;
+};
+
+async function loadIpadBaseline(): Promise<IpadSyncBaseline | null> {
+  const drv = storage as unknown as BaselineStorageDriver;
+  if (typeof drv.getSyncBaseline === "function") {
+    const parsed = await drv.getSyncBaseline<IpadSyncBaseline>();
+    if (parsed && typeof parsed.imported_at === "string") return parsed;
+    return null;
+  }
   try {
     const raw = localStorage.getItem(IPAD_BASELINE_KEY);
     if (!raw) return null;
@@ -138,7 +151,7 @@ function loadIpadBaseline(): IpadSyncBaseline | null {
   return null;
 }
 
-function saveIpadBaseline(pkg: SyncPackage): IpadSyncBaseline {
+async function saveIpadBaseline(pkg: SyncPackage): Promise<IpadSyncBaseline> {
   const sigs: Record<string, string> = {};
   const cts = pkg.card_tags ?? [];
   const lks = pkg.links ?? [];
@@ -151,10 +164,15 @@ function saveIpadBaseline(pkg: SyncPackage): IpadSyncBaseline {
     backup_exported_at: pkg.exported_at || new Date().toISOString(),
     card_signatures: sigs,
   };
-  try {
-    localStorage.setItem(IPAD_BASELINE_KEY, JSON.stringify(baseline));
-  } catch {
-    /* 忽略 localStorage 寫入失敗 */
+  const drv = storage as unknown as BaselineStorageDriver;
+  if (typeof drv.setSyncBaseline === "function") {
+    await drv.setSyncBaseline(baseline);
+  } else {
+    try {
+      localStorage.setItem(IPAD_BASELINE_KEY, JSON.stringify(baseline));
+    } catch {
+      /* 忽略 localStorage 寫入失敗 */
+    }
   }
   return baseline;
 }
@@ -175,6 +193,11 @@ function describeBackup(pkg: SyncPackage): string {
 }
 
 async function overwriteIpadLocal(pkg: SyncPackage): Promise<boolean> {
+  if (pkg.is_partial) {
+    throw new Error(
+      "此檔案為「篩選變更差異封包」（僅含部分改動卡片），嚴禁執行整庫覆蓋還原！若要完整還原，請匯入「完整全庫備份」或電腦版備份檔。",
+    );
+  }
   if (typeof storage.importPackageOverwrite !== "function" || typeof storage.findLocalOnlyCards !== "function") {
     throw new Error("目前儲存驅動不是 IndexedDB（dexie），無法執行 iPad 覆蓋匯入。");
   }
@@ -196,8 +219,8 @@ async function overwriteIpadLocal(pkg: SyncPackage): Promise<boolean> {
     if (!proceed) return false;
   }
   // 已修改的既有卡片：findLocalOnlyCards 看不到它們，覆蓋後 iPad 上的改動會靜默消失。
-  // 以上次同步時記下的簽章為準；沒有簽章（從未同步過）就無從判斷，不猜
-  const baseline = loadIpadBaseline();
+  // 以上次同步時記下的簽章為準（存於 IndexedDB sync_meta，與卡片資料同生命週期）
+  const baseline = await loadIpadBaseline();
   if (baseline) {
     const local = await storage.syncExport();
     const localTags = local.card_tags ?? [];
@@ -303,6 +326,11 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       if (!parsed || !Array.isArray(parsed.cards)) {
         throw new Error("無效的備份檔案格式（缺少 cards 陣列）");
       }
+      if (parsed.is_partial) {
+        throw new Error(
+          "此檔案為「篩選變更差異封包」（僅含部分卡片），不可用於完整覆蓋還原！請改用「📂 合併匯入…」或選取完整備份檔。",
+        );
+      }
       const srcLabel = parsed.source_device === "ipad" ? "iPad / 網頁版（不含電腦端日誌、問題白板、文獻庫與白板圖片）" : (parsed.source_device || "電腦版");
       const timeLabel = formatSyncTime(parsed.exported_at);
       if (
@@ -325,6 +353,8 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       if (res.daily_pruned.converted_refs) lost.push(`${res.daily_pruned.converted_refs} 筆日誌已轉卡片標記`);
       if (res.questions_pruned) lost.push(`${res.questions_pruned} 塊問題白板`);
       if (res.relations_pruned) lost.push(`${res.relations_pruned} 條問題關聯`);
+      // 原因:後端覆蓋還原會一併修剪靈感筆記，前端沒回報就等於把資料遺失報成成功；比照其他欄位補上提示。
+      if (res.notes_pruned) lost.push(`${res.notes_pruned} 張靈感筆記`);
       // 對齊後端 cards.py::sync_overwrite 實際回傳的 images_pruned 與 image_links_pruned 整數欄位，避免讀取 number 的 .images 屬性永遠得到 undefined 而靜默吞掉遺失警告。
       if (res.images_pruned) lost.push(`${res.images_pruned} 張白板圖片`);
       if (res.image_links_pruned) lost.push(`${res.image_links_pruned} 條白板圖片連線`);
@@ -369,18 +399,20 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
 
   // ---- iPad 版專用狀態（時間戳過濾與匯出預覽） ----
   const [ipadFullPkg, setIpadFullPkg] = useState<SyncPackage | null>(null);
-  const [ipadBaseline, setIpadBaseline] = useState<IpadSyncBaseline | null>(() => loadIpadBaseline());
+  // 原因:loadIpadBaseline 已改為 async，不能當同步初始值（會把 Promise 存進 state）；改由 loadIpadCurrentPackage 載入後設定。
+  const [ipadBaseline, setIpadBaseline] = useState<IpadSyncBaseline | null>(null);
   const [onlyChangedAfterBaseline, setOnlyChangedAfterBaseline] = useState<boolean>(true);
-  const [customCutoffLocal, setCustomCutoffLocal] = useState<string>(() => {
-    const b = loadIpadBaseline();
-    return b ? toDatetimeLocalValue(b.imported_at) : "";
-  });
+  // 原因:基準時間戳同樣來自 async 載入，初始先給空字串，載入完成後再帶入。
+  const [customCutoffLocal, setCustomCutoffLocal] = useState<string>("");
 
   const loadIpadCurrentPackage = useCallback(async () => {
     if (!isIpad) return;
     try {
-      const data = await storage.syncExport();
+      // 原因:卡片資料與基準一起載入並同批設定，避免基準尚未就緒時短暫把全部卡片判為「符合條件」。
+      const [data, base] = await Promise.all([storage.syncExport(), loadIpadBaseline()]);
       setIpadFullPkg(data);
+      setIpadBaseline(base);
+      setCustomCutoffLocal((cur) => cur || (base ? toDatetimeLocalValue(base.imported_at) : ""));
     } catch (e) {
       report(e, "讀取 iPad 本機資料失敗");
     }
@@ -426,6 +458,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
     const matchedIds = new Set(matchedCards.map((c) => c.id));
     const filteredPkg: SyncPackage = {
       ...ipadFullPkg,
+      is_partial: true,
       exported_at: new Date().toISOString(),
       cards: matchedCards,
       // 僅附帶與這些新增／修改卡片相關的標籤、連結與白板歸屬，避免未變更舊資料覆寫回電腦端
@@ -460,7 +493,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
             info("已取消同步，iPad 資料沒有任何變動。");
             return;
           }
-          const newBase = saveIpadBaseline(pcPkg);
+          const newBase = await saveIpadBaseline(pcPkg);
           setIpadBaseline(newBase);
           setCustomCutoffLocal(toDatetimeLocalValue(newBase.imported_at));
           await loadIpadCurrentPackage();
@@ -498,7 +531,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
         info("已取消匯入，iPad 資料沒有任何變動。");
         return;
       }
-      const newBase = saveIpadBaseline(parsed);
+      const newBase = await saveIpadBaseline(parsed);
       setIpadBaseline(newBase);
       setCustomCutoffLocal(toDatetimeLocalValue(newBase.imported_at));
       await loadIpadCurrentPackage();
@@ -521,35 +554,35 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       return;
     }
     if (!ipadFilteredExport.pkg) return;
-    // 檢查待上傳卡片是否引用了本機媒體；因為 sendP2PPackage 只傳 JSON 不傳 IndexedDB 圖片，必須明確提醒使用者避免誤刪 iPad 圖片。
-    const hasMediaRefs = ipadFilteredExport.pkg.cards.some((c) => /!\[[^\]]*\]\(media:[0-9a-fA-F-]{36}\)/.test(c.body));
-    if (
-      hasMediaRefs &&
-      !window.confirm(
-        "⚠️ 注意：偵測到待上傳的卡片內文包含圖片引用。\n" +
-          "iPad 上傳雲端僅會同步文字與結構資料，【不會】上傳在 iPad 本機新貼入的圖片檔。\n" +
-          "請勿在電腦端合併後直接覆蓋回 iPad，以免新貼入的圖片遺失。\n\n" +
-          "確定要繼續上傳變更至 Drive 嗎？",
-      )
-    ) {
-      return;
-    }
     saveCloudCredential(cred);
     setCloudBusy(true);
+    // 修正 TypeScript 聯集型別語法為 Blob | null，確保建置編譯通過
+    const loadLocalBlob = async (id: string): Promise<Blob | null> => {
+      const drv = storage as unknown as { getMediaBlob?: (mid: string) => Promise<Blob | null> };
+      return typeof drv.getMediaBlob === "function" ? await drv.getMediaBlob(id) : null;
+    };
     sendP2PPackage(
       cred,
       ipadFilteredExport.pkg,
-      () => {
+      (mediaRep) => {
         setCloudBusy(false);
+        const mediaNote = mediaRep && mediaRep.uploaded > 0 ? `、並新上傳 ${mediaRep.uploaded} 張圖片` : "";
         info(
-          `☁️ 已將 iPad 資料（${ipadFilteredExport.matchedCards.length} 張新增／修改卡片）上傳至 Google Drive！請在電腦版點選「拉取 iPad 資料」合併。`,
+          `☁️ 已將 iPad 資料（${ipadFilteredExport.matchedCards.length} 張新增／修改卡片${mediaNote}）上傳至 Google Drive！請在電腦版點選「拉取 iPad 資料」合併。`,
         );
+        if (mediaRep && mediaRep.missing.length > 0) {
+          report(
+            new Error(`有 ${mediaRep.missing.length} 張圖片在 iPad 本機找不到檔案，未上傳`),
+            "部分圖片未上傳",
+          );
+        }
         onClose();
       },
       (err) => {
         setCloudBusy(false);
         report(err, "上傳 iPad 資料至 Google Drive 失敗");
       },
+      loadLocalBlob,
     );
   };
 
@@ -632,10 +665,38 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
     try {
       saveCloudCredential(cred);
       const receivedPkg = await pullIpadPackageFromCloud(cred);
+
+      // 若 iPad 封包附帶媒體清單，從 Drive 下載圖檔寫入 PC 媒體庫（SHA256 自動去重）並將卡片內文舊 ID 映射為 PC 端正式 ID
+      let downloadedMediaCount = 0;
+      if (Array.isArray(receivedPkg.media) && receivedPkg.media.length > 0) {
+        const idRemap = new Map<string, string>();
+        for (const m of receivedPkg.media) {
+          const blob = await downloadMediaFromCloud(m.id);
+          if (!blob) continue;
+          const ext = m.mime.split("/")[1]?.replace("jpeg", "jpg") || "bin";
+          const file = new File([blob], `${m.id}.${ext}`, { type: m.mime || blob.type });
+          const uploaded = await api.uploadMedia(file);
+          if (uploaded.id !== m.id) {
+            idRemap.set(m.id.toLowerCase(), uploaded.id);
+          }
+          downloadedMediaCount += 1;
+        }
+        if (idRemap.size > 0) {
+          receivedPkg.cards = receivedPkg.cards.map((c) => ({
+            ...c,
+            body: c.body.replace(/(!\[[^\]]*\]\(media:)([0-9a-fA-F-]{36})(\))/g, (_full, pre, oldId, post) => {
+              const mapped = idRemap.get(String(oldId).toLowerCase());
+              return mapped ? `${pre}${mapped}${post}` : _full;
+            }),
+          }));
+        }
+      }
+
       setPkg(receivedPkg);
       const res: SyncDiffReport = await api.syncDiff(receivedPkg);
       initDiffSelection(res);
-      info(`☁️ 已從 Google Drive 載入 iPad 資料：${res.cards_new.length} 張新卡片、${res.cards_updated.length} 張兩邊不一致`);
+      const mediaMsg = downloadedMediaCount > 0 ? `、同步 ${downloadedMediaCount} 張圖片至電腦媒體庫` : "";
+      info(`☁️ 已從 Google Drive 載入 iPad 資料：${res.cards_new.length} 張新卡片、${res.cards_updated.length} 張兩邊不一致${mediaMsg}`);
     } catch (err) {
       report(err, "從 Google Drive 拉取 iPad 資料失敗");
     } finally {
