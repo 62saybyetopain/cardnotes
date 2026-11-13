@@ -34,6 +34,18 @@ export class HttpDriver implements StorageDriver {
   createBoard = httpApi.createBoard;
   renameBoard = httpApi.renameBoard;
   deleteBoard = httpApi.deleteBoard;
+  boardDeletePreview = httpApi.boardDeletePreview;
+  createBoardQuestion = httpApi.createBoardQuestion;
+  patchBoardQuestion = httpApi.patchBoardQuestion;
+  listArchivedQuestions = httpApi.listArchivedQuestions;
+  boardQuestionPage = httpApi.boardQuestionPage;
+  moveBoardQuestion = httpApi.moveBoardQuestion;
+  listQuestionRelations = httpApi.listQuestionRelations;
+  createQuestionRelation = httpApi.createQuestionRelation;
+  deleteQuestionRelation = httpApi.deleteQuestionRelation;
+  listAllQuestionRelations = httpApi.listAllQuestionRelations;
+  createQuestionRelationsBatch = httpApi.createQuestionRelationsBatch;
+  boardRecommendations = httpApi.boardRecommendations;
   getBoard = httpApi.getBoard;
   addToBoard = httpApi.addToBoard;
   patchBoardCards = httpApi.patchBoardCards;
@@ -47,6 +59,11 @@ export class HttpDriver implements StorageDriver {
   addLiteratureToBoard = httpApi.addLiteratureToBoard;
   patchBoardLiterature = httpApi.patchBoardLiterature;
   removeLiteratureFromBoard = httpApi.removeLiteratureFromBoard;
+  createBoardImage = httpApi.createBoardImage;
+  patchBoardImage = httpApi.patchBoardImage;
+  deleteBoardImage = httpApi.deleteBoardImage;
+  putBoardImageLink = httpApi.putBoardImageLink;
+  deleteBoardImageLink = httpApi.deleteBoardImageLink;
 
   syncExport = httpApi.syncExport;
   syncDiff = httpApi.syncDiff;

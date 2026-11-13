@@ -252,6 +252,29 @@ export interface BoardNote {
   created_at?: string;
 }
 
+// 白板圖片（僅電腦端）：圖檔在媒體庫，這裡只存 media_id＋位置＋大小＋裁切。
+// 裁切是相對原圖的 0–1 比例（非破壞式）：w／h 是「裁切後」的顯示大小，其長寬比必須等於裁切區域的長寬比。
+// 欄位必須等於後端 db.py::BOARD_IMAGES_DDL
+export interface BoardImage {
+  id: string;
+  board_id: string;
+  media_id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  crop_x: number;
+  crop_y: number;
+  crop_w: number;
+  crop_h: number;
+  created_at: string;
+}
+// 圖片與卡片的純視覺連線：無方向、無類型；只屬於圖片所在的白板
+export interface BoardImageLink {
+  image_id: string;
+  card_id: string;
+}
+
 // 白板上的文獻節點（參照）：只有 x/y/w/h/z 是白板自己的，title/author/snippet 來自文獻庫現況
 export interface BoardLiterature {
   literature_id: string;
@@ -350,11 +373,124 @@ export interface ConceptGraphResponse {
   edges: ConceptGraphEdge[];
   hidden_edges: ConceptGraphEdge[];
 }
+// 問題白板：一塊問題白板＝一塊普通白板加這組欄位；一般白板沒有（undefined 或 null）。
+// 值必須等於後端 schemas.QuestionKind／QuestionStatus。Dexie 沒有問題白板，不會有此欄
+export type QuestionKind = "question" | "idea";
+export type QuestionStatus = "open" | "splitting" | "concluded";
+export interface BoardQuestion {
+  parent_board_id: string | null; // null 只會出現在已封存的根節點
+  kind: QuestionKind;
+  status: QuestionStatus;
+  reason: string; // 為什麼從母白板拆出這個問題
+  x: number; // 以下四個是這個問題節點在「母白板畫布」上的座標與大小
+  y: number;
+  w: number;
+  h: number;
+  archived_at: string | null;
+  archive_reason: string;
+  archive_path: string; // 封存當下的完整路徑文字快照，例如「母白板 / 1 / 1A」
+  created_at: string;
+}
+// 母白板畫布上的子問題節點（get_board 的 questions）；item_count＝卡片＋文獻＋靈感筆記
+export interface BoardQuestionNode {
+  board_id: string;
+  name: string;
+  kind: QuestionKind;
+  status: QuestionStatus;
+  reason: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  child_count: number;
+  card_count: number;
+  literature_count: number;
+  note_count: number;
+  item_count: number;
+}
+// 問題導航器的「一頁」（後端 get_question_page）。self 可能是一般白板：此時 kind／status／x／y／w／h／reason 為 null
+export interface QuestionPageSelf {
+  board_id: string;
+  name: string;
+  kind: QuestionKind | null;
+  status: QuestionStatus | null;
+  reason: string | null;
+  x: number | null;
+  y: number | null;
+  w: number | null;
+  h: number | null;
+  child_count: number;
+  card_count: number;
+  literature_count: number;
+  note_count: number;
+  item_count: number;
+}
+export interface QuestionPage {
+  self: QuestionPageSelf;
+  children: BoardQuestionNode[]; // 直接子問題，依建立順序，不含已封存者
+  path: { id: string; name: string }[]; // 祖先，由最上層到母白板，不含自己
+  archived: boolean;
+}
+// 問題白板之間的人工關聯（與 parent_board_id 的思考路徑分開）。值必須等於後端 schemas 的 QuestionRelationType
+// related／analogy／contradicts 沒有方向；extends（來源延伸目標）、supports（來源支持目標）有方向。順序必須等於後端 schemas.QuestionRelationType
+export const QUESTION_RELATION_TYPES = ["related", "analogy", "extends", "supports", "contradicts"] as const;
+export type QuestionRelationType = (typeof QUESTION_RELATION_TYPES)[number];
+export const QUESTION_RELATION_LABELS: Record<QuestionRelationType, string> = {
+  related: "相關",
+  analogy: "類比",
+  extends: "延伸",
+  supports: "支持",
+  contradicts: "矛盾",
+};
+// 有方向的類型（與後端 schemas.QUESTION_DIRECTED_TYPES、db.py 的 CHECK 同）
+export const QUESTION_DIRECTED_RELATIONS: ReadonlySet<QuestionRelationType> = new Set<QuestionRelationType>(["extends", "supports"]);
+// 後端 GET /boards/{id}/relations 的一列，已換算成「相對於這塊白板」：outgoing＝這塊支持對方，incoming＝對方支持這塊
+export interface QuestionRelation {
+  id: string;
+  other_board_id: string;
+  other_name: string;
+  relation_type: QuestionRelationType;
+  direction: "outgoing" | "incoming" | "symmetric";
+  archived: boolean; // 對方是已封存的問題：保留顯示，但不在 boards 清單裡
+}
+// 後端 GET /question-relations 的一列（資料庫原樣）：有方向的類型是 board_a → board_b；對稱類型 board_a < board_b
+export interface QuestionRelationEdge {
+  id: string;
+  board_a: string;
+  board_b: string;
+  relation_type: QuestionRelationType;
+}
 export interface BoardSummary {
   id: string;
   name: string;
   card_count: number;
+  question?: BoardQuestion | null;
 }
+// 白板自己擁有、刪除時會隨白板消失的內容；卡片與文獻本體不在其中
+export interface BoardContents {
+  images: number; // 圖片的擺放位置（圖檔留在媒體庫，由清理媒體回收）
+  cards: number; // 卡片的擺放位置
+  literatures: number; // 文獻的擺放位置
+  notes: number; // 靈感筆記（文字會消失）
+  groups: number;
+}
+export interface BoardDeletePreview {
+  id: string;
+  name: string;
+  is_question: boolean;
+  archived: boolean;
+  contents: BoardContents;
+  descendants: { id: string; name: string; parent_board_id: string | null; depth: number; archived: boolean; contents: BoardContents }[];
+}
+export interface ArchivedQuestion {
+  id: string;
+  name: string;
+  question: BoardQuestion;
+  contents: BoardContents;
+  descendant_count: number;
+}
+// block＝擋下；subtree＝整支一起處理；promote＝子問題改掛到被刪問題的母白板
+export type BoardChildrenMode = "block" | "subtree" | "promote";
 export interface BoardCard {
   card_id: string;
   x: number;
@@ -365,15 +501,61 @@ export interface BoardCard {
   title: string;
   body: string;
   updated_at: string;
+  elsewhere?: BoardElsewhere; // 僅電腦端；Dexie 沒有，視為沒有資料
+}
+// 這張卡片還出現在哪些白板。同支＝目前白板的祖先或後代問題白板；他支＝其餘（不含已封存）。
+// 值必須等於後端 boards.py::_elsewhere
+export interface BoardRef {
+  id: string;
+  name: string;
+}
+export interface BoardElsewhere {
+  same: BoardRef[];
+  other: BoardRef[];
+}
+// 以整塊白板為錨點的推薦（僅電腦端）。欄位必須等於後端 boards.py::get_board_recommendations
+export interface RecommendReason {
+  tag_id: string;
+  label: string; // 位置標籤是完整路徑，例如「櫃A / 抽屜1」
+  axis: Axis;
+  support: number; // 板上有幾張卡片帶有這個標籤
+}
+export interface CardRecommendation {
+  id: string;
+  title: string;
+  snippet: string;
+  card_type: CardType;
+  curation_status: CurationStatus;
+  updated_at: string;
+  reasons: RecommendReason[];
+  related_boards?: { id: string; name: string; kind: "tree" | "relation" }[]; // 這張卡片還在哪些相關白板上（同支或人工關聯）；必須等於 boards.py::_related_boards
+}
+export interface LiteratureRecommendation {
+  id: string;
+  title: string;
+  author: string;
+  snippet: string;
+  updated_at: string;
+  cited_by: number; // 板上有幾張卡片引用它
+}
+export interface BoardRecommendations {
+  board_card_count: number;
+  cards: CardRecommendation[];
+  cards_total: number; // 截斷前的候選數
+  literatures: LiteratureRecommendation[];
 }
 export interface BoardData {
   id: string;
   name: string;
+  question?: BoardQuestion | null; // 一般白板沒有；Dexie 也沒有
+  questions?: BoardQuestionNode[]; // 這塊白板畫布上的子問題節點（不含已封存）
   cards: BoardCard[];
   links: BoardLink[];
   groups?: BoardGroup[];
   notes?: BoardNote[];
   literatures?: BoardLiterature[]; // Dexie 沒有文獻，不會有此欄
+  images?: BoardImage[]; // Dexie 沒有圖片，不會有此欄
+  image_links?: BoardImageLink[];
 }
 export interface MediaInfo {
   id: string;
@@ -419,9 +601,14 @@ export interface SyncPackage {
   boards: { id: string; name: string }[];
   board_cards: { board_id: string; card_id: string; x?: number; y?: number; w?: number; h?: number }[];
   board_groups?: BoardGroup[];
+  // 問題關聯（兩端可以是一般白板）。沒有此欄＝舊備份或 iPad 封包，覆蓋時保留本機原有的；與「空陣列＝關聯被清空」不同
+  question_relations?: { id: string; board_a: string; board_b: string; relation_type: QuestionRelationType; created_at: string }[];
   // 沒有此欄＝舊版匯出；覆蓋匯入時要保留本機原有的便利貼，不可當成「清空」
   board_notes?: BoardNote[];
-  // 電腦端雲端備份才有：卡片引用的圖片清單，iPad 據此下載缺少的圖片
+  // 白板圖片（僅電腦端）。沒有這兩欄＝舊備份或 iPad 封包，覆蓋時保留本機原有的；兩欄必須同進同出（後端 schemas.SyncPackage 驗證）
+  board_images?: BoardImage[];
+  board_image_links?: { image_id: string; card_id: string; created_at: string }[];
+  // 電腦端雲端備份才有：卡片內文與白板圖片引用的圖檔清單；iPad 據此下載缺少的圖片（iPad 不渲染白板圖片，不會下載它們）
   media?: SyncMediaEntry[];
 }
 

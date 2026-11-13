@@ -1,0 +1,453 @@
+// @depends-on ../types.ts (SyncPackage)
+// @depends-on ./media.ts (extractMediaIds)
+import type { SyncPackage } from "../types";
+import { extractMediaIds } from "./media";
+
+export interface SyncMediaEntry {
+  id: string;
+  kind: "image" | "video";
+  mime: string;
+  byte_size: number;
+}
+
+export type SyncPackageWithMedia = SyncPackage & {
+  media?: SyncMediaEntry[];
+};
+
+const STORAGE_KEY = "cardboard_gdrive_credential";
+const PC_BACKUP_FILENAME = "cardboard-pc-backup.json";
+
+const IPAD_SYNC_FILENAME = "cardboard-ipad-sync.json";
+const MEDIA_FILE_PREFIX = "cardboard-media-";
+
+let cachedAccessToken: string | null = null;
+let cachedTokenExpiry = 0;
+let cachedCredentialRaw = "";
+
+function getEnvRecord(): Record<string, string | undefined> {
+  return (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
+}
+
+/**
+ * 取得目前已儲存的 Google Drive 金鑰（優先順序：localStorage > .env 組合變數 > .env 單一變數）
+ */
+export function getSavedCloudCredential(): string {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)?.trim();
+    if (saved) return saved;
+  } catch {
+    // 忽略無痕模式或 localStorage 存取限制
+  }
+
+  const env = getEnvRecord();
+  const single = env.VITE_GDRIVE_CREDENTIAL?.trim() || env.VITE_P2P_SECRET?.trim();
+  if (single) return single;
+
+  const clientId = env.VITE_GDRIVE_CLIENT_ID?.trim();
+  const clientSecret = env.VITE_GDRIVE_CLIENT_SECRET?.trim();
+  const refreshToken = env.VITE_GDRIVE_REFRESH_TOKEN?.trim();
+  if (clientId && clientSecret && refreshToken) {
+    return `${clientId}|${clientSecret}|${refreshToken}`;
+  }
+  return "";
+}
+
+/**
+ * 將使用者輸入的 Google Drive 金鑰持久化至 localStorage
+ */
+export function saveCloudCredential(credential: string): void {
+  const trimmed = credential.trim();
+  if (!trimmed) return;
+  try {
+    localStorage.setItem(STORAGE_KEY, trimmed);
+  } catch {
+    // 忽略 localStorage 寫入限制
+  }
+}
+
+/**
+ * 解析金鑰並取得有效的 Google Drive OAuth2 Access Token
+ * 支援格式：
+ * 1. "CLIENT_ID|CLIENT_SECRET|REFRESH_TOKEN"（永久有效，自動換取 Access Token）
+ * 2. 直接傳入 OAuth2 Access Token（例如 "ya29.a0..."）
+ */
+async function resolveAccessToken(credentialInput?: string): Promise<string> {
+  const raw = (credentialInput?.trim() || getSavedCloudCredential()).trim();
+  if (!raw) {
+    throw new Error(
+      "尚未設定 Google Drive 雲端金鑰。請在輸入框貼上金鑰（格式：CLIENT_ID|CLIENT_SECRET|REFRESH_TOKEN），或於 .env 設定",
+    );
+  }
+
+  saveCloudCredential(raw);
+
+  if (cachedAccessToken && cachedCredentialRaw === raw && Date.now() < cachedTokenExpiry) {
+    return cachedAccessToken;
+  }
+
+  const parts = raw.split("|").map((s) => s.trim());
+  if (parts.length === 3 && parts[0] && parts[1] && parts[2]) {
+    const [clientId, clientSecret, refreshToken] = parts;
+    const body = new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+    });
+
+    const res = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`Google OAuth 自動換證失敗 (${res.status})：請檢查 CLIENT_ID、SECRET 與 REFRESH_TOKEN 是否正確。${errText}`);
+    }
+
+    const data = (await res.json()) as { access_token?: string; expires_in?: number };
+    if (!data.access_token) {
+      throw new Error("Google OAuth 回傳缺少 access_token");
+    }
+
+    cachedAccessToken = data.access_token;
+    cachedCredentialRaw = raw;
+    cachedTokenExpiry = Date.now() + Math.max((data.expires_in ?? 3600) - 60, 60) * 1000;
+    return cachedAccessToken;
+  }
+
+  // 若非三段式格式，視為直接傳入的 Access Token
+  return raw;
+}
+
+async function findDriveFileId(accessToken: string, fileName: string): Promise<string | null> {
+  const q = encodeURIComponent(`name = '${fileName}' and trashed = false`);
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime)&orderBy=modifiedTime%20desc&pageSize=1`;
+
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`查詢 Google Drive 檔案失敗 (${res.status})：${errText}`);
+  }
+
+  const data = (await res.json()) as { files?: Array<{ id: string }> };
+  return data.files?.[0]?.id ?? null;
+}
+
+async function uploadJsonToDrive(
+  accessToken: string,
+  fileName: string,
+  pkg: SyncPackage | SyncPackageWithMedia,
+): Promise<void> {
+  let fileId = await findDriveFileId(accessToken, fileName);
+
+  if (!fileId) {
+    const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json; charset=UTF-8",
+      },
+      body: JSON.stringify({
+        name: fileName,
+        mimeType: "application/json",
+      }),
+    });
+
+    if (!createRes.ok) {
+      const errText = await createRes.text().catch(() => "");
+      throw new Error(`在 Google Drive 建立檔案失敗 (${createRes.status})：${errText}`);
+    }
+
+    const created = (await createRes.json()) as { id?: string };
+    if (!created.id) {
+      throw new Error("Google Drive 建立檔案後未回傳檔案 ID");
+    }
+    fileId = created.id;
+  }
+
+  const updateRes = await fetch(
+    `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=media`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json; charset=UTF-8",
+      },
+      body: JSON.stringify(pkg),
+    },
+  );
+
+  if (!updateRes.ok) {
+    const errText = await updateRes.text().catch(() => "");
+    throw new Error(`上傳資料至 Google Drive 失敗 (${updateRes.status})：${errText}`);
+  }
+}
+
+async function downloadJsonFromDrive(accessToken: string, fileName: string): Promise<SyncPackage> {
+  const fileId = await findDriveFileId(accessToken, fileName);
+  if (!fileId) {
+    throw new Error(`Google Drive 上找不到「${fileName}」，請先在來源裝置點擊上傳備份`);
+  }
+
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`從 Google Drive 下載「${fileName}」失敗 (${res.status})：${errText}`);
+  }
+
+  const pkg = (await res.json()) as SyncPackage;
+  if (!pkg || !Array.isArray(pkg.cards)) {
+    throw new Error(`雲端檔案「${fileName}」格式無效或內容尚未完整上傳，請重新上傳後再試`);
+  }
+  return pkg;
+}
+
+interface DriveMediaFile {
+  fileId: string;
+  size: number;
+  mime: string;
+  parents: string[];
+}
+
+// 以圖片編號精確查詢雲端圖片檔（檔名 = 前綴 + 編號）
+async function findDriveMedia(accessToken: string, id: string): Promise<DriveMediaFile | null> {
+  const q = encodeURIComponent(`name = '${MEDIA_FILE_PREFIX}${id}' and trashed = false`);
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,size,mimeType,parents)&orderBy=modifiedTime%20desc&pageSize=1`;
+  const res = await fetch(url, { method: "GET", headers: { Authorization: `Bearer ${accessToken}` } });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`查詢 Google Drive 圖片失敗 (${res.status})：${errText}`);
+  }
+  const data = (await res.json()) as {
+    files?: Array<{ id: string; size?: string; mimeType?: string; parents?: string[] }>;
+  };
+  const f = data.files?.[0];
+  return f ? { fileId: f.id, size: Number(f.size ?? 0), mime: f.mimeType ?? "", parents: f.parents ?? [] } : null;
+}
+
+const MEDIA_FOLDER_NAME = "cardboard-media";
+const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder";
+
+// 圖片集中放在這個資料夾；找不到就建立。同名資料夾有多個時固定取最早建立的，避免每次落到不同資料夾
+async function ensureMediaFolder(accessToken: string): Promise<string> {
+  const q = encodeURIComponent(`name = '${MEDIA_FOLDER_NAME}' and mimeType = '${DRIVE_FOLDER_MIME}' and trashed = false`);
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id)&orderBy=createdTime&pageSize=1`,
+    { method: "GET", headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`查詢 Google Drive 圖片資料夾失敗 (${res.status})：${errText}`);
+  }
+  const data = (await res.json()) as { files?: Array<{ id: string }> };
+  if (data.files?.[0]) return data.files[0].id;
+
+  const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
+    body: JSON.stringify({ name: MEDIA_FOLDER_NAME, mimeType: DRIVE_FOLDER_MIME }),
+  });
+  if (!createRes.ok) {
+    const errText = await createRes.text().catch(() => "");
+    throw new Error(`在 Google Drive 建立圖片資料夾失敗 (${createRes.status})：${errText}`);
+  }
+  const created = (await createRes.json()) as { id?: string };
+  if (!created.id) throw new Error("Google Drive 建立圖片資料夾後未回傳 ID");
+  return created.id;
+}
+
+// 舊版上傳的圖片散在根目錄：搬進圖片資料夾。已在資料夾內就不動作，重跑安全
+async function moveIntoFolder(accessToken: string, file: DriveMediaFile, folderId: string): Promise<void> {
+  if (file.parents.includes(folderId)) return;
+  const remove = file.parents.length > 0 ? `&removeParents=${encodeURIComponent(file.parents.join(","))}` : "";
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.fileId)}?addParents=${encodeURIComponent(folderId)}${remove}`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
+      body: "{}",
+    },
+  );
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`搬移 Google Drive 圖片檔失敗 (${res.status})：${errText}`);
+  }
+}
+
+async function putDriveMedia(
+  accessToken: string,
+  id: string,
+  blob: Blob,
+  existingFileId: string | null,
+  folderId: string,
+): Promise<void> {
+  let fileId = existingFileId;
+  if (!fileId) {
+    const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
+      body: JSON.stringify({ name: MEDIA_FILE_PREFIX + id, mimeType: blob.type, parents: [folderId] }),
+    });
+    if (!createRes.ok) {
+      const errText = await createRes.text().catch(() => "");
+      throw new Error(`在 Google Drive 建立圖片檔失敗 (${createRes.status})：${errText}`);
+    }
+    const created = (await createRes.json()) as { id?: string };
+    if (!created.id) throw new Error("Google Drive 建立圖片檔後未回傳檔案 ID");
+    fileId = created.id;
+  }
+  const res = await fetch(
+    `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=media`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": blob.type },
+      body: blob,
+    },
+  );
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`上傳圖片至 Google Drive 失敗 (${res.status})：${errText}`);
+  }
+}
+
+function collectMediaIds(pkg: SyncPackage): string[] {
+  const ids = new Set<string>();
+  for (const c of pkg.cards) {
+    for (const id of extractMediaIds(c.body)) ids.add(id);
+  }
+  return Array.from(ids);
+}
+
+const kindOfMime = (mime: string): "image" | "video" => (mime.startsWith("video/") ? "video" : "image");
+
+export interface MediaBackupReport {
+  total: number;
+  uploaded: number;
+  missing: string[];
+}
+
+/**
+ * 電腦端：一鍵將電腦完整資料庫備份上傳至 Google Drive (cardboard-pc-backup.json)。
+ * 卡片引用的圖片各存成一個雲端檔，已存在且有內容的不重傳；
+ * 封包 JSON 最後才上傳，任何一步失敗時雲端仍是上一版完整備份。
+ */
+export async function uploadPcBackupToCloud(
+  pkg: SyncPackage,
+  credentialInput: string | undefined,
+  loadBlob: (id: string) => Promise<Blob | null>,
+): Promise<MediaBackupReport> {
+  const token = await resolveAccessToken(credentialInput);
+  const ids = collectMediaIds(pkg);
+  const folderId = await ensureMediaFolder(token);
+  const media: SyncMediaEntry[] = [];
+  const missing: string[] = [];
+  let uploaded = 0;
+  for (const id of ids) {
+    const found = await findDriveMedia(token, id);
+    if (found) await moveIntoFolder(token, found, folderId);
+    if (found && found.size > 0) {
+      media.push({ id, kind: kindOfMime(found.mime), mime: found.mime, byte_size: found.size });
+      continue;
+    }
+    const blob = await loadBlob(id);
+    if (!blob) {
+      missing.push(id);
+      continue;
+    }
+    if (!/^(image|video)\//.test(blob.type)) {
+      throw new Error(`電腦端圖片 ${id} 沒有有效的媒體類型（${blob.type || "空白"}），未上傳`);
+    }
+    await putDriveMedia(token, id, blob, found ? found.fileId : null, folderId);
+    media.push({ id, kind: kindOfMime(blob.type), mime: blob.type, byte_size: blob.size });
+    uploaded += 1;
+  }
+  // 封包最後才上傳：任何一步失敗時，雲端仍是上一版完整備份
+  await uploadJsonToDrive(token, PC_BACKUP_FILENAME, { ...pkg, media });
+  return { total: ids.length, uploaded, missing };
+}
+
+/**
+ * iPad 端：依圖片編號從 Google Drive 下載圖片（渲染到才下載，快取由呼叫端負責）。
+ * 回傳 null＝雲端確實沒有這個檔案（含上傳到一半的 0 byte 檔）；
+ * 其他失敗（沒金鑰、離線、HTTP 錯誤、內容被截斷）一律丟錯，呼叫端不可把它當成「圖片遺失」。
+ * @depends-on schema.sql::media（同一個 id 的檔案內容不可變；呼叫端的快取與孤兒清理都以此為前提）
+ */
+export async function downloadMediaFromCloud(id: string): Promise<Blob | null> {
+  const token = await resolveAccessToken();
+  const found = await findDriveMedia(token, id);
+  if (!found || found.size <= 0) return null;
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(found.fileId)}?alt=media`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`從 Google Drive 下載圖片失敗 (${res.status})：${errText}`);
+  }
+  const raw = await res.blob();
+  if (raw.size !== found.size) {
+    throw new Error(`圖片 ${id} 下載不完整（預期 ${found.size} bytes，實得 ${raw.size}）`);
+  }
+  const blob = raw.type ? raw : new Blob([raw], { type: found.mime });
+  if (!/^(image|video)\//.test(blob.type)) {
+    throw new Error(`雲端圖片 ${id} 沒有有效的媒體類型（${blob.type || "空白"}）`);
+  }
+  return blob;
+}
+
+/**
+ * 電腦端：從 Google Drive 拉取 iPad 上傳的變更封包 (cardboard-ipad-sync.json)
+ */
+export async function pullIpadPackageFromCloud(credentialInput?: string): Promise<SyncPackage> {
+  const token = await resolveAccessToken(credentialInput);
+  return await downloadJsonFromDrive(token, IPAD_SYNC_FILENAME);
+}
+
+/**
+ * iPad 端：將 iPad 變更封包上傳至 Google Drive (cardboard-ipad-sync.json) 供電腦端拉取合併
+ */
+export function sendP2PPackage(
+  credentialInput: string,
+  pkg: SyncPackage,
+  onSuccess: () => void,
+  onError: (err: unknown) => void,
+): void {
+  void (async () => {
+    try {
+      const token = await resolveAccessToken(credentialInput);
+      await uploadJsonToDrive(token, IPAD_SYNC_FILENAME, pkg);
+      onSuccess();
+    } catch (err) {
+      onError(err);
+    }
+  })();
+}
+
+/**
+ * iPad 端：從 Google Drive 下載電腦端最新完整資料庫 (cardboard-pc-backup.json) 覆蓋 iPad
+ */
+export function pullP2PPackageFromPc(
+  credentialInput: string,
+  onSuccess: (pcPkg: SyncPackage) => void,
+  onError: (err: unknown) => void,
+): void {
+  void (async () => {
+    try {
+      const token = await resolveAccessToken(credentialInput);
+      const pcPkg = await downloadJsonFromDrive(token, PC_BACKUP_FILENAME);
+      onSuccess(pcPkg);
+    } catch (err) {
+      onError(err);
+    }
+  })();
+}

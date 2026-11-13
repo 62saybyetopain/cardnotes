@@ -1,4 +1,7 @@
 // @depends-on ../api.ts (createBoardNote / patchBoardNote / deleteBoardNote：便利貼三個方法，driver.ts、httpDriver.ts、indexedDbDriver.ts 必須同步)
+// @depends-on ./ImageNode.tsx + ../api.ts (createBoardImage / patchBoardImage / deleteBoardImage / putBoardImageLink / deleteBoardImageLink) + backend boards.py、db.py::BOARD_IMAGES_DDL、types.ts::BoardImage：白板圖片節點 id 一律是 "img:<image_id>"，所有以 "group:"／"note:"／"lit:"／"q:" 排除非卡片節點的判斷都要一併排除 "img:"；圖片連線（imageLinks）純視覺，邊 id 為 "imglink:…"，不可進 links／LinkEditorModal
+// @depends-on ./QuestionNode.tsx (useBoardQuestions 的 paneExtras：右鍵「貼上圖片」併入同一個選單)
+// @depends-on backend media.py::cleanup_media（已把 board_images.media_id 算作被引用）、cards.py::sync_export／sync_overwrite（備份還原帶 board_images／board_image_links）：兩處都不能漏，否則清理與還原會讓圖片消失
 // @depends-on 便利貼高度 h：db.py::board_notes.h、schemas.py::BoardNote*／NOTE_DEFAULT_H、boards.py、types.ts::BoardNote.h、indexedDbDriver 預設值必須同為「卡片預設高×3」(420)；缺值（舊 Dexie 資料）一律用 NOTE_DEFAULT_H
 // @depends-on ../styles.css (.note-node / .note-text 等便利貼樣式；便利貼節點 id 一律是 "note:<id>"，所有以 startsWith("group:") 排除非卡片節點的判斷都要一併排除 "note:")
 // @depends-on ../lib/layout.ts (autoLayoutCards, placeCardsAvoidingCollisions, snapDimension, snapToGridValue, GRID_SIZE)
@@ -9,11 +12,13 @@
 // @depends-on ../App.tsx (selectedCardId 有兩條寫入路徑：onNodeClick→onOpenCard，與 onSelectionChange→onSelectCard；Board 以 nodes 的 selected 為準去重；onOpenCard 支援 options.smartPasteText)
 // @depends-on ../api.ts (addLiteratureToBoard / patchBoardLiterature / removeLiteratureFromBoard) 與 backend boards.py::BOARD_LITERATURE_SELECT、db.py::BOARD_LITERATURE_DDL、types.ts::BoardLiterature：白板文獻節點是「參照」，只存 literature_id＋座標＋大小；節點 id 一律是 "lit:<literature_id>"，所有以 "group:"／"note:" 排除非卡片節點的判斷都要一併排除 "lit:"
 // @depends-on ./RightPanel.tsx (NoteEditorPane 儲存後經 App.onNoteChanged 呼叫 BoardHandle.updateNote；便利貼節點 data 的 text／color 必須與它寫入資料庫的值一致)
+// @depends-on ../types.ts::BoardCard.elsewhere、BoardElsewhere / ./CardNode.tsx（徽章，data.elsewhere／data.onOpenBoard）/ backend boards.py::_elsewhere（get_board 與 add_card_to_board 都會回傳；Dexie 沒有，徽章不顯示）
 import "@xyflow/react/dist/style.css";
 import {
   applyNodeChanges,
   Background,
   ConnectionMode,
+  ControlButton,
   Controls,
   MarkerType,
   NodeResizer,
@@ -34,6 +39,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -41,6 +47,8 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api";
+import { getPreferredDriverType } from "../lib/storage";
+import { QuestionNavigator } from "./QuestionNavigator";
 import { isEditableTarget, isRemoveKey } from "../lib/keys";
 import {
   autoLayoutCards,
@@ -64,9 +72,12 @@ import {
   RELATION_LABELS,
   type BoardCard,
   type BoardGroup,
+  type BoardImage,
+  type BoardImageLink,
   type BoardLink,
   type BoardLiterature,
   type BoardNote,
+  type BoardSummary,
   type LinkStatus,
   type RelationType,
 } from "../types";
@@ -74,6 +85,15 @@ import { isSymmetricRelation } from "../lib/relations";
 import { CardNode, type CardFlowNode } from "./CardNode";
 import { FloatingEdge } from "./FloatingEdge";
 import { Markdown, notifyCardTitleUpdated } from "./Markdown";
+import { QuestionNode, useBoardQuestions, type QuestionFlowNode } from "./QuestionNode";
+import {
+  IMAGE_MAX_SIDE,
+  ImageNode,
+  measureImage,
+  readClipboardImage,
+  type CropRect,
+  type ImageFlowNode,
+} from "./ImageNode";
 
 export interface GroupNodeData extends Record<string, unknown> {
   groupId: string;
@@ -101,10 +121,13 @@ export interface NoteNodeData extends Record<string, unknown> {
   onOpen: (noteId: string) => void;
 }
 export type NoteFlowNode = Node<NoteNodeData, "boardNote">;
-type AnyFlowNode = CardFlowNode | GroupFlowNode | NoteFlowNode | LiteratureFlowNode;
+type AnyFlowNode = CardFlowNode | GroupFlowNode | NoteFlowNode | LiteratureFlowNode | QuestionFlowNode | ImageFlowNode;
 type PositionChange = Extract<NodeChange<AnyFlowNode>, { type: "position" }>;
 
 const GROUP_COLORS = ["slate", "blue", "green", "amber", "purple"] as const;
+
+// 轉場預覽節點的 id 前綴（見 BoardInner 的轉場 effect）：預覽節點不進 nodes 狀態、不寫資料庫
+const PV_PREFIX = "pv:";
 
 const CODE_EXT_MAP: Record<string, string> = {
   py: "python",
@@ -316,7 +339,14 @@ function CrosshairIcon({ size = 14 }: { size?: number }) {
   );
 }
 
-const nodeTypes = { card: CardNode, boardGroup: GroupNode, boardNote: NoteNode, boardLiterature: LiteratureNode };
+const nodeTypes = {
+  card: CardNode,
+  boardGroup: GroupNode,
+  boardNote: NoteNode,
+  boardLiterature: LiteratureNode,
+  boardQuestion: QuestionNode,
+  boardImage: ImageNode,
+};
 const edgeTypes = { floating: FloatingEdge };
 
 export interface BoardHandle {
@@ -338,6 +368,10 @@ interface Props {
   selectedCardId: string | null;
   active?: boolean;
   toolsSlot?: HTMLElement | null;
+  // 問題路徑導航器（僅電腦版）。三者都有才會出現左下角的導航器圖標
+  boards?: BoardSummary[];
+  onSelectBoard?(id: string): void;
+  onBoardsChanged?(): void | Promise<void>;
   onSelectCard(id: string | null): void;
   onOpenCard?(id: string, options?: { smartPasteText?: string }): void;
   onLinksChanged(): void;
@@ -462,12 +496,58 @@ function stripImagesKeepCode(body: string): string {
   return out.join("\n").trim();
 }
 
+// 圖片連線的刪除確認：在連線旁彈出 ✕（刪除）與 ○（關閉）。Esc、點到別處都視為關閉；焦點預設在 ○，避免只按 Enter 就誤刪。
+// 位置是相對 .board 容器的像素座標，畫布平移或縮放時由 Board 關閉，所以不需要跟著畫布縮放。
+// @depends-on ../styles.css (.img-link-confirm)
+function ImageLinkConfirm(props: { x: number; y: number; onConfirm(): void; onCancel(): void }) {
+  const { x, y, onConfirm, onCancel } = props;
+  const ref = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef(onCancel);
+  cancelRef.current = onCancel;
+  useEffect(() => {
+    const down = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as HTMLElement)) cancelRef.current();
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") cancelRef.current();
+    };
+    document.addEventListener("pointerdown", down, true);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("pointerdown", down, true);
+      document.removeEventListener("keydown", key);
+    };
+  }, []);
+  const icon = { width: 18, height: 18, viewBox: "0 0 18 18", fill: "none", stroke: "currentColor", strokeWidth: 1.9, strokeLinecap: "round" as const, "aria-hidden": true };
+  return (
+    <div ref={ref} className="img-link-confirm" role="group" aria-label="確認移除圖片連線" style={{ left: x, top: y }}>
+      <button type="button" className="cancel" autoFocus onClick={onCancel} title="關閉" aria-label="關閉">
+        <svg {...icon}>
+          <circle cx="9" cy="9" r="5.6" />
+        </svg>
+      </button>
+      <button type="button" className="confirm" onClick={onConfirm} title="刪除這條連線（圖片與卡片都不會被刪除）" aria-label="刪除連線">
+        <svg {...icon}>
+          <path d="M5.4 5.4l7.2 7.2M12.6 5.4l-7.2 7.2" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
 function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
-  const { boardId, selectedCardId, active = true, onSelectCard, onOpenCard, onLinksChanged, onCountChanged, report, info, innerRef } = props;
+  const { boardId: boardIdProp, selectedCardId, active = true, onSelectCard, onOpenCard, onLinksChanged, onCountChanged, report, info, innerRef } = props;
+  // 內部實際顯示的白板 id：轉場時比 props.boardId 晚約 0.5 秒才換，下面所有 boardId 都指這個
+  const [boardId, setBoardId] = useState<string | null>(boardIdProp);
   const rf = useReactFlow();
   const wrapRef = useRef<HTMLDivElement>(null);
+  const [navOpen, setNavOpen] = useState(false);
+  const { boards: navBoards, onSelectBoard: navSelectBoard, onBoardsChanged: navBoardsChanged } = props;
+  const navAvailable = !!navBoards && !!navSelectBoard && !!navBoardsChanged && getPreferredDriverType() !== "dexie";
   const [nodes, setNodes] = useState<AnyFlowNode[]>([]);
   const [links, setLinks] = useState<BoardLink[]>([]);
+  const [imageLinks, setImageLinks] = useState<BoardImageLink[]>([]); // 圖片—卡片的純視覺連線，與 links（語意連結）完全分開
+  const [imgLinkConfirm, setImgLinkConfirm] = useState<{ link: BoardImageLink; x: number; y: number } | null>(null); // 待確認移除的圖片連線與浮層位置
   const [editingLink, setEditingLink] = useState<BoardLink | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -702,6 +782,337 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   }, []);
   const nodesRef = useRef(nodes);
   nodesRef.current = nodes;
+  // 貼上圖片是多段非同步（量尺寸、上傳、建立）：完成時要確認使用者還在同一塊白板
+  const boardIdRef = useRef(boardId);
+  boardIdRef.current = boardId;
+
+  // ---- 切換白板的鏡頭轉場：同一個 ReactFlow 暫時同時渲染兩張白板 ----
+  // 出發白板 A＝正式 nodes（視野外的節點暫時 hidden）；目的白板 B＝預覽節點（previewNodes／previewLinks，只建視野內的）。
+  // 預覽節點 id 一律是 "pv:<原 id>"，只活在轉場期間的 state：不進 nodes／saved、不寫資料庫（同一張卡片可以同時在 A、B）。
+  // B 只做平移（offset）、尺寸不變；offset 讓「抵達時的鏡頭＝B 的正式 viewport」成立，所以 A、B 的 zoom 不同也不必縮放節點。
+  // 鏡頭用 rf.setViewport 逐幀推進；抵達時 setBoardId，由下方載入 effect（useLayoutEffect）在同一次 commit 內換成 B 的正式 nodes 並設好鏡頭。
+  // @depends-on ../App.tsx（props.boardId 變更後，由 Board 負責預載與轉場完成後切換內部 boardId）
+  // @depends-on ../styles.css（.board 需為 position:relative；stage 以 absolute inset:0 包住 ReactFlow）
+  // @depends-on ../api.ts（api.getBoard 提供預載與正式載入共用 DTO）
+  // @depends-on ./QuestionNode.tsx（節點 id "q:<board_id>" 與 BoardData.questions[].board_id：轉場方向由「子問題節點在母白板上的位置」決定；改 id 規則或座標語意要同步）
+  // @depends-on ../types.ts（BoardSummary.question.parent_board_id：轉場以母白板鏈找共同祖先）
+  // @depends-on ../api.ts（boardQuestionPage 的 children[].x/y/w/h：同層／跨分支的方向取自共同祖先畫布上兩個分支節點的中心差，與導航器的排列順序無關）
+  // @depends-on ./CardNode.tsx 等節點元件：data 內的回呼會以 node id 寫資料庫；預覽節點的回呼一律換成報錯 guard（只有 report 保留）
+  const stageRef = useRef<HTMLDivElement>(null);
+  const [transitioning, setTransitioning] = useState(false);
+  const preloadedBoardRef = useRef<{ id: string; data: any; vp: SavedViewport } | null>(null);
+  const [previewNodes, setPreviewNodes] = useState<AnyFlowNode[]>([]);
+  const [previewLinks, setPreviewLinks] = useState<BoardLink[]>([]);
+  const [scene, setScene] = useState<{
+    hidden: Set<string>;
+    frames: { x: number; y: number; w: number; h: number; label: string }[];
+  } | null>(null);
+  const previewRef = useRef(previewNodes);
+  previewRef.current = previewNodes;
+  // 抵達時預覽節點已量到的尺寸（key＝原 id）：正式節點先帶著，React Flow 才不會把自動高度的卡片當成「未量測」而隱藏一幀
+  const transitionMeasuredRef = useRef<Map<string, { width?: number; height?: number }> | null>(null);
+  // 往下進入時用的方向（key＝"來源>目的"）：返回時直接取反重播，不用返回當下的視野重算
+  const enterDirRef = useRef(new Map<string, { x: number; y: number }>());
+
+  useEffect(() => {
+    if (boardIdProp === boardId) return;
+    const stage = stageRef.current;
+    const reduce =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!active || !stage || !boardId || !boardIdProp || reduce) {
+      setBoardId(boardIdProp);
+      return;
+    }
+
+    const targetId = boardIdProp;
+    let cancelled = false;
+    let finished = false; // 已抵達並 setBoardId：之後的 cleanup 不能再還原鏡頭
+    let startedVp: SavedViewport | null = null; // 場景建立時 A 的鏡頭，取消時還原用
+    let raf = 0;
+
+    // 沿母白板鏈找最近共同祖先；stepA／stepB＝A、B 各自在共同祖先底下的那一支（自己就是祖先時為 null）
+    const parentOf = (id: string) => navBoards?.find((b) => b.id === id)?.question?.parent_board_id ?? null;
+    const chainOf = (id: string) => {
+      const out = [id];
+      for (let p = parentOf(id); p && !out.includes(p); p = parentOf(p)) out.push(p);
+      return out;
+    };
+    const chainA = chainOf(boardId);
+    const chainB = chainOf(targetId);
+    const lcaIdxA = chainA.findIndex((id) => chainB.includes(id));
+    const lcaIdxB = lcaIdxA >= 0 ? chainB.indexOf(chainA[lcaIdxA]) : -1;
+    const stepA = lcaIdxA > 0 ? chainA[lcaIdxA - 1] : null;
+    const stepB = lcaIdxB > 0 ? chainB[lcaIdxB - 1] : null;
+    // 同層／跨分支才需要共同祖先那一頁（兩個分支節點在它畫布上的座標）；失敗要報錯，方向退回向右
+    const lcaPagePromise =
+      stepA && stepB
+        ? api.boardQuestionPage(chainA[lcaIdxA]).catch((e) => {
+            report(e, "取得共同母白板失敗，轉場方向退回向右：");
+            return null;
+          })
+        : Promise.resolve(null);
+
+    Promise.all([api.getBoard(targetId), lcaPagePromise])
+      .then(([boardData, lcaPage]) => {
+        if (cancelled) return;
+
+        const r = stage.getBoundingClientRect();
+        const W = r.width || window.innerWidth;
+        const H = r.height || window.innerHeight;
+
+        // B 的正式鏡頭：儲存值；沒有就框住所有卡片
+        let found = loadViewport(targetId);
+        if (!found) {
+          const cards = boardData.cards || [];
+          if (cards.length > 0) {
+            const minX = Math.min(...cards.map((c: any) => c.x));
+            const maxX = Math.max(...cards.map((c: any) => c.x + (c.w || DEFAULT_CARD_W)));
+            const minY = Math.min(...cards.map((c: any) => c.y));
+            const maxY = Math.max(...cards.map((c: any) => c.y + (c.h || DEFAULT_CARD_H)));
+            const bw = Math.max(100, maxX - minX);
+            const bh = Math.max(100, maxY - minY);
+            const zoom = Math.min(1, Math.min((W * 0.8) / bw, (H * 0.8) / bh));
+            found = {
+              x: W / 2 - (minX + bw / 2) * zoom,
+              y: H / 2 - (minY + bh / 2) * zoom,
+              zoom,
+            };
+          } else {
+            found = { x: W / 2, y: H / 2, zoom: 1 };
+          }
+        }
+        const vpB: SavedViewport = found;
+        const vpA = rf.getViewport();
+        startedVp = vpA;
+
+        // 場景座標（world）：A 的視野中心 cA；B 的視野中心放在 cA 沿 dir 方向 sep 之外（cEnd）
+        const centerOf = (v: SavedViewport) => ({ x: (W / 2 - v.x) / v.zoom, y: (H / 2 - v.y) / v.zoom });
+        const cA = centerOf(vpA);
+        const cB = centerOf(vpB);
+        // B 相對 A 的方向（單位向量）。往下（A 是 B 的祖先）：A 視野中心指向通往 B 的子問題節點；往上：進入時方向的反向；
+        // 同層／跨分支：依兩支在共同祖先底下的建立順序向右或向左。資料不足或向量過短時退回向右
+        const unit = (vx: number, vy: number) => {
+          const len = Math.hypot(vx, vy);
+          return len < 1 ? null : { x: vx / len, y: vy / len };
+        };
+        // 沿母白板鏈找最近共同祖先；stepA／stepB＝A、B 各自在共同祖先底下的那一支（自己就是祖先時為 null）
+        const parentOf = (id: string) => navBoards?.find((b) => b.id === id)?.question?.parent_board_id ?? null;
+        const chainOf = (id: string) => {
+          const out = [id];
+          for (let p = parentOf(id); p && !out.includes(p); p = parentOf(p)) out.push(p);
+          return out;
+        };
+        const chainA = chainOf(boardId);
+        const chainB = chainOf(targetId);
+        const lcaIdxA = chainA.findIndex((id) => chainB.includes(id));
+        const lcaIdxB = lcaIdxA >= 0 ? chainB.indexOf(chainA[lcaIdxA]) : -1;
+        const stepA = lcaIdxA > 0 ? chainA[lcaIdxA - 1] : null;
+        const stepB = lcaIdxB > 0 ? chainB[lcaIdxB - 1] : null;
+        // A 是 B 的祖先：看 A 畫布上通往 B 的子問題；B 是 A 的祖先：看 B 畫布上通往 A 的子問題；直接母子時就是 target／board 本身
+        const downId = stepA === null && stepB ? stepB : targetId;
+        const upId = stepB === null && stepA ? stepA : boardId;
+        const childNode = nodesRef.current.find((n) => n.id === `q:${downId}`);
+        const asChild = (boardData.questions ?? []).find((q) => q.board_id === upId);
+        let dir = { x: 1, y: 0 };
+        if (childNode) {
+          const cw = childNode.measured?.width ?? childNode.width ?? 0;
+          const ch = childNode.measured?.height ?? childNode.height ?? 0;
+          dir = unit(childNode.position.x + cw / 2 - cA.x, childNode.position.y + ch / 2 - cA.y) ?? dir;
+          enterDirRef.current.set(`${boardId}>${targetId}`, dir);
+        } else if (asChild) {
+          const entered = enterDirRef.current.get(`${targetId}>${boardId}`);
+          dir = entered
+            ? { x: -entered.x, y: -entered.y }
+            : (unit(cB.x - (asChild.x + asChild.w / 2), cB.y - (asChild.y + asChild.h / 2)) ?? dir);
+        } else if (stepA && stepB && lcaPage) {
+          // 同層／跨分支：兩支在共同祖先畫布上的節點中心差。A→B 與 B→A 用同一組座標互減，必然互為反向
+          const na = lcaPage.children.find((c) => c.board_id === stepA);
+          const nb = lcaPage.children.find((c) => c.board_id === stepB);
+          if (na && nb) {
+            dir = unit(nb.x + nb.w / 2 - (na.x + na.w / 2), nb.y + nb.h / 2 - (na.y + na.h / 2)) ?? dir;
+          } else {
+            console.warn("[board-transition] 共同母白板上找不到分支節點，方向退回向右", { stepA, stepB });
+          }
+        }
+        const extent = (z: number) => (Math.abs(dir.x) * W + Math.abs(dir.y) * H) / z;
+        console.debug("[board-transition] dir", {
+          from: boardId,
+          to: targetId,
+          branch: childNode ? "down" : asChild ? "up" : stepA && stepB ? "sibling" : "fallback",
+          dir: `${dir.x.toFixed(2)}, ${dir.y.toFixed(2)}`,
+          navHasQuestion: !!navBoards?.some((b) => b.question),
+        });
+        const sep = ((extent(vpA.zoom) + extent(vpB.zoom)) / 2) * 1.35;
+        const cEnd = { x: cA.x + dir.x * sep, y: cA.y + dir.y * sep };
+        const offset = { x: cEnd.x - cB.x, y: cEnd.y - cB.y };
+
+        const rect = (c: { x: number; y: number }, z: number, pad = 0) => ({
+          x: c.x - W / (2 * z) - pad,
+          y: c.y - H / (2 * z) - pad,
+          w: W / z + pad * 2,
+          h: H / z + pad * 2,
+        });
+        const hit = (n: AnyFlowNode, q: { x: number; y: number; w: number; h: number }) => {
+          const w = n.measured?.width ?? n.width ?? DEFAULT_CARD_W;
+          const h = n.measured?.height ?? n.height ?? DEFAULT_CARD_H;
+          return n.position.x < q.x + q.w && n.position.x + w > q.x && n.position.y < q.y + q.h && n.position.y + h > q.y;
+        };
+
+        // A：視野外的節點暫時 hidden（只影響顯示，不動 nodes 狀態），避免 A 視野外的節點闖進 B 的區域
+        const rectA = rect(cA, vpA.zoom);
+        const hidden = new Set(nodesRef.current.filter((n) => !hit(n, rectA)).map((n) => n.id));
+
+        // B：只建視野（加邊界）內的預覽節點；子問題節點不放進預覽，抵達後才出現
+        const bd = boardData as any;
+        const sourceNodes: AnyFlowNode[] = [
+          ...(bd.groups ?? []).map((g: any) => toGroupNode(g)),
+          ...(bd.notes ?? []).map((n: any) => toNoteNode(n)),
+          ...(bd.images ?? []).map((im: any) => toImageNode(im)),
+          ...(bd.literatures ?? []).map((l: any) => toLiteratureNode(l)),
+          ...(bd.cards ?? []).map((c: any) => toNode(c)),
+        ];
+        const rectBNative = rect(cB, vpB.zoom, 160);
+        const guard = () => report(new Error("轉場預覽節點不可操作"), "轉場預覽");
+        const preview = sourceNodes
+          .filter((n) => hit(n, rectBNative))
+          .map(
+            (n) =>
+              ({
+                ...n,
+                id: PV_PREFIX + n.id,
+                position: { x: n.position.x + offset.x, y: n.position.y + offset.y },
+                draggable: false,
+                selectable: false,
+                connectable: false,
+                focusable: false,
+                deletable: false,
+                selected: false,
+                data: Object.fromEntries(
+                  Object.entries(n.data).map(([k, v]) => [k, typeof v === "function" && k !== "report" ? guard : v]),
+                ),
+              }) as AnyFlowNode,
+          );
+        const pvIds = new Set(preview.map((n) => n.id));
+        const pvLinks = ((bd.links ?? []) as BoardLink[])
+          .map(normalizeLink)
+          .map((l) => ({ ...l, source_id: PV_PREFIX + l.source_id, target_id: PV_PREFIX + l.target_id }))
+          .filter((l) => pvIds.has(l.source_id) && pvIds.has(l.target_id));
+
+        preloadedBoardRef.current = { id: targetId, data: boardData, vp: vpB };
+        viewportReady.current = false; // 轉場期間的鏡頭移動不可存成任何白板的 viewport
+        setPreviewNodes(preview);
+        setPreviewLinks(pvLinks);
+        setScene({
+          hidden,
+          frames: [
+            { ...rectA, label: navBoards?.find((b) => b.id === boardId)?.name || "目前白板" },
+            { ...rect(cEnd, vpB.zoom), label: boardData.name || "目的白板" },
+          ],
+        });
+        setTransitioning(true);
+
+        // 縮放曲線：A 的 zoom → 中途縮到能同時看到兩塊白板 → B 的 zoom
+        const TRANSITION_MS = 350;
+        const zFit = (Math.abs(dir.x) * W + Math.abs(dir.y) * H) / (extent(vpA.zoom) / 2 + sep + extent(vpB.zoom) / 2);
+        const zMid = Math.min(vpA.zoom, vpB.zoom, Math.max(0.2, zFit * 0.92));
+        const lnA = Math.log(vpA.zoom);
+        const lnB = Math.log(vpB.zoom);
+        const lnMid = Math.log(zMid);
+        const smootherstep = (t: number) => t * t * t * (t * (t * 6 - 15) + 10);
+
+        const run = () => {
+          const start = performance.now();
+          const step = (now: number) => {
+            if (cancelled) return;
+            const t = Math.min(1, Math.max(0, (now - start) / TRANSITION_MS));
+            const e = smootherstep(t);
+            const s = Math.sin(Math.PI * e);
+            const z = Math.exp((1 - s) * (lnA + (lnB - lnA) * e) + s * lnMid);
+            const cx = cA.x + (cEnd.x - cA.x) * e;
+            const cy = cA.y + (cEnd.y - cA.y) * e;
+            void rf.setViewport({ x: W / 2 - cx * z, y: H / 2 - cy * z, zoom: z });
+            if (t < 1) {
+              raf = requestAnimationFrame(step);
+              return;
+            }
+            // 抵達：鏡頭已等於 B 的正式 viewport。換成正式節點由載入 effect（layout）在繪製前完成
+            finished = true;
+            transitionMeasuredRef.current = new Map(
+              previewRef.current
+                .filter((n) => n.measured?.width != null && n.measured?.height != null)
+                .map((n): [string, { width?: number; height?: number }] => [
+                  n.id.slice(PV_PREFIX.length),
+                  { width: n.measured!.width, height: n.measured!.height },
+                ]),
+            );
+            setBoardId(targetId);
+          };
+          raf = requestAnimationFrame(step);
+        };
+
+        // 等預覽節點掛載並量完尺寸才開始移動鏡頭（最多等 45 幀），動畫期間才不會一邊掛載 Markdown 一邊掉幀
+        let waited = 0;
+        const begin = () => {
+          if (cancelled) return;
+          const ready =
+            previewRef.current.length === preview.length &&
+            previewRef.current.every((n) => n.measured?.width != null && n.measured?.height != null);
+          if (!ready && waited++ < 45) {
+            raf = requestAnimationFrame(begin);
+            return;
+          }
+          if (!ready) console.warn("[board-transition] 預覽節點尚未量測完成，仍開始轉場");
+          run();
+        };
+        raf = requestAnimationFrame(begin);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        report(err, "載入目的白板失敗，直接切換");
+        setBoardId(targetId);
+      });
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      if (finished) return;
+      // 轉場被中途取消：清掉預覽、還原 A 的鏡頭；預載資料作廢，避免之後無動畫切到同一塊白板時用到舊資料
+      preloadedBoardRef.current = null;
+      setPreviewNodes([]);
+      setPreviewLinks([]);
+      setScene(null);
+      setTransitioning(false);
+      if (startedVp) {
+        void rf.setViewport(startedVp);
+        viewportReady.current = true;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boardIdProp]);
+
+  // ---- 畫布上的問題節點（子問題）：載入、拖曳／縮放儲存、進入、新增、改名、狀態、刪除／封存；僅電腦版 ----
+  // 白板圖片只有電腦端（SQLite）支援；Dexie 不註冊貼上與右鍵項目
+  const imagesAvailable = getPreferredDriverType() !== "dexie";
+  const pasteAtImpl = useRef<((at: { x: number; y: number }) => Promise<void>) | undefined>(undefined);
+  const questions = useBoardQuestions<AnyFlowNode>({
+    boardId,
+    enabled: navAvailable,
+    wrapRef,
+    screenToFlow: (p) => rf.screenToFlowPosition(p),
+    getNodes: () => nodesRef.current,
+    setNodes,
+    saved,
+    snapRef,
+    onSelectBoard: navSelectBoard,
+    onBoardsChanged: navBoardsChanged,
+    paneExtras: imagesAvailable
+      ? (spot) => [{ label: "貼上圖片", onClick: () => void pasteAtImpl.current?.(spot) }]
+      : undefined,
+    report,
+  });
+  const persistQuestionMoved = questions.persistMoved;
+  const askQuestionDelete = questions.askDelete;
   const selectedRef = useRef(selectedCardId);
   selectedRef.current = selectedCardId;
   // 上一次已同步進 nodes 的 selectedCardId。App 已改選取、[selectedCardId] effect 尚未寫進 nodes 的空窗內，
@@ -1050,6 +1461,212 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     [onLitResizeEnd],
   );
 
+  // ---- 白板圖片：只屬於這塊白板；圖檔在媒體庫，白板只存 media_id＋位置＋大小＋裁切比例（非破壞式）----
+  const imageResizeImpl = useRef<((iid: string, p: { x: number; y: number; width: number; height: number }) => Promise<void>) | undefined>(undefined);
+  imageResizeImpl.current = async (iid, p) => {
+    if (!boardId) return;
+    const nodeId = `img:${iid}`;
+    try {
+      await api.patchBoardImage(boardId, iid, { x: p.x, y: p.y, w: p.width, h: p.height }); // 等比例縮放，不取整以保持長寬比
+      saved.current.set(nodeId, { x: p.x, y: p.y, w: p.width, h: p.height });
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === nodeId && n.type === "boardImage"
+            ? {
+                ...n,
+                position: { x: p.x, y: p.y },
+                width: p.width,
+                height: p.height,
+                style: { width: p.width, height: p.height },
+                data: { ...n.data, w: p.width, h: p.height },
+              }
+            : n,
+        ),
+      );
+    } catch (e) {
+      const g = saved.current.get(nodeId);
+      if (g && g.w != null && g.h != null) {
+        const gw = g.w;
+        const gh = g.h;
+        setNodes((ns) =>
+          ns.map((n) =>
+            n.id === nodeId && n.type === "boardImage"
+              ? { ...n, position: { x: g.x, y: g.y }, width: gw, height: gh, style: { width: gw, height: gh }, data: { ...n.data, w: gw, h: gh } }
+              : n,
+          ),
+        );
+      }
+      report(e, "儲存圖片大小失敗，已回復");
+    }
+  };
+  const onImageResizeEnd = useCallback(
+    (iid: string, p: { x: number; y: number; width: number; height: number }) => void imageResizeImpl.current?.(iid, p),
+    [],
+  );
+
+  // 套用裁切：框內的內容在畫面上不動（位置依裁切框相對原圖的偏移換算），所以裁切前後看起來是「框收縮／擴張」
+  const imageCropImpl = useRef<((iid: string, r: CropRect) => Promise<boolean>) | undefined>(undefined);
+  imageCropImpl.current = async (iid, r) => {
+    if (!boardId) return false;
+    const nodeId = `img:${iid}`;
+    const n = nodesRef.current.find((m): m is ImageFlowNode => m.type === "boardImage" && m.id === nodeId);
+    if (!n) return false;
+    const d = n.data;
+    const fullW = d.w / d.cropW;
+    const fullH = d.h / d.cropH;
+    const nx = n.position.x + (r.x - d.cropX) * fullW;
+    const ny = n.position.y + (r.y - d.cropY) * fullH;
+    const nw = r.w * fullW;
+    const nh = r.h * fullH;
+    try {
+      await api.patchBoardImage(boardId, iid, { x: nx, y: ny, w: nw, h: nh, crop_x: r.x, crop_y: r.y, crop_w: r.w, crop_h: r.h });
+      saved.current.set(nodeId, { x: nx, y: ny, w: nw, h: nh });
+      setNodes((ns) =>
+        ns.map((m) =>
+          m.id === nodeId && m.type === "boardImage"
+            ? {
+                ...m,
+                position: { x: nx, y: ny },
+                width: nw,
+                height: nh,
+                style: { width: nw, height: nh },
+                data: { ...m.data, w: nw, h: nh, cropX: r.x, cropY: r.y, cropW: r.w, cropH: r.h },
+              }
+            : m,
+        ),
+      );
+      return true;
+    } catch (e) {
+      report(e, "儲存圖片裁切失敗");
+      return false;
+    }
+  };
+  const onImageCropCommit = useCallback((iid: string, r: CropRect) => imageCropImpl.current?.(iid, r) ?? Promise.resolve(false), []);
+
+  // 刪除直接生效、不做復原（與便利貼一致）；圖檔留在媒體庫，由清理媒體回收
+  const imageRemoveImpl = useRef<((iid: string) => Promise<void>) | undefined>(undefined);
+  imageRemoveImpl.current = async (iid) => {
+    if (!boardId) return;
+    try {
+      await api.deleteBoardImage(boardId, iid);
+      setNodes((ns) => ns.filter((n) => n.id !== `img:${iid}`));
+      setImageLinks((ls) => ls.filter((l) => l.image_id !== iid));
+      saved.current.delete(`img:${iid}`);
+    } catch (e) {
+      report(e, "刪除圖片失敗");
+    }
+  };
+  const onImageRemove = useCallback((iid: string) => void imageRemoveImpl.current?.(iid), []);
+
+  const removeImageLinkImpl = useRef<((l: BoardImageLink) => Promise<void>) | undefined>(undefined);
+  removeImageLinkImpl.current = async (l) => {
+    if (!boardId) return; // 確認已由 ImageLinkConfirm 的 ○ 鈕完成，這裡直接刪除
+    try {
+      await api.deleteBoardImageLink(boardId, l.image_id, l.card_id);
+      setImageLinks((ls) => ls.filter((x) => !(x.image_id === l.image_id && x.card_id === l.card_id)));
+    } catch (e) {
+      report(e, "移除圖片連線失敗");
+    }
+  };
+
+  const toImageNode = useCallback(
+    (im: BoardImage): ImageFlowNode => ({
+      id: `img:${im.id}`,
+      type: "boardImage",
+      position: { x: im.x, y: im.y },
+      width: im.w,
+      height: im.h,
+      style: { width: im.w, height: im.h },
+      data: {
+        imageId: im.id,
+        mediaId: im.media_id,
+        w: im.w,
+        h: im.h,
+        cropX: im.crop_x,
+        cropY: im.crop_y,
+        cropW: im.crop_w,
+        cropH: im.crop_h,
+        onResizeEnd: onImageResizeEnd,
+        onCropCommit: onImageCropCommit,
+        onRemove: onImageRemove,
+        report,
+      },
+    }),
+    [onImageCropCommit, onImageRemove, onImageResizeEnd, report],
+  );
+
+  // 貼上：量原圖尺寸 → 上傳媒體 → 建立白板圖片。at＝右鍵位置（左上角）；沒給就放在視窗中心。
+  // 上傳成功但建立失敗時明講圖檔已上傳；中途切換白板時，圖片仍存在原白板，不畫到新白板上
+  const placeImage = useCallback(
+    async (file: File, at?: { x: number; y: number }) => {
+      const bid = boardIdRef.current;
+      if (!bid) {
+        report(new Error("請先在左側建立或選擇一塊白板"));
+        return;
+      }
+      try {
+        const nat = await measureImage(file);
+        const s = Math.min(1, IMAGE_MAX_SIDE / Math.max(nat.w, nat.h));
+        const w = nat.w * s;
+        const h = nat.h * s;
+        const b = wrapRef.current?.getBoundingClientRect();
+        const center = b
+          ? rf.screenToFlowPosition({ x: b.left + b.width / 2, y: b.top + b.height / 2 })
+          : { x: 200, y: 150 };
+        const off = at ? 0 : (nodesRef.current.filter((n) => n.type === "boardImage").length % 6) * 24;
+        const rawX = (at ? at.x : center.x - w / 2) + off;
+        const rawY = (at ? at.y : center.y - h / 2) + off;
+        const x = snapRef.current ? snapToGridValue(rawX, GRID_SIZE) : Math.round(rawX);
+        const y = snapRef.current ? snapToGridValue(rawY, GRID_SIZE) : Math.round(rawY);
+        const media = await api.uploadMedia(file);
+        let created: BoardImage;
+        try {
+          created = await api.createBoardImage(bid, { media_id: media.id, x, y, w, h });
+        } catch (e) {
+          report(e, "圖檔已上傳，但放上白板失敗（沒用到的圖檔可用「清理媒體」回收）");
+          return;
+        }
+        if (boardIdRef.current !== bid) {
+          info("圖片已貼到先前的白板（你已切換白板）");
+          return;
+        }
+        saved.current.set(`img:${created.id}`, { x: created.x, y: created.y, w: created.w, h: created.h });
+        setNodes((ns) => [...ns.map((m) => ({ ...m, selected: false })), { ...toImageNode(created), selected: true }]);
+      } catch (e) {
+        report(e, "貼上圖片失敗");
+      }
+    },
+    [info, report, rf, toImageNode],
+  );
+
+  pasteAtImpl.current = async (at) => {
+    try {
+      const f = await readClipboardImage();
+      if (!f) {
+        info("剪貼簿裡沒有圖片");
+        return;
+      }
+      await placeImage(f, at);
+    } catch (e) {
+      report(e, "讀取剪貼簿失敗");
+    }
+  };
+
+  // 快捷鍵貼上：只在白板為 active、焦點不在可編輯元素、且剪貼簿含圖片時處理；文字貼上完全不攔截
+  useEffect(() => {
+    if (!active || !boardId || !imagesAvailable) return;
+    const onPaste = (e: ClipboardEvent) => {
+      if (isEditableTarget(e.target)) return;
+      const item = Array.from(e.clipboardData?.items ?? []).find((i) => i.kind === "file" && i.type.startsWith("image/"));
+      const file = item?.getAsFile();
+      if (!file) return;
+      e.preventDefault();
+      void placeImage(file);
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, [active, boardId, imagesAvailable, placeImage]);
+
   // 升級為卡片：建卡片 → 寫標題與內文 → 放上白板（原位）→ 刪便利貼。
   // 中途失敗時便利貼一律保留；若卡片已建立，訊息會告知，避免使用者重試後不知道多了一張。
   const notePromoteImpl = useRef<((nid: string, text: string) => Promise<void>) | undefined>(undefined);
@@ -1253,11 +1870,13 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         onResizeEnd,
         onResetSize: onResetCardSize,
         onFitHeight: onFitCardHeight,
+        elsewhere: c.elsewhere,
+        onOpenBoard: navSelectBoard,
         onOpenCard,
         report,
       },
     }),
-    [onOpenCard, onResizeEnd, onResetCardSize, onFitCardHeight, report],
+    [onOpenCard, onResizeEnd, onResetCardSize, onFitCardHeight, navSelectBoard, report],
   );
 
   const toGroupNode = useCallback(
@@ -1309,10 +1928,20 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   );
 
   // ---- 載入白板 ----
-  useEffect(() => {
-    setNodes([]);
-    setLinks([]);
+  // useLayoutEffect：轉場抵達時，換成 B 的正式 nodes、設好鏡頭、移除預覽，必須在繪製前的同一個 commit 內完成
+  useLayoutEffect(() => {
+    const preloaded =
+      preloadedBoardRef.current && preloadedBoardRef.current.id === boardId
+        ? preloadedBoardRef.current
+        : null;
+
+    if (!preloaded) {
+      setNodes([]);
+      setLinks([]);
+      setImageLinks([]);
+    }
     setEditingLink(null);
+    setImgLinkConfirm(null);
     setUndoSnapshot(null);
     setDesignatedCenterId(null);
     setLastClickedCardId(null);
@@ -1320,40 +1949,72 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     viewportReady.current = false;
     if (!boardId) return;
     let alive = true;
-    setLoading(true);
-    api
-      .getBoard(boardId)
-      .then((b) => {
+    setLoading(!preloaded);
+
+    const applyBoard = (b: any, presetVp?: SavedViewport, measured?: Map<string, { width?: number; height?: number }>) => {
+      if (!alive) return;
+      const groups = b.groups ?? [];
+      groups.forEach((g: any) => saved.current.set(`group:${g.id}`, { x: g.x, y: g.y, w: g.w, h: g.h }));
+      b.cards.forEach((c: any) => saved.current.set(c.card_id, { x: c.x, y: c.y, w: c.w, h: c.h }));
+      const groupNodes = groups.map((g: any) => toGroupNode(g));
+      const notes = b.notes ?? [];
+      notes.forEach((n: any) => saved.current.set(`note:${n.id}`, { x: n.x, y: n.y, w: n.w, h: n.h ?? NOTE_DEFAULT_H }));
+      const noteNodes = notes.map((n: any) => toNoteNode(n));
+      const lits = b.literatures ?? [];
+      lits.forEach((l: any) =>
+        saved.current.set(`lit:${l.literature_id}`, { x: l.x, y: l.y, w: l.w ?? LIT_DEFAULT_W, h: l.h ?? LIT_DEFAULT_H }),
+      );
+      const litNodes = lits.map((l: any) => toLiteratureNode(l));
+      const questionNodes = questions.loadFrom(b);
+      const cardNodes = b.cards.map((c: any) => ({ ...toNode(c), selected: c.card_id === selectedRef.current }));
+      const imgs = b.images ?? [];
+      imgs.forEach((im: any) => saved.current.set(`img:${im.id}`, { x: im.x, y: im.y, w: im.w, h: im.h }));
+      const imageNodes = imgs.map((im: any) => toImageNode(im));
+      const allNodes = [...groupNodes, ...noteNodes, ...imageNodes, ...litNodes, ...questionNodes, ...cardNodes];
+      setNodes(
+        measured ? allNodes.map((n) => (measured.has(n.id) ? { ...n, measured: measured.get(n.id) } : n)) : allNodes,
+      );
+      setLinks((b.links ?? []).map(normalizeLink));
+      setImageLinks(b.image_links ?? []);
+
+      if (presetVp) {
+        // 轉場預載：鏡頭在這個 layout effect 內同步設好（與預覽節點被移除同一個 commit，繪製前一起生效），不經 rAF
+        void rf.setViewport(presetVp);
+        preloadedBoardRef.current = null;
+        transitionMeasuredRef.current = null;
+        setTransitioning(false);
+        setPreviewNodes([]);
+        setPreviewLinks([]);
+        setScene(null);
+        // 稍後才允許存 viewport：動畫逐幀的 onMoveEnd 是非同步回報的，必須等它們都過去
+        window.setTimeout(() => {
+          if (alive) viewportReady.current = true;
+        }, 60);
+        return;
+      }
+      const vp = loadViewport(boardId);
+      requestAnimationFrame(() => {
         if (!alive) return;
-        const groups = b.groups ?? [];
-        groups.forEach((g) => saved.current.set(`group:${g.id}`, { x: g.x, y: g.y, w: g.w, h: g.h }));
-        b.cards.forEach((c) => saved.current.set(c.card_id, { x: c.x, y: c.y, w: c.w, h: c.h }));
-        const groupNodes = groups.map((g) => toGroupNode(g));
-        const notes = b.notes ?? [];
-        notes.forEach((n) => saved.current.set(`note:${n.id}`, { x: n.x, y: n.y, w: n.w, h: n.h ?? NOTE_DEFAULT_H }));
-        const noteNodes = notes.map((n) => toNoteNode(n));
-        const lits = b.literatures ?? [];
-        lits.forEach((l) =>
-          saved.current.set(`lit:${l.literature_id}`, { x: l.x, y: l.y, w: l.w ?? LIT_DEFAULT_W, h: l.h ?? LIT_DEFAULT_H }),
-        );
-        const litNodes = lits.map((l) => toLiteratureNode(l));
-        // 載入完成時，右側面板目前選的卡片如果在這塊白板上，也要同步成選取狀態
-        const cardNodes = b.cards.map((c) => ({ ...toNode(c), selected: c.card_id === selectedRef.current }));
-        setNodes([...groupNodes, ...noteNodes, ...litNodes, ...cardNodes]);
-        setLinks((b.links ?? []).map(normalizeLink));
-        const vp = loadViewport(boardId);
-        requestAnimationFrame(() => {
-          if (!alive) return;
-          if (vp && typeof rf.setViewport === "function") {
-            void rf.setViewport(vp);
-          } else if (b.cards.length) {
-            void rf.fitView({ padding: 0.2, maxZoom: 1 });
-          }
-          viewportReady.current = true;
-        });
-      })
-      .catch((e) => alive && report(e, "載入白板失敗"))
-      .finally(() => alive && setLoading(false));
+        if (vp && typeof rf.setViewport === "function") {
+          void rf.setViewport(vp);
+        } else if (b.cards.length) {
+          void rf.fitView({ padding: 0.2, maxZoom: 1 });
+        }
+        viewportReady.current = true;
+      });
+    };
+
+    if (preloaded) {
+      applyBoard(preloaded.data, preloaded.vp, transitionMeasuredRef.current ?? undefined);
+      setLoading(false);
+    } else {
+      api
+        .getBoard(boardId)
+        .then((b) => applyBoard(b))
+        .catch((e) => alive && report(e, "載入白板失敗"))
+        .finally(() => alive && setLoading(false));
+    }
+
     return () => {
       alive = false;
     };
@@ -1394,7 +2055,12 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   }, [selectedCardId]);
 
   const onNodesChange = useCallback(
-    (changes: NodeChange<AnyFlowNode>[]) => {
+    (allChanges: NodeChange<AnyFlowNode>[]) => {
+      // 轉場預覽節點（id 以 "pv:" 開頭）只讓它量尺寸，不進正式 nodes
+      const pvChanges = allChanges.filter((c) => ("id" in c ? c.id : c.item.id).startsWith(PV_PREFIX));
+      if (pvChanges.length) setPreviewNodes((ns) => applyNodeChanges(pvChanges, ns));
+      const changes = pvChanges.length ? allChanges.filter((c) => !pvChanges.includes(c)) : allChanges;
+      if (changes.length === 0) return;
       const drags = changes.filter(
         (c): c is PositionChange => c.type === "position" && c.dragging === true && !!c.position,
       );
@@ -1406,7 +2072,14 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       const cardDrags =
         activeType === "boardGroup"
           ? []
-          : drags.filter((d) => !d.id.startsWith("group:") && !d.id.startsWith("note:") && !d.id.startsWith("lit:"));
+          : drags.filter(
+              (d) =>
+                !d.id.startsWith("group:") &&
+                !d.id.startsWith("note:") &&
+                !d.id.startsWith("lit:") &&
+                !d.id.startsWith("q:") &&
+                !d.id.startsWith("img:"),
+            );
 
       if (drags.length > 0 && shiftRef.current) {
         // Shift：以拖曳起點為基準，位移取固定間距的整數倍
@@ -1414,7 +2087,10 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           if (c.type !== "position" || !c.dragging || !c.position) return c;
           const start = dragStartRef.current.get(c.id);
           if (!start) return c;
-          if ((activeType === "card" || activeType === "boardNote" || activeType === "boardLiterature") && c.id.startsWith("group:")) {
+          if (
+            (activeType === "card" || activeType === "boardNote" || activeType === "boardLiterature" || activeType === "boardImage") &&
+            c.id.startsWith("group:")
+          ) {
             return { ...c, position: { x: start.x, y: start.y } };
           }
           const qPos = { x: quantizeFromStart(start.x, c.position.x), y: quantizeFromStart(start.y, c.position.y) };
@@ -1504,7 +2180,10 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           lastSnappedPosRef.current.set(c.id, pos);
           return { ...c, position: pos };
         });
-      } else if ((activeType === "card" || activeType === "boardNote" || activeType === "boardLiterature") && drags.length > 0) {
+      } else if (
+        (activeType === "card" || activeType === "boardNote" || activeType === "boardLiterature" || activeType === "boardImage") &&
+        drags.length > 0
+      ) {
         // 未開啟自動對齊但主動拖曳卡片時，仍防止誤被選中的分組框跟著移動
         next = changes.map((c) => {
           if (c.type === "position" && c.dragging && c.id.startsWith("group:")) {
@@ -1541,7 +2220,14 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
 
   const onSelectionChange = useCallback(
     ({ nodes: sel }: { nodes: { id: string; type?: string }[] }) => {
-      const cardSel = sel.filter((n) => !n.id.startsWith("group:") && !n.id.startsWith("note:") && !n.id.startsWith("lit:"));
+      const cardSel = sel.filter(
+        (n) =>
+          !n.id.startsWith("group:") &&
+          !n.id.startsWith("note:") &&
+          !n.id.startsWith("lit:") &&
+          !n.id.startsWith("q:") &&
+          !n.id.startsWith("img:"),
+      );
       // App 的選取已變、nodes 還沒同步：這次回報是舊選取，丟棄；nodes 追上後 React Flow 會再回報一次
       if (syncedSelectedRef.current !== selectedRef.current) return;
       // React Flow 的 store 比 nodes state 晚一個 commit 才同步，回報的選取可能是上一刻的過期快照。
@@ -1741,6 +2427,29 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         }
       }
 
+      // 圖片：只存位置（開啟自動對齊時取整到格距），不參與分組框歸屬與避讓
+      for (const imn of dragged.filter((n): n is ImageFlowNode => n.type === "boardImage")) {
+        const nextX = snapRef.current ? snapToGridValue(imn.position.x, GRID_SIZE) : imn.position.x;
+        const nextY = snapRef.current ? snapToGridValue(imn.position.y, GRID_SIZE) : imn.position.y;
+        const prev = saved.current.get(imn.id);
+        if (prev && prev.x === nextX && prev.y === nextY) continue;
+        try {
+          await api.patchBoardImage(boardId, imn.data.imageId, { x: nextX, y: nextY });
+          saved.current.set(imn.id, { x: nextX, y: nextY, w: prev?.w ?? imn.data.w, h: prev?.h ?? imn.data.h });
+          if (nextX !== imn.position.x || nextY !== imn.position.y) {
+            setNodes((ns) => ns.map((n) => (n.id === imn.id ? { ...n, position: { x: nextX, y: nextY } } : n)));
+          }
+        } catch (e) {
+          if (prev) {
+            setNodes((ns) => ns.map((n) => (n.id === imn.id ? { ...n, position: { x: prev.x, y: prev.y } } : n)));
+          }
+          report(e, "儲存圖片位置失敗，已回到原位");
+        }
+      }
+
+      // 問題節點：只存位置，不參與分組框歸屬與避讓
+      await persistQuestionMoved(dragged);
+
       const movedCardIds = new Set<string>(
         dragged.filter((n) => n.type === "card").map((n) => n.id),
       );
@@ -1848,7 +2557,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         report(e, "儲存位置失敗，已回到原位");
       }
     },
-    [boardId, report, savedGroupRects, setDropTargets],
+    [boardId, persistQuestionMoved, report, savedGroupRects, setDropTargets],
   );
 
   // ---- 拉線建立有向具名連結（成功後顯示線，並開啟關係設定視窗）----
@@ -1856,6 +2565,32 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     async (c: Connection) => {
       if (!c.source || !c.target || c.source === c.target) return;
       if (c.source.startsWith("group:") || c.target.startsWith("group:")) return;
+      const srcImg = c.source.startsWith("img:");
+      const tgtImg = c.target.startsWith("img:");
+      if (srcImg || tgtImg) {
+        // 圖片連線純視覺：不進語意連結（putLink），從哪一端拉都存成同一筆
+        if (srcImg && tgtImg) {
+          info("圖片之間不能連線，請連到卡片");
+          return;
+        }
+        if (!boardId) return;
+        const cardId = srcImg ? c.target : c.source;
+        const imageId = (srcImg ? c.source : c.target).slice("img:".length);
+        if (!nodesRef.current.some((n) => n.type === "card" && n.id === cardId)) {
+          info("圖片只能連到卡片");
+          return;
+        }
+        try {
+          const r = await api.putBoardImageLink(boardId, imageId, cardId);
+          setImageLinks((ls) =>
+            ls.some((l) => l.image_id === imageId && l.card_id === cardId) ? ls : [...ls, { image_id: imageId, card_id: cardId }],
+          );
+          if (r.existed) info("這條連線已存在");
+        } catch (e) {
+          report(e, "建立圖片連線失敗");
+        }
+        return;
+      }
       try {
         const r = await api.putLink(c.source, c.target, {
           relation_type: "延伸",
@@ -1880,12 +2615,23 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         report(e, "建立連結失敗");
       }
     },
-    [info, onLinksChanged, report],
+    [boardId, info, onLinksChanged, report],
   );
+
+  // 轉場期間 React Flow 實際渲染的節點／連結：A 視野外的暫時 hidden、再加上 B 的預覽；不轉場時就是 nodes／links 本身
+  const displayNodes = useMemo<AnyFlowNode[]>(() => {
+    if (!scene && previewNodes.length === 0) return nodes;
+    const base = scene ? nodes.map((n) => (scene.hidden.has(n.id) ? ({ ...n, hidden: true } as AnyFlowNode) : n)) : nodes;
+    return [...base, ...previewNodes];
+  }, [nodes, previewNodes, scene]);
+  const edgeLinks = useMemo<BoardLink[]>(() => {
+    const shown = scene ? links.filter((l) => !scene.hidden.has(l.source_id) && !scene.hidden.has(l.target_id)) : links;
+    return previewLinks.length ? [...shown, ...previewLinks] : shown;
+  }, [links, previewLinks, scene]);
 
   const edges = useMemo<Edge[]>(
     () =>
-      links.map((l) => {
+      edgeLinks.map((l) => {
         const color = RELATION_COLORS[l.relation_type] ?? "#2f6fed";
         const typeLabel = RELATION_LABELS[l.relation_type] ?? l.relation_type;
         const statusSuffix = l.status === "hypothesis" ? " (假說)" : "";
@@ -1929,17 +2675,44 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           data: { link: l },
         };
       }),
-    [links],
+    [edgeLinks],
   );
+
+  // 圖片連線的邊：純視覺、無方向、無標籤；點擊可移除。邊 id 前綴 "imglink:" 與語意連結的邊分開
+  const imageEdges = useMemo<Edge[]>(
+    () =>
+      imageLinks
+        .filter((l) => !scene || (!scene.hidden.has(`img:${l.image_id}`) && !scene.hidden.has(l.card_id)))
+        .map((l) => ({
+          id: `imglink:${l.image_id}__${l.card_id}`,
+          type: "floating",
+          source: `img:${l.image_id}`,
+          target: l.card_id,
+          deletable: false,
+          selectable: true,
+          focusable: true,
+          style: { stroke: "var(--muted)", strokeWidth: 1.5, strokeDasharray: "2 4" },
+          data: { imageLink: l },
+        })),
+    [imageLinks, scene],
+  );
+  const allEdges = useMemo(() => [...edges, ...imageEdges], [edges, imageEdges]);
 
   // ---- Delete / Backspace：卡片只「從白板移除」（絕不刪卡片本體）；分組框則刪除分組框 ----
   const removeSelected = useCallback(async () => {
     if (!boardId) return;
+    // 問題節點背後是一整塊白板：Delete 不直接刪，改開「刪除或封存」對話框（有選到問題時，這次只處理它）
+    const selQuestions = nodesRef.current.filter((n): n is QuestionFlowNode => n.type === "boardQuestion" && !!n.selected);
+    if (selQuestions.length) {
+      askQuestionDelete(selQuestions[0].data.boardId);
+      return;
+    }
     const selGroups = nodesRef.current.filter((n): n is GroupFlowNode => n.type === "boardGroup" && !!n.selected);
     const selCards = nodesRef.current.filter((n): n is CardFlowNode => n.type === "card" && !!n.selected);
     const selNotes = nodesRef.current.filter((n): n is NoteFlowNode => n.type === "boardNote" && !!n.selected);
     const selLits = nodesRef.current.filter((n): n is LiteratureFlowNode => n.type === "boardLiterature" && !!n.selected);
-    if (!selGroups.length && !selCards.length && !selNotes.length && !selLits.length) return;
+    const selImages = nodesRef.current.filter((n): n is ImageFlowNode => n.type === "boardImage" && !!n.selected);
+    if (!selGroups.length && !selCards.length && !selNotes.length && !selLits.length && !selImages.length) return;
 
     if (selGroups.length) {
       const gResults = await Promise.allSettled(
@@ -1984,6 +2757,21 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       }
     }
 
+    if (selImages.length) {
+      // 圖片直接刪除、不做復原；失敗的留在畫面上並大聲報錯
+      const iResults = await Promise.allSettled(selImages.map((n) => api.deleteBoardImage(boardId, n.data.imageId)));
+      const removedImgs = new Set<string>();
+      iResults.forEach((r, i) => {
+        if (r.status === "fulfilled") removedImgs.add(selImages[i].data.imageId);
+        else report(r.reason, "刪除圖片失敗");
+      });
+      if (removedImgs.size) {
+        setNodes((ns) => ns.filter((n) => !(n.type === "boardImage" && removedImgs.has(n.data.imageId))));
+        setImageLinks((ls) => ls.filter((l) => !removedImgs.has(l.image_id)));
+        removedImgs.forEach((id) => saved.current.delete(`img:${id}`));
+      }
+    }
+
     if (selCards.length) {
       const ids = selCards.map((n) => n.id);
       const results = await Promise.allSettled(ids.map((id) => api.removeFromBoard(boardId, id)));
@@ -1995,11 +2783,12 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       if (removed.size) {
         setNodes((ns) => ns.filter((n) => !removed.has(n.id)));
         setLinks((ls) => ls.filter((l) => !removed.has(l.source_id) && !removed.has(l.target_id)));
+        setImageLinks((ls) => ls.filter((l) => !removed.has(l.card_id))); // 後端 trigger 已刪，這裡讓畫面同步
         removed.forEach((id) => saved.current.delete(id));
         onCountChanged();
       }
     }
-  }, [boardId, onCountChanged, report]);
+  }, [askQuestionDelete, boardId, onCountChanged, report]);
 
   useEffect(() => {
     if (!active) return;
@@ -2416,6 +3205,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       removeCard(cardId) {
         setNodes((ns) => ns.filter((n) => n.id !== cardId));
         setLinks((ls) => ls.filter((l) => l.source_id !== cardId && l.target_id !== cardId));
+        setImageLinks((ls) => ls.filter((l) => l.card_id !== cardId));
         saved.current.delete(cardId);
       },
       removeLink(sourceId, targetId, relationType) {
@@ -2934,9 +3724,20 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         </div>
       )}
   
+      <div style={{ position: "absolute", inset: 0, overflow: "hidden" }}>
+      <div
+        ref={stageRef}
+        className="board-stage"
+        style={{
+          position: "absolute",
+          inset: 0,
+          willChange: transitioning ? "transform, opacity" : undefined,
+          pointerEvents: transitioning ? "none" : undefined,
+        }}
+      >
       <ReactFlow
-        nodes={nodes}
-        edges={edges}
+        nodes={displayNodes}
+        edges={allEdges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
@@ -2956,19 +3757,40 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         onNodeDoubleClick={(e, node) => {
           const target = e.target as HTMLElement;
           if (target.closest(".media-size-bar") || target.closest(".nodrag")) return;
+          if (node.type === "boardQuestion") {
+            questions.enter((node as QuestionFlowNode).data.boardId);
+            return;
+          }
           if (node.type === "card" || node.type === "boardNote" || node.type === "boardLiterature") {
             onOpenCard?.(node.id);
           }
         }}
-        onEdgeClick={(_e, edge) => {
-          const l = (edge.data as { link?: BoardLink } | undefined)?.link;
-          if (l) setEditingLink(l);
+        onEdgeClick={(e, edge) => {
+          const d = edge.data as { link?: BoardLink; imageLink?: BoardImageLink } | undefined;
+          if (d?.link) setEditingLink(d.link);
+          else if (d?.imageLink) {
+            // 圖片連線：不跳對話框，在點擊處旁邊彈出 ○／✕ 確認鈕（座標相對 .board，並限制在容器內）
+            const r = wrapRef.current?.getBoundingClientRect();
+            const px = e.clientX - (r?.left ?? 0);
+            const py = e.clientY - (r?.top ?? 0);
+            setImgLinkConfirm({
+              link: d.imageLink,
+              x: r ? Math.max(0, Math.min(px, r.width - 90)) : px,
+              y: r ? Math.max(0, Math.min(py, r.height - 56)) : py,
+            });
+          }
         }}
         onConnect={onConnect}
         onSelectionChange={onSelectionChange}
         onMoveEnd={onMoveEnd}
-        onPaneContextMenu={(e) => e.preventDefault()}
-        isValidConnection={(c) => c.source !== c.target && !c.source?.startsWith("group:") && !c.target?.startsWith("group:")}
+        onMoveStart={() => setImgLinkConfirm(null)}
+        onPaneContextMenu={questions.onPaneContextMenu}
+        isValidConnection={(c) =>
+          c.source !== c.target &&
+          !c.source?.startsWith("group:") &&
+          !c.target?.startsWith("group:") &&
+          !(c.source?.startsWith("img:") && c.target?.startsWith("img:"))
+        }
         connectionMode={ConnectionMode.Loose}
         selectionOnDrag={false}
         selectionMode={SelectionMode.Partial}
@@ -2982,7 +3804,24 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         maxZoom={2}
       >
         <Background gap={GRID_SIZE} />
-        <Controls />
+        <Controls>
+          {navAvailable && (
+            <ControlButton
+              onClick={() => setNavOpen((v) => !v)}
+              title={navOpen ? "收起問題路徑導航器" : "問題路徑導航器"}
+              aria-label="問題路徑導航器"
+              aria-pressed={navOpen}
+              style={navOpen ? { background: "var(--row-hover, rgba(59,130,246,0.15))" } : undefined}
+            >
+              <svg viewBox="0 0 12 12" aria-hidden="true">
+                <path d="M6 2.6V5.2M6 5.2L2.6 8.6M6 5.2L9.4 8.6" stroke="currentColor" strokeWidth="1.1" fill="none" />
+                <circle cx="6" cy="2" r="1.7" />
+                <circle cx="2.4" cy="9.6" r="1.7" />
+                <circle cx="9.6" cy="9.6" r="1.7" />
+              </svg>
+            </ControlButton>
+          )}
+        </Controls>
         <ViewportPortal>
           {magnetGuides.map((g, i) => (
             <div
@@ -3001,6 +3840,35 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           ))}
         </ViewportPortal>
       </ReactFlow>
+      </div>
+      </div>
+      {questions.overlay}
+      {imgLinkConfirm && (
+        <ImageLinkConfirm
+          x={imgLinkConfirm.x}
+          y={imgLinkConfirm.y}
+          onConfirm={() => {
+            const l = imgLinkConfirm.link;
+            setImgLinkConfirm(null);
+            void removeImageLinkImpl.current?.(l);
+          }}
+          onCancel={() => setImgLinkConfirm(null)}
+        />
+      )}
+      {navAvailable && (
+        <QuestionNavigator
+          open={navOpen && active}
+          onClose={() => setNavOpen(false)}
+          boardId={boardId}
+          boards={navBoards!}
+          onSelectBoard={navSelectBoard!}
+          onBoardsChanged={async () => {
+            await navBoardsChanged!();
+            await questions.reload(); // 導航器改了問題結構（移動、新增）：目前畫布上的問題節點與子問題數要跟上
+          }}
+          report={report}
+        />
+      )}
       {!boardId && <div className="board-hint">請先在左側建立或選擇一塊白板</div>}
       {boardId && !loading && cardCount === 0 && (
         <div className="board-hint">這塊白板還沒有卡片。按右上角的「新增卡片」圖標，或從「搜尋」把卡片加進來。</div>

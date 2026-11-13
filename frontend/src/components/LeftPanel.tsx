@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { api } from "../api";
 import { getPreferredDriverType } from "../lib/storage";
 import { buildTree, descendantIds, isSameAxisGroup, tagPath, type TreeNode } from "../lib/tree";
-import type { Axis, BoardSummary, CardSummary, CleanupResult, Tag } from "../types";
+import type { ArchivedQuestion, Axis, BoardSummary, CardSummary, CleanupResult, Tag } from "../types";
+import { BoardDeleteDialog } from "./BoardDeleteDialog";
 import { FacetPicker } from "./FacetPicker";
 import type { Filter } from "./RightPanel";
 import { SyncModal } from "./SyncModal";
@@ -204,7 +205,10 @@ export function LeftPanel(p: Props) {
   const [countsReady, setCountsReady] = useState(false);
   const [sortMode, setSortMode] = useState<TagSortMode>("default");
   const [recentCards, setRecentCards] = useState<CardSummary[]>([]);
+  const [deletingBoardId, setDeletingBoardId] = useState<string | null>(null);
+  const [archived, setArchived] = useState<ArchivedQuestion[]>([]);
   const searchWrapRef = useRef<HTMLDivElement>(null);
+  const isDexie = getPreferredDriverType() === "dexie";
 
   const hasNativeCount = useMemo(
     () => p.tags.some((t) => typeof (t as Tag & { card_count?: unknown }).card_count === "number"),
@@ -433,12 +437,37 @@ export function LeftPanel(p: Props) {
       await api.renameBoard(b.id, name.trim());
       p.onBoardsChanged();
     }, "改名失敗");
-  const deleteBoard = (b: BoardSummary) =>
-    run(async () => {
+  // 電腦端一律走刪除預覽對話框（會列出底下的問題白板、靈感筆記與文獻擺放）；
+  // Dexie 沒有問題白板，也沒有預覽端點（Proxy 會回 501），維持原本的單純確認
+  const deleteBoard = (b: BoardSummary) => {
+    if (!isDexie) {
+      setDeletingBoardId(b.id);
+      return;
+    }
+    void run(async () => {
       if (!window.confirm(`刪除白板「${b.name}」？\n只會刪除白板與卡片的擺放位置，卡片本身不會被刪除。`)) return;
       await api.deleteBoard(b.id);
       p.onBoardsChanged();
     }, "刪除白板失敗");
+  };
+
+  // 已封存的問題：電腦端才有。白板清單一變（刪除、封存、覆蓋還原）就重查；失敗要大聲報錯，不默默顯示舊資料
+  useEffect(() => {
+    if (isDexie) return;
+    let alive = true;
+    api
+      .listArchivedQuestions()
+      .then((r) => {
+        if (alive) setArchived(r.questions);
+      })
+      .catch((e) => {
+        if (alive) p.report(e, "載入已封存的問題失敗");
+      });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.boards, isDexie]);
 
   // ---- 標籤 ----
   const createTag = (axis: Axis, parent: Tag | null) =>
@@ -566,7 +595,8 @@ export function LeftPanel(p: Props) {
         </div>
         {p.boards.length === 0 && <div className="muted pad">還沒有白板</div>}
         <ul className="plain">
-          {p.boards.map((b) => (
+          {/* 只列一般白板；問題白板從母白板進入，不在這裡平鋪 */}
+          {p.boards.filter((b) => !b.question).map((b) => (
             <li key={b.id} className={`row${b.id === p.boardId ? " on" : ""}`}>
               <button className="label" onClick={() => p.onSelectBoard(b.id)}>
                 {b.name} <span className="count">{b.card_count}</span>
@@ -583,6 +613,35 @@ export function LeftPanel(p: Props) {
           ))}
         </ul>
       </section>
+
+      {archived.length > 0 && (
+        <details>
+          <summary>已封存的問題（{archived.length}）</summary>
+          <ul className="plain">
+            {archived.map((a) => (
+              <li key={a.id} className="row" style={{ alignItems: "flex-start" }}>
+                <div className="label" style={{ cursor: "default", whiteSpace: "normal" }}>
+                  <div>{a.name}</div>
+                  <div className="muted" style={{ fontSize: 11 }}>
+                    {a.question.archive_path}
+                    {a.question.archive_reason ? `｜${a.question.archive_reason}` : ""}
+                  </div>
+                  <div className="muted" style={{ fontSize: 11 }}>
+                    {new Date(a.question.archived_at ?? "").toLocaleDateString()}・卡片 {a.contents.cards}・文獻{" "}
+                    {a.contents.literatures}・筆記 {a.contents.notes}
+                    {a.descendant_count > 0 ? `・底下另有 ${a.descendant_count} 個` : ""}
+                  </div>
+                </div>
+                <span className="actions">
+                  <button onClick={() => setDeletingBoardId(a.id)} aria-label={`永久刪除已封存的問題 ${a.name}`} title="永久刪除">
+                    <Icon name="x" size={12} />
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
 
       <section>
         <div className="section-head">
@@ -957,6 +1016,17 @@ export function LeftPanel(p: Props) {
         />
       )}
 
+      {deletingBoardId && (
+        <BoardDeleteDialog
+          boardId={deletingBoardId}
+          onClose={() => setDeletingBoardId(null)}
+          onDone={() => {
+            setDeletingBoardId(null);
+            p.onBoardsChanged();
+          }}
+          report={p.report}
+        />
+      )}
       {moving && <MoveDialog tag={moving} tags={p.tags} onCancel={() => setMoving(null)} onMove={(id) => void moveTag(moving, id)} />}
       {editingTag && (
         <TagMetaDialog

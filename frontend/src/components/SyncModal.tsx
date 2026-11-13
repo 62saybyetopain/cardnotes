@@ -176,6 +176,39 @@ async function overwriteIpadLocal(pkg: SyncPackage): Promise<boolean> {
     );
     if (!proceed) return false;
   }
+  // 已修改的既有卡片：findLocalOnlyCards 看不到它們，覆蓋後 iPad 上的改動會靜默消失。
+  // 以上次同步時記下的簽章為準；沒有簽章（從未同步過）就無從判斷，不猜
+  const baseline = loadIpadBaseline();
+  if (baseline) {
+    const local = await storage.syncExport();
+    const localTags = local.card_tags ?? [];
+    const incoming = new Map<string, string>(pkg.cards.map((c) => [c.id, c.updated_at]));
+    const modified = local.cards.filter((c) => {
+      const prev = baseline.card_signatures[c.id];
+      return (
+        prev !== undefined &&
+        cardSignature(c, localTags) !== prev &&
+        incoming.has(c.id) &&
+        incoming.get(c.id) !== c.updated_at
+      );
+    });
+    if (modified.length > 0) {
+      const shown = modified
+        .slice(0, 5)
+        .map((c) => "・" + (c.title || "（無標題）"))
+        .join("\n");
+      const rest = modified.length > 5 ? "\n…另有 " + String(modified.length - 5) + " 張" : "";
+      const proceedModified = window.confirm(
+        "此 iPad 上有 " +
+          String(modified.length) +
+          " 張卡片自上次同步後被修改過，覆蓋會讓這些修改永久消失：\n" +
+          shown +
+          rest +
+          "\n\n按「確定」繼續覆蓋，按「取消」中止（iPad 資料不會變動）。",
+      );
+      if (!proceedModified) return false;
+    }
+  }
   await storage.importPackageOverwrite(pkg);
   return true;
 }
@@ -265,7 +298,18 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
         throw new Error("無效的備份檔案格式（缺少 cards 陣列）");
       }
       const res = await api.syncOverwrite(parsed);
-      info(`🎉 完整還原成功！已由備份檔重組 ${res.cards_count} 張卡片與資料庫結構。`);
+      info(`完整還原成功！已由備份檔重組 ${res.cards_count} 張卡片與資料庫結構。`);
+      // 後端回報「補不回而被捨棄」的筆數；不顯示就等於把資料遺失報成成功
+      const lost: string[] = [];
+      if (res.daily_pruned.bindings) lost.push(`${res.daily_pruned.bindings} 筆日誌卡片綁定`);
+      if (res.daily_pruned.converted_refs) lost.push(`${res.daily_pruned.converted_refs} 筆日誌已轉卡片標記`);
+      if (res.questions_pruned) lost.push(`${res.questions_pruned} 塊問題白板`);
+      if (res.relations_pruned) lost.push(`${res.relations_pruned} 條問題關聯`);
+      if (res.images_pruned.images) lost.push(`${res.images_pruned.images} 張白板圖片`);
+      if (res.images_pruned.links) lost.push(`${res.images_pruned.links} 條白板圖片連線`);
+      if (lost.length > 0) {
+        report(new Error(`備份檔沒有這些資料的對應內容，本機原有的已無法保留：${lost.join("、")}`), "還原完成但有資料被捨棄");
+      }
       onApplied();
       onClose();
     } catch (err) {
@@ -952,9 +996,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
 
               {autoBackupCfg.enabled && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
-                  {/* 原因：styles.css 的 .field-row 預設 flex-direction: column（給表單欄位用），這一列需要橫排。
-                      在 inline 指定 row 只影響此處，不動我看不到的其他 .field-row 使用處。 */}
-                  <div className="field-row" style={{ margin: 0, display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  <div className="field-row" style={{ margin: 0, display: "flex", alignItems: "center", gap: 6 }}>
                     <span className="muted" style={{ minWidth: 120 }}>本機固定備份檔案：</span>
                     <input
                       readOnly

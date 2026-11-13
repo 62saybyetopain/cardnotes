@@ -2,10 +2,20 @@ import type {
   BoardCard,
   BoardData,
   BoardGroup,
+  BoardImage,
   BoardLink,
   BoardLiterature,
   BoardNote,
+  BoardChildrenMode,
+  BoardDeletePreview,
+  BoardRecommendations,
+  BoardQuestion,
   BoardSummary,
+  ArchivedQuestion,
+  QuestionPage,
+  QuestionRelation,
+  QuestionRelationEdge,
+  QuestionRelationType,
   CardDetail,
   CardImpact,
   CardLiteratureRef,
@@ -168,7 +178,54 @@ export const httpApi = {
   listBoards: () => request<{ boards: BoardSummary[] }>("GET", "/boards"),
   createBoard: (name: string) => request<BoardSummary>("POST", "/boards", { name }),
   renameBoard: (id: string, name: string) => request<{ id: string; name: string }>("PATCH", `/boards/${id}`, { name }),
-  deleteBoard: (id: string) => request<{ deleted: boolean }>("DELETE", `/boards/${id}`),
+  // opts 只有電腦端（問題白板）認得；Dexie 的 deleteBoard 只收 id，但 Dexie 沒有問題白板，不傳 opts 就是預設行為。
+  // 底下有問題白板又沒傳 children 時，後端回 IN_USE 並列出子問題，不會默默刪掉
+  deleteBoard: (id: string, opts: { children?: BoardChildrenMode; keep_record?: boolean; reason?: string } = {}) =>
+    request<{ deleted: boolean; deleted_count?: number; archived_count?: number; promoted_count?: number }>(
+      "DELETE",
+      `/boards/${id}${qs(opts)}`,
+    ),
+  // 問題白板：僅電腦端 SQLite。新增方法時 httpDriver.ts 要同步，否則 Proxy 回 501
+  boardDeletePreview: (id: string) => request<BoardDeletePreview>("GET", `/boards/${id}/delete-preview`),
+  createBoardQuestion: (
+    parent_board_id: string,
+    body: { name: string; kind?: BoardQuestion["kind"]; reason?: string; x: number; y: number; w?: number; h?: number },
+  ) => request<BoardSummary>("POST", `/boards/${parent_board_id}/questions`, body),
+  patchBoardQuestion: (
+    board_id: string,
+    patch: {
+      kind?: BoardQuestion["kind"];
+      status?: BoardQuestion["status"];
+      reason?: string;
+      x?: number;
+      y?: number;
+      w?: number;
+      h?: number;
+    },
+  ) => request<BoardQuestion>("PATCH", `/boards/${board_id}/question`, patch),
+  listArchivedQuestions: () => request<{ questions: ArchivedQuestion[] }>("GET", "/questions/archived"),
+  boardQuestionPage: (id: string) => request<QuestionPage>("GET", `/boards/${id}/question-page`),
+  // 移動問題白板（連同子孫）到另一塊白板底下；已在目標底下回 moved:false。僅電腦端，httpDriver.ts 要同步，否則 Proxy 回 501
+  moveBoardQuestion: (board_id: string, new_parent_board_id: string) =>
+    request<{ moved: boolean; board_id: string; parent_board_id: string; x: number; y: number }>(
+      "POST",
+      `/boards/${board_id}/question/move`,
+      { new_parent_board_id },
+    ),
+  // 問題關聯：僅電腦端 SQLite。新增方法時 httpDriver.ts 要同步，否則 Proxy 回 501
+  listQuestionRelations: (board_id: string) =>
+    request<{ relations: QuestionRelation[] }>("GET", `/boards/${board_id}/relations`),
+  // supports：source 支持 target；對稱類型由後端正規化，前端不用管 id 大小
+  createQuestionRelation: (body: { source_board_id: string; target_board_id: string; relation_type: QuestionRelationType }) =>
+    request<{ id: string; existed: boolean }>("POST", "/question-relations", body),
+  deleteQuestionRelation: (id: string) => request<{ deleted: boolean }>("DELETE", `/question-relations/${id}`),
+  listAllQuestionRelations: () => request<{ relations: QuestionRelationEdge[] }>("GET", "/question-relations"),
+  // 星狀：source 對每個 target 建立同一種關聯，單一交易全成功或全回滾；有方向的類型是 source → target
+  createQuestionRelationsBatch: (body: { source_board_id: string; target_board_ids: string[]; relation_type: QuestionRelationType }) =>
+    request<{ results: { target_board_id: string; id: string; existed: boolean }[] }>("POST", "/question-relations/batch", body),
+  // 以整塊白板為錨點的推薦：僅電腦端。新增方法時 httpDriver.ts 要同步，否則 Proxy 回 501
+  boardRecommendations: (id: string, limit?: number) =>
+    request<BoardRecommendations>("GET", `/boards/${id}/recommendations${qs({ limit })}`),
   getBoard: (id: string) => request<BoardData>("GET", `/boards/${id}`),
   addToBoard: (board_id: string, card_id: string, x: number, y: number) =>
     request<Omit<BoardCard, "title" | "body" | "updated_at">>("POST", `/boards/${board_id}/cards`, { card_id, x, y }),
@@ -209,6 +266,30 @@ export const httpApi = {
   ) => request<BoardLiterature>("PATCH", `/boards/${board_id}/literatures/${literature_id}`, patch),
   removeLiteratureFromBoard: (board_id: string, literature_id: string) =>
     request<{ removed: boolean }>("DELETE", `/boards/${board_id}/literatures/${literature_id}`),
+  // 白板圖片與圖片連線：僅電腦端 SQLite。新增方法時 driver.ts／httpDriver.ts／indexedDbDriver.ts 要同步
+  createBoardImage: (board_id: string, body: { media_id: string; x: number; y: number; w: number; h: number }) =>
+    request<BoardImage>("POST", `/boards/${board_id}/images`, body),
+  // 裁切四欄必須一起送（後端驗證）
+  patchBoardImage: (
+    board_id: string,
+    image_id: string,
+    patch: {
+      x?: number;
+      y?: number;
+      w?: number;
+      h?: number;
+      crop_x?: number;
+      crop_y?: number;
+      crop_w?: number;
+      crop_h?: number;
+    },
+  ) => request<BoardImage>("PATCH", `/boards/${board_id}/images/${image_id}`, patch),
+  deleteBoardImage: (board_id: string, image_id: string) =>
+    request<{ deleted: boolean }>("DELETE", `/boards/${board_id}/images/${image_id}`),
+  putBoardImageLink: (board_id: string, image_id: string, card_id: string) =>
+    request<{ existed: boolean }>("PUT", `/boards/${board_id}/image-links`, { image_id, card_id }),
+  deleteBoardImageLink: (board_id: string, image_id: string, card_id: string) =>
+    request<{ deleted: boolean }>("DELETE", `/boards/${board_id}/image-links/${image_id}/${card_id}`),
   // media
   uploadMedia: (file: File) => {
     const form = new FormData();
@@ -222,7 +303,14 @@ export const httpApi = {
   syncDiff: (pkg: SyncPackage) => request<SyncDiffReport>("POST", "/sync/diff", pkg),
   syncApply: (payload: SyncApplyRequest) => request<SyncApplyResult>("POST", "/sync/apply", payload),
   syncOverwrite: (pkg: SyncPackage) =>
-    request<{ restored: boolean; cards_count: number; daily_pruned?: { bindings: number; converted_refs: number } }>(
+    request<{
+      restored: boolean;
+      cards_count: number;
+      daily_pruned: { bindings: number; converted_refs: number };
+      questions_pruned: number;
+      relations_pruned: number;
+      images_pruned: { images: number; links: number };
+    }>(
       "POST",
       "/sync/overwrite",
       pkg,
@@ -341,7 +429,7 @@ export const api: typeof httpApi = new Proxy(httpApi, {
   },
 });
 
-// @depends-on 考卷複習頁::pushToCardnote（經 window.__cardnoteApi 呼叫 listTags／createTag／resolveTag／uploadMedia／createCard／getCard／patchCard／assignTag，並讀取 ApiError.status 與 CardDetail.warnings；改名或改簽名會讓考卷同步逐張失敗）
+// @depends-on 考卷複習頁::pushToCardnote（經 window.__cardnoteApi 呼叫 listTags／createTag／resolveTag／uploadMedia／createCard／getCard／patchCard／assignTag／unassignTag，並讀取 ApiError.status 與 CardDetail.warnings；改名或改簽名會讓考卷同步逐張失敗）
 if (typeof window !== "undefined") {
   (window as any).__cardnoteApi = api;
 }

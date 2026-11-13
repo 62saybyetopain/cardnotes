@@ -1,0 +1,201 @@
+// 右側欄【搜尋】分頁「推薦」模式的內容：以整塊白板為錨點，推薦不在這塊白板上的卡片與文獻。
+// 只在掛載（切到推薦）與白板改變時才計算；加入後與按「重新整理」會重算。每筆都附理由，讓錯誤看得見。
+// @depends-on ../api.ts (boardRecommendations) / backend boards.py::get_board_recommendations / types.ts::BoardRecommendations
+// @depends-on ./RightPanel.tsx（【搜尋｜推薦】切換鈕掛載此元件；僅電腦端，Dexie 不要掛）
+// @depends-on ../App.tsx（onAddCard／onAddLiterature 接到 BoardHandle.addCard／addLiterature；兩者失敗時自行 report，不會丟例外）
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api } from "../api";
+import type { BoardRecommendations } from "../types";
+
+const LIMIT = 30;
+
+interface Props {
+  boardId: string | null;
+  onAddCard(cardId: string): void | Promise<void>;
+  onAddLiterature(litId: string): void | Promise<unknown>;
+  report(e: unknown, prefix?: string): void;
+}
+
+const clamp2: React.CSSProperties = {
+  fontSize: 12,
+  overflow: "hidden",
+  display: "-webkit-box",
+  WebkitLineClamp: 2,
+  WebkitBoxOrient: "vertical",
+  wordBreak: "break-word",
+};
+const itemBox: React.CSSProperties = {
+  border: "1px solid var(--line, #475569)",
+  borderRadius: 8,
+  padding: "8px 10px",
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+};
+
+export function BoardRecommend({ boardId, onAddCard, onAddLiterature, report }: Props) {
+  const reportRef = useRef(report);
+  reportRef.current = report;
+  const [data, setData] = useState<BoardRecommendations | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [adding, setAdding] = useState<Set<string>>(new Set());
+  const seq = useRef(0);
+
+  const refresh = useCallback(async () => {
+    if (!boardId) return;
+    const my = ++seq.current;
+    setLoading(true);
+    try {
+      const r = await api.boardRecommendations(boardId, LIMIT);
+      if (my === seq.current) setData(r);
+    } catch (e) {
+      if (my === seq.current) {
+        setData(null);
+        reportRef.current(e, "載入推薦失敗");
+      }
+    } finally {
+      if (my === seq.current) setLoading(false);
+    }
+  }, [boardId]);
+
+  // 換白板時先清掉舊結果，避免把上一塊白板的推薦加進這一塊
+  useEffect(() => {
+    setData(null);
+    void refresh();
+  }, [refresh]);
+
+  const add = async (key: string, run: () => void | Promise<unknown>) => {
+    setAdding((s) => new Set(s).add(key));
+    try {
+      await run();
+    } catch (e) {
+      reportRef.current(e, "加入白板失敗");
+    } finally {
+      setAdding((s) => {
+        const n = new Set(s);
+        n.delete(key);
+        return n;
+      });
+    }
+    await refresh();
+  };
+
+  if (!boardId) return <div className="muted pad">請先在左側選擇一塊白板</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "4px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <span className="muted" style={{ fontSize: 12 }}>
+          {data ? `依據板上 ${data.board_card_count} 張卡片的標籤與位置` : loading ? "計算中…" : ""}
+        </span>
+        <button type="button" onClick={() => void refresh()} disabled={loading} title="依目前白板內容重新計算">
+          重新整理
+        </button>
+      </div>
+
+      {data && data.board_card_count === 0 && (
+        <div className="muted" style={{ fontSize: 13 }}>
+          這塊白板還沒有卡片，沒有可以當錨點的內容。
+        </div>
+      )}
+
+      {data && data.board_card_count > 0 && (
+        <>
+          {data.cards.length === 0 ? (
+            <div className="muted" style={{ fontSize: 13 }}>
+              沒有找到與板上卡片共享標籤的其他卡片。沒有任何標籤的卡片不會出現在這裡。
+            </div>
+          ) : (
+            <>
+              <ul className="plain" style={{ display: "flex", flexDirection: "column", gap: 8, margin: 0 }}>
+                {data.cards.map((c) => (
+                  <li key={c.id} style={itemBox}>
+                    <div style={{ fontWeight: 600, fontSize: 13, wordBreak: "break-word" }}>{c.title || "（無標題）"}</div>
+                    {c.snippet && (
+                      <div className="muted" style={clamp2}>
+                        {c.snippet}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                      {c.reasons.map((r) => (
+                        <span
+                          key={r.tag_id}
+                          title={`板上有 ${r.support} 張卡片帶有這個${r.axis === "location" || r.axis === "domain" ? "位置" : "標籤"}`}
+                          style={{
+                            fontSize: 11,
+                            padding: "1px 6px",
+                            borderRadius: 10,
+                            border: "1px solid var(--line, #475569)",
+                          }}
+                        >
+                          {r.axis === "location" || r.axis === "domain" ? "位置：" : ""}
+                          {r.label} · {r.support}
+                        </span>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span className="muted" style={{ fontSize: 11 }}>
+                        吻合 {c.reasons.length} 項
+                      </span>
+                      <button
+                        type="button"
+                        disabled={adding.has(`c:${c.id}`)}
+                        onClick={() => void add(`c:${c.id}`, () => onAddCard(c.id))}
+                      >
+                        加入白板
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              {data.cards_total > data.cards.length && (
+                <div className="muted" style={{ fontSize: 12 }}>
+                  只顯示前 {data.cards.length} 張，共 {data.cards_total} 張候選。
+                </div>
+              )}
+            </>
+          )}
+
+          <details open>
+            <summary style={{ fontSize: 13, cursor: "pointer" }}>文獻（{data.literatures.length}）</summary>
+            {data.literatures.length === 0 ? (
+              <div className="muted" style={{ fontSize: 12, padding: "4px 0" }}>
+                板上卡片引用的文獻都已經放上白板，或沒有引用任何文獻。
+              </div>
+            ) : (
+              <ul className="plain" style={{ display: "flex", flexDirection: "column", gap: 8, margin: "6px 0 0" }}>
+                {data.literatures.map((l) => (
+                  <li key={l.id} style={itemBox}>
+                    <div style={{ fontWeight: 600, fontSize: 13, wordBreak: "break-word" }}>{l.title || "（無標題）"}</div>
+                    {l.author && (
+                      <div className="muted" style={{ fontSize: 11 }}>
+                        {l.author}
+                      </div>
+                    )}
+                    {l.snippet && (
+                      <div className="muted" style={clamp2}>
+                        {l.snippet}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span className="muted" style={{ fontSize: 11 }}>
+                        板上 {l.cited_by} 張卡片引用
+                      </span>
+                      <button
+                        type="button"
+                        disabled={adding.has(`l:${l.id}`)}
+                        onClick={() => void add(`l:${l.id}`, () => onAddLiterature(l.id))}
+                      >
+                        加入白板
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </details>
+        </>
+      )}
+    </div>
+  );
+}

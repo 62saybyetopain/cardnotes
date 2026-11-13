@@ -188,8 +188,11 @@ export default function App() {
   const refreshBoards = useCallback(async () => {
     try {
       const r = await api.listBoards();
-      setBoards(r.boards);
-      setBoardId((cur) => (cur && r.boards.some((b) => b.id === cur) ? cur : r.boards[0]?.id ?? null));
+      // 已封存的問題白板脫離路徑樹，不進白板清單（也就不會出現在「加到白板」的選單）；封存清單由左側欄自己查
+      const active = r.boards.filter((b) => !b.question?.archived_at);
+      setBoards(active);
+      // 退回的對象必須是一般白板：清單依名稱排序，第一塊可能是問題白板，不能把使用者丟進某個問題裡
+      setBoardId((cur) => (cur && active.some((b) => b.id === cur) ? cur : active.find((b) => !b.question)?.id ?? null));
     } catch (e) {
       report(e, "載入白板清單失敗");
     }
@@ -202,7 +205,7 @@ export default function App() {
       // boardId 來自閉包：覆蓋匯入／雲端拉取後舊白板已不存在，先對照目前清單；
       // 失效時退回查全部卡片（refreshBoards 會校正 boardId 並重新觸發本函式）
       const boardAlive =
-        !!boardId && !hasFilter && (await api.listBoards()).boards.some((b) => b.id === boardId);
+        !!boardId && !hasFilter && (await api.listBoards()).boards.some((b) => b.id === boardId && !b.question?.archived_at);
       if (boardId && boardAlive) {
         const b = await api.getBoard(boardId);
         const cardSummaries: CardSummary[] = b.cards.map((c) => ({
@@ -330,6 +333,14 @@ export default function App() {
     setPreviewCardId(id);
     setRightOpen(true);
     setTab("search");
+  }, []);
+
+  // 概念圖譜的白板小視窗點卡片：在右側欄「內容」分頁開啟（不進中央編輯、不切換視圖）
+  // @depends-on ./components/ConceptGraph.tsx (onPreviewCard)
+  const showCardInContent = useCallback((id: string) => {
+    setSelected(id);
+    setRightOpen(true);
+    setTab("content");
   }, []);
 
   const openCardInCenter = useCallback((id: string, options?: { smartPasteText?: string; findText?: string }) => {
@@ -738,6 +749,14 @@ export default function App() {
                 selectedCardId={selected}
                 active={!centerEditing && viewMode === "board"}
                 toolsSlot={toolsSlot}
+                boards={boards}
+                onSelectBoard={(id) => {
+                  setBoardId(id);
+                  setViewMode("board");
+                  setCenterEditing(false);
+                  setFilter({});
+                }}
+                onBoardsChanged={refreshBoards}
                 onSelectCard={selectCard}
                 onOpenCard={openCardInCenter}
                 onLinksChanged={bump}
@@ -749,6 +768,10 @@ export default function App() {
                 <ConceptGraph
                   selectedTagId={filter.tagId}
                   version={version}
+                  boards={boards}
+                  onBoardsChanged={refreshBoards}
+                  info={info}
+                  onPreviewCard={showCardInContent}
                   onSelectTag={(tagId) => {
                     setFilter({ tagId });
                     setRightOpen(true);
@@ -870,6 +893,7 @@ export default function App() {
             selectedCardId={selected}
             previewCardId={previewCardId}
             boardId={boardId}
+            boardCardCount={boards.find((b) => b.id === boardId)?.card_count}
             centerEditing={centerEditing}
             centerSaveTick={centerSaveTick}
             tags={tags}
@@ -883,7 +907,12 @@ export default function App() {
             onSelectCard={openCardInCenter}
             onPreviewCard={setPreviewCardId}
             onCreateCard={() => void createCard()}
-            onAddToBoard={(id) => void addToBoard(id)}
+            // 原因：void 會丟掉 Promise，推薦清單在加入完成前就重算；文獻在無白板畫布的視圖（如卡片冊）必須丟錯，BoardRecommend 才會 report，而不是默默失敗。
+            onAddToBoard={addToBoard}
+            onAddLiteratureToBoard={async (id) => {
+              if (!boardRef.current) throw new Error("目前視圖沒有白板畫布，無法加入文獻；請先切回白板畫布");
+              await boardRef.current.addLiterature(id);
+            }}
             onSaved={onSaved}
             onCardDeleted={onCardDeleted}
             onLinkAdded={onLinkAdded}

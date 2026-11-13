@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import type { ConceptGraphEdge, ConceptGraphNode } from "../types";
+import type { BoardData, BoardQuestionNode, BoardSummary, ConceptGraphEdge, ConceptGraphNode, QuestionRelationEdge, QuestionRelationType } from "../types";
+import { QUESTION_DIRECTED_RELATIONS, QUESTION_RELATION_LABELS, QUESTION_RELATION_TYPES } from "../types";
+import { Markdown } from "./Markdown";
 
 interface Props {
   selectedTagId?: string;
   version: number;
   onSelectTag(tagId: string): void;
   report(e: unknown, prefix?: string): void;
+  boards: BoardSummary[]; // 白板關聯網路圖用；已封存者在圖內自行排除
+  onBoardsChanged(): void | Promise<void>; // 以所選卡片建立白板後，讓白板清單更新
+  info(text: string): void;
+  onPreviewCard(id: string): void; // 白板小視窗點卡片：在右側欄「內容」分頁開啟（App.showCardInContent）
 }
 
 interface PositionedNode extends ConceptGraphNode {
@@ -234,8 +240,8 @@ function computeForceLayout(
   return pos;
 }
 
-export function ConceptGraph(props: Props) {
-  const { selectedTagId, version, onSelectTag, report } = props;
+function TagGraph(props: Omit<Props, "boards" | "onBoardsChanged" | "info" | "onPreviewCard"> & { onShowBoards(): void }) {
+  const { selectedTagId, version, onSelectTag, report, onShowBoards } = props;
   const [rawNodes, setRawNodes] = useState<ConceptGraphNode[]>([]);
   const [edges, setEdges] = useState<ConceptGraphEdge[]>([]);
   const [hiddenEdges, setHiddenEdges] = useState<ConceptGraphEdge[]>([]);
@@ -486,6 +492,9 @@ export function ConceptGraph(props: Props) {
         >
           重置視角
         </button>
+        <button onClick={onShowBoards} title="切換成白板之間的關聯網路圖">
+          白板關聯網路 ▸
+        </button>
       </div>
 
       <svg
@@ -676,6 +685,940 @@ export function ConceptGraph(props: Props) {
         <span>顏色：自動偵測的群落（灰色＝孤立）；大小：連線數；🌉 金色外環：橋樑詞</span>
         <span>·</span>
         <span>虛線：卡片共現關係（探索候選，不自動升格為正式語意連結）</span>
+      </div>
+    </div>
+  );
+}
+
+// 圖譜的兩種檢視：概念標籤共現圖／白板關聯網路圖。兩邊各自有根節點 .concept-graph，沿用同一套版面樣式
+export function ConceptGraph(props: Props) {
+  const { boards, onBoardsChanged, info, onPreviewCard, ...tagProps } = props;
+  const [mode, setMode] = useState<"tags" | "boards">("tags");
+  return mode === "tags" ? (
+    <TagGraph {...tagProps} onShowBoards={() => setMode("boards")} />
+  ) : (
+    <BoardRelationGraph
+      boards={boards}
+      version={props.version}
+      report={props.report}
+      onBoardsChanged={onBoardsChanged}
+      info={info}
+      onPreviewCard={onPreviewCard}
+      onShowTags={() => setMode("tags")}
+    />
+  );
+}
+
+// 白板關聯網路圖：節點＝所有未封存的白板；邊＝GET /question-relations（人工關聯，彩色）加上母子關係（細灰線，取自 boards 的 parent_board_id）；排版與群落偵測重用上面的 computeForceLayout。
+// @depends-on types.ts::BoardSummary.question.parent_board_id（母子線的來源；boards 必須已排除封存白板）
+// 有方向的類型畫箭頭（來源 → 目標＝board_a → board_b）；同一對白板的多筆關聯以弧線錯開。
+// @depends-on types.ts::QUESTION_RELATION_TYPES／QUESTION_DIRECTED_RELATIONS / api.listAllQuestionRelations / QuestionNavigator.tsx（同一份關聯資料的另一種呈現）
+// 用 Record 逼出完整性：新增關聯類型時，這裡不補顏色 tsc 會報錯
+const BOARD_REL_COLORS: Record<QuestionRelationType, string> = {
+  related: "#64748b",
+  analogy: "#0ea5e9",
+  extends: "#2f6fed",
+  supports: "#16a34a",
+  contradicts: "#e11d48",
+};
+
+// 白板小視窗：最多同時開幾個（再開新的就關掉最早開的）；卡片初始高度與可拖曳的最小高度（內文在卡片內捲動）
+const MAX_PEEKS = 3; // 也是視窗的格數（固定三格）
+const PEEK_CARD_H = 112; // 約露出 3 行內文（標題＋3 行＋拉條）；行數不對就調這個
+const PEEK_CARD_MIN_H = 64;
+const PEEK_WIN_MIN_H = 120;
+type Peek = { error: boolean; data: BoardData | null };
+type PickedCard = { boardId: string; cardId: string; title: string };
+// 連結模式的聯繫類型：五種人工關聯（值同 QuestionRelationType），或母子（把目標移到來源底下）
+type LinkKind = QuestionRelationType | "child";
+type ParentOpt = { id: string; name: string; depth: number; path: string };
+
+// 以所選卡片建立新問題白板：先選掛在哪一塊底下，再「建立白板」「逐張放入卡片」兩次呼叫（非單一交易）。
+// 放入中途失敗：白板與已放入的卡片會留下，錯誤訊息寫出白板名稱與張數；卡片只是參照，原白板上的卡片不動。
+// 候選順序：①與來源白板同層（掛在來源白板的母白板底下），由最靠近最上層者起；②其他白板，同樣由淺到深。
+// @depends-on api.createBoardQuestion／addToBoard／boardQuestionPage、types.ts::BoardSummary.question.parent_board_id
+// @depends-on boards.py::QUESTION_NEW_GAP／QUESTION_FIRST_POS、QuestionNavigator.tsx::addQuestion（新問題放在母畫布最右子問題右側；三處同一條規則，改時一起改）
+const NEW_NODE_GAP = 40;
+const NEW_NODE_FIRST = 80;
+const GRID_COLS = 3;
+const GRID_DX = 320;
+const GRID_DY = 260;
+const GRID_ORIGIN = 100;
+
+function NewBoardDialog(props: {
+  boards: BoardSummary[];
+  picked: PickedCard[];
+  report: Props["report"];
+  info: Props["info"];
+  onBoardsChanged: Props["onBoardsChanged"];
+  onClose(): void;
+  onDone(keepPicked: boolean): void;
+}) {
+  const { boards, picked, report, info, onBoardsChanged, onClose, onDone } = props;
+  const cards = useMemo(() => Array.from(new Map(picked.map((p) => [p.cardId, p] as const)).values()), [picked]);
+  const { same, others } = useMemo(() => {
+    const byId = new Map(boards.map((b) => [b.id, b]));
+    const parentOf = (id: string) => byId.get(id)?.question?.parent_board_id ?? null;
+    const chainOf = (id: string) => {
+      const out = [id];
+      for (let p = parentOf(id); p && !out.includes(p); p = parentOf(p)) out.push(p);
+      return out;
+    };
+    const opt = (id: string): ParentOpt => {
+      const c = chainOf(id);
+      return {
+        id,
+        name: byId.get(id)?.name ?? "",
+        depth: c.length,
+        path: c.slice(1).reverse().map((x) => byId.get(x)?.name ?? "").join(" / "),
+      };
+    };
+    const cmp = (a: ParentOpt, b: ParentOpt) => a.depth - b.depth || a.name.localeCompare(b.name);
+    const via = new Map<string, string[]>();
+    for (const sid of new Set(picked.map((p) => p.boardId))) {
+      const pid = parentOf(sid);
+      if (pid && byId.has(pid)) via.set(pid, [...(via.get(pid) ?? []), byId.get(sid)?.name ?? ""]);
+    }
+    const same = Array.from(via.keys())
+      .map((id) => ({ ...opt(id), via: via.get(id) ?? [] }))
+      .sort(cmp);
+    const sameIds = new Set(same.map((s) => s.id));
+    return { same, others: boards.filter((b) => !sameIds.has(b.id)).map((b) => opt(b.id)).sort(cmp) };
+  }, [boards, picked]);
+
+  const [name, setName] = useState(() => (cards[0]?.title ?? "").trim().slice(0, 200));
+  const [parentId, setParentId] = useState<string | null>(() => same[0]?.id ?? null);
+  const [q, setQ] = useState("");
+  const [busy, setBusy] = useState(false);
+  const kw = q.trim().toLowerCase();
+  const shown = kw ? others.filter((o) => o.name.toLowerCase().includes(kw)) : others;
+
+  const create = async () => {
+    const title = name.trim();
+    if (!parentId || !title || busy) return;
+    setBusy(true);
+    let created: BoardSummary | null = null;
+    let done = 0;
+    try {
+      const kids: BoardQuestionNode[] = (await api.boardQuestionPage(parentId)).children;
+      const last = kids.reduce<BoardQuestionNode | null>((m, c) => (!m || c.x + c.w > m.x + m.w ? c : m), null);
+      created = await api.createBoardQuestion(parentId, {
+        name: title,
+        x: last ? last.x + last.w + NEW_NODE_GAP : NEW_NODE_FIRST,
+        y: last ? last.y : NEW_NODE_FIRST,
+      });
+      for (const [i, c] of cards.entries()) {
+        await api.addToBoard(created.id, c.cardId, GRID_ORIGIN + (i % GRID_COLS) * GRID_DX, GRID_ORIGIN + Math.floor(i / GRID_COLS) * GRID_DY);
+        done++;
+      }
+      info(`已建立白板「${title}」，放入 ${done} 張卡片`);
+      void onBoardsChanged();
+      onDone(false);
+    } catch (e) {
+      if (created) {
+        void onBoardsChanged(); // 白板已經存在，清單要跟上
+        report(e, `白板「${title}」已建立，但只放入 ${done}/${cards.length} 張卡片；請到該白板補上卡片，或把它刪掉：`);
+        onDone(true);
+      } else {
+        report(e, "建立白板失敗，沒有建立任何東西：");
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const row = (o: ParentOpt, note = "") => (
+    <label key={o.id} style={{ display: "flex", gap: 6, alignItems: "baseline", padding: "2px 4px" }}>
+      <input type="radio" name="new-board-parent" checked={parentId === o.id} onChange={() => setParentId(o.id)} />
+      <span>
+        {o.name}
+        {note}
+      </span>
+      {o.path && (
+        <span className="muted" style={{ fontSize: 11 }}>
+          {o.path}
+        </span>
+      )}
+    </label>
+  );
+
+  return (
+    <div className="modal" role="dialog" aria-label="以所選卡片建立白板">
+      <div className="modal-card" style={{ minWidth: 420, maxWidth: 520 }}>
+        <h4>以 {cards.length} 張卡片建立新白板</h4>
+        <div className="muted" style={{ fontSize: 12, margin: "4px 0 8px" }}>
+          {cards.slice(0, 5).map((c) => c.title || "（無標題）").join("、")}
+          {cards.length > 5 ? ` …等 ${cards.length} 張` : ""}。卡片只是放進新白板的參照，原白板上的卡片不會被移除。
+        </div>
+        <label className="field-row">
+          <span className="muted">白板名稱：</span>
+          <input value={name} maxLength={200} onChange={(e) => setName(e.target.value)} autoFocus />
+        </label>
+        <div className="muted" style={{ fontSize: 12, margin: "8px 0 4px" }}>
+          新白板掛在哪一塊底下：
+        </div>
+        <div style={{ maxHeight: 280, overflow: "auto", display: "flex", flexDirection: "column", gap: 2 }}>
+          <div className="muted" style={{ fontSize: 11 }}>
+            與來源白板同層（由最上層起）
+          </div>
+          {same.length === 0 && (
+            <div className="muted" style={{ fontSize: 12 }}>
+              來源白板沒有母白板（最上層白板），請從下方選一塊白板放在它底下
+            </div>
+          )}
+          {same.map((o) => row(o, ` ·與「${o.via.join("、")}」同層`))}
+          <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+            其他白板（{others.length}）
+          </div>
+          <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜尋白板名稱" aria-label="搜尋其他白板" style={{ fontSize: 12 }} />
+          {shown.map((o) => row(o))}
+        </div>
+        <div className="modal-actions" style={{ justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+          <button type="button" onClick={onClose} disabled={busy}>
+            取消
+          </button>
+          <button type="button" className="primary" disabled={busy || !parentId || !name.trim()} onClick={() => void create()}>
+            建立白板
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BoardRelationGraph(props: {
+  boards: BoardSummary[];
+  version: number;
+  report: Props["report"];
+  onBoardsChanged: Props["onBoardsChanged"];
+  info: Props["info"];
+  onPreviewCard: Props["onPreviewCard"];
+  onShowTags(): void;
+}) {
+  const { boards, version, report, onBoardsChanged, info, onPreviewCard, onShowTags } = props;
+  const reportRef = useRef(report);
+  reportRef.current = report;
+  const [rels, setRels] = useState<QuestionRelationEdge[] | null>([]); // null＝載入失敗（錯誤已報，畫面標示失敗而不是「沒有關聯」）
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [pan, setPan] = useState({ x: 0, y: 0, zoom: 1 });
+  const svgRef = useRef<SVGSVGElement>(null);
+  const dragState = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+
+  // 點白板節點開小視窗看它的卡片；展開的卡片鍵＝`${白板id}:${卡片id}`
+  const [openIds, setOpenIds] = useState<string[]>([]);
+  const [peeks, setPeeks] = useState<Record<string, Peek>>({});
+  // 卡片高度（鍵同 picked＝`${白板id}:${卡片id}`），沒有紀錄就用初始高度；只存在這次開啟的圖譜裡
+  const [heights, setHeights] = useState<Record<string, number>>({});
+  const [activeKey, setActiveKey] = useState<string | null>(null); // 最後一次點來預覽的卡片
+  const startResize = (e: React.PointerEvent, key: string, startH: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const y0 = e.clientY;
+    const move = (ev: PointerEvent) => {
+      const h = Math.max(PEEK_CARD_MIN_H, Math.round(startH + ev.clientY - y0));
+      setHeights((m) => (m[key] === h ? m : { ...m, [key]: h }));
+    };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  };
+  // 跨視窗選取的卡片（鍵同 expanded＝`${白板id}:${卡片id}`）；標題在選取當下留存，視窗被擠掉或內容重載後仍能列出
+  const [picked, setPicked] = useState<Record<string, PickedCard>>({});
+  const [creating, setCreating] = useState(false);
+  const pickedList = Object.values(picked);
+  // ---- 連結模式：在圖上建立任意白板之間的關聯或母子關係；linkSel[0]＝來源，其餘＝目標（星狀）----
+  // @depends-on api.createQuestionRelationsBatch／moveBoardQuestion／createBoard（後端判定為準：封存、環、一般白板不能移動）
+  const [linkMode, setLinkMode] = useState(false);
+  const [linkSel, setLinkSel] = useState<string[]>([]);
+  const [linkKind, setLinkKind] = useState<LinkKind>("related");
+  const [linkBusy, setLinkBusy] = useState(false);
+  const [relTick, setRelTick] = useState(0); // 建立關聯後遞增，讓下面載入關聯的 effect 重抓
+  const togglePick = (boardId: string, cardId: string, title: string) =>
+    setPicked((m) => {
+      const key = `${boardId}:${cardId}`;
+      if (key in m) {
+        const n = { ...m };
+        delete n[key];
+        return n;
+      }
+      return { ...m, [key]: { boardId, cardId, title } };
+    });
+  const openRef = useRef(openIds);
+  openRef.current = openIds;
+
+  const loadPeek = useCallback((id: string) => {
+    setPeeks((m) => ({ ...m, [id]: { error: false, data: m[id]?.data ?? null } }));
+    api.getBoard(id).then(
+      (data) => setPeeks((m) => ({ ...m, [id]: { error: false, data } })),
+      (e) => {
+        // 失敗時保留舊內容並標示，不顯示成「沒有卡片」
+        setPeeks((m) => ({ ...m, [id]: { error: true, data: m[id]?.data ?? null } }));
+        reportRef.current(e, "載入白板內容失敗：");
+      },
+    );
+  }, []);
+  // 別處改了卡片（version 變動）時，已開的視窗重新讀取，免得顯示舊內容
+  useEffect(() => {
+    openRef.current.forEach((id) => loadPeek(id));
+  }, [version, loadPeek]);
+
+  // 固定三格：slotOf＝視窗所在的格（0＝最左）；openIds 仍是開啟順序，三格都滿時換掉最早開的並接手它的格
+  const [slotOf, setSlotOf] = useState<Record<string, number>>({});
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [winH, setWinH] = useState<Record<string, number>>({}); // 使用者調整過的視窗高度；沒有紀錄＝隨內容、不超過畫布
+  const openPeek = (id: string) => {
+    if (openIds.includes(id)) return;
+    const evicted = openIds.length >= MAX_PEEKS ? openIds[0] : null;
+    const free =
+      evicted !== null
+        ? slotOf[evicted]
+        : Array.from({ length: MAX_PEEKS }, (_, i) => i).find((s) => !openIds.some((o) => slotOf[o] === s));
+    if (free === undefined) {
+      report(new Error("找不到空的視窗格，視窗狀態不一致"), "開啟白板視窗失敗：");
+      return;
+    }
+    setOpenIds([...openIds.filter((o) => o !== evicted), id]);
+    setSlotOf((m) => {
+      const n = { ...m, [id]: free };
+      if (evicted !== null) delete n[evicted];
+      return n;
+    });
+    loadPeek(id);
+  };
+  const closePeek = (id: string) => {
+    setOpenIds((ids) => ids.filter((x) => x !== id));
+    setSlotOf((m) => {
+      const n = { ...m };
+      delete n[id];
+      return n;
+    });
+  };
+  // 移到空格＝換格；移到有視窗的格＝兩者對調
+  const moveToSlot = (id: string, slot: number) => {
+    const from = slotOf[id];
+    if (from === undefined || from === slot) return;
+    const occupant = openIds.find((o) => slotOf[o] === slot);
+    setSlotOf((m) => {
+      const n = { ...m, [id]: slot };
+      if (occupant) n[occupant] = from;
+      return n;
+    });
+  };
+  const startWinResize = (e: React.PointerEvent, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startH = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect().height;
+    const y0 = e.clientY;
+    const move = (ev: PointerEvent) => {
+      const h = Math.max(PEEK_WIN_MIN_H, Math.round(startH + ev.clientY - y0));
+      setWinH((m) => (m[id] === h ? m : { ...m, [id]: h }));
+    };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  };
+
+
+  useEffect(() => {
+    let cancelled = false;
+    api.listAllQuestionRelations().then(
+      (r) => {
+        if (!cancelled) setRels(r.relations);
+      },
+      (e) => {
+        if (cancelled) return;
+        setRels(null);
+        reportRef.current(e, "載入白板關聯失敗：");
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [boards, version, relTick]);
+
+  const usable = useMemo(() => boards.filter((b) => !b.question?.archived_at), [boards]);
+  const byId = useMemo(() => new Map(usable.map((b) => [b.id, b])), [usable]);
+  const drawn = useMemo(() => (rels ?? []).filter((r) => byId.has(r.board_a) && byId.has(r.board_b)), [rels, byId]);
+  const degree = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of drawn) {
+      m.set(r.board_a, (m.get(r.board_a) ?? 0) + 1);
+      m.set(r.board_b, (m.get(r.board_b) ?? 0) + 1);
+    }
+    return m;
+  }, [drawn]);
+
+  // 母子關係：母白板也在未封存清單裡才畫（封存白板的後代也都已封存，正常不會漏）
+  const tree = useMemo(() => {
+    const out: { parent: string; child: string }[] = [];
+    for (const b of usable) {
+      const p = b.question?.parent_board_id;
+      if (p && byId.has(p)) out.push({ parent: p, child: b.id });
+    }
+    return out;
+  }, [usable, byId]);
+  // 節點大小＝人工關聯數＋母子連線數；degree（只算人工關聯）仍用在提示文字
+  const sizeDeg = useMemo(() => {
+    const m = new Map(degree);
+    for (const t of tree) {
+      m.set(t.parent, (m.get(t.parent) ?? 0) + 1);
+      m.set(t.child, (m.get(t.child) ?? 0) + 1);
+    }
+    return m;
+  }, [degree, tree]);
+
+  const layout = useMemo(() => {
+    const nodes = usable.map((b): ConceptGraphNode => ({ id: b.id, name: b.name, axis: "free", parent_id: null, card_count: b.card_count }));
+    const edges: ConceptGraphEdge[] = [
+      ...drawn.map((r) => ({ source_id: r.board_a, target_id: r.board_b, co_count: 1, jaccard: 1 })),
+      ...tree.map((t) => ({ source_id: t.parent, target_id: t.child, co_count: 1, jaccard: 1 })),
+    ];
+    return computeForceLayout(nodes, edges, sizeDeg);
+  }, [usable, drawn, tree, sizeDeg]);
+  const nodeMap = useMemo(() => new Map(layout.map((n) => [n.id, n])), [layout]);
+
+  // 母子線：兩端退到節點外緣，不穿過半透明的圓
+  const treeLines = useMemo(
+    () =>
+      tree.flatMap((t) => {
+        const p = nodeMap.get(t.parent);
+        const c = nodeMap.get(t.child);
+        if (!p || !c) return [];
+        const dx = c.x - p.x;
+        const dy = c.y - p.y;
+        const len = Math.max(1, Math.hypot(dx, dy));
+        return [
+          {
+            key: `${t.parent}>${t.child}`,
+            parent: t.parent,
+            child: t.child,
+            x1: p.x + (dx / len) * p.r,
+            y1: p.y + (dy / len) * p.r,
+            x2: c.x - (dx / len) * c.r,
+            y2: c.y - (dy / len) * c.r,
+          },
+        ];
+      }),
+    [tree, nodeMap],
+  );
+
+  const fit = useMemo(() => {
+    if (layout.length === 0) return { zoom: 1, cx: 0, cy: 0 };
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const n of layout) {
+      minX = Math.min(minX, n.x - n.r - 60);
+      maxX = Math.max(maxX, n.x + n.r + 60);
+      minY = Math.min(minY, n.y - n.r);
+      maxY = Math.max(maxY, n.y + n.r + 36);
+    }
+    const zoom = Math.min(1.2, 880 / (maxX - minX), 620 / (maxY - minY));
+    return { zoom, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+  }, [layout]);
+
+  // 每筆關聯一條曲線：同一對白板的多筆以固定的法線方向錯開（不隨關聯方向翻轉），線尾退到目標節點外緣讓箭頭看得見
+  const shapes = useMemo(() => {
+    const groups = new Map<string, QuestionRelationEdge[]>();
+    for (const r of drawn) {
+      const key = r.board_a < r.board_b ? `${r.board_a}|${r.board_b}` : `${r.board_b}|${r.board_a}`;
+      groups.set(key, [...(groups.get(key) ?? []), r]);
+    }
+    const out: { r: QuestionRelationEdge; d: string; mx: number; my: number }[] = [];
+    groups.forEach((list, key) => {
+      const [lo, hi] = key.split("|");
+      const p = nodeMap.get(lo);
+      const q = nodeMap.get(hi);
+      if (!p || !q) return;
+      const len = Math.max(1, Math.hypot(q.x - p.x, q.y - p.y));
+      const nx = -(q.y - p.y) / len;
+      const ny = (q.x - p.x) / len;
+      list.forEach((r, k) => {
+        const off = (k - (list.length - 1) / 2) * 18;
+        const a = r.board_a === lo ? p : q;
+        const b = r.board_a === lo ? q : p;
+        const cx = (p.x + q.x) / 2 + nx * off * 2;
+        const cy = (p.y + q.y) / 2 + ny * off * 2;
+        const dx = b.x - cx;
+        const dy = b.y - cy;
+        const dl = Math.max(1, Math.hypot(dx, dy));
+        const ex = b.x - (dx / dl) * (b.r + 3);
+        const ey = b.y - (dy / dl) * (b.r + 3);
+        out.push({ r, d: `M ${a.x} ${a.y} Q ${cx} ${cy} ${ex} ${ey}`, mx: 0.25 * a.x + 0.5 * cx + 0.25 * ex, my: 0.25 * a.y + 0.5 * cy + 0.25 * ey });
+      });
+    });
+    return out;
+  }, [drawn, nodeMap]);
+
+  const connected = useMemo(() => {
+    if (!hoveredId) return null;
+    const s = new Set<string>([hoveredId]);
+    for (const r of drawn) {
+      if (r.board_a === hoveredId) s.add(r.board_b);
+      if (r.board_b === hoveredId) s.add(r.board_a);
+    }
+    for (const t of tree) {
+      if (t.parent === hoveredId) s.add(t.child);
+      if (t.child === hoveredId) s.add(t.parent);
+    }
+    return s;
+  }, [drawn, tree, hoveredId]);
+  const nameOf = (id: string) => byId.get(id)?.name ?? "";
+
+  const toggleLinkMode = () => {
+    setLinkMode((v) => !v);
+    setLinkSel([]);
+  };
+  // 第一次點＝來源；之後點＝加入／移除目標；只剩來源時再點它＝清除
+  const pickLink = (id: string) =>
+    setLinkSel((s) => (s.length === 0 ? [id] : s[0] === id ? (s.length === 1 ? [] : s) : s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+
+  const createLinks = async () => {
+    if (linkBusy || linkSel.length < 2) return;
+    const [src, ...targets] = linkSel;
+    setLinkBusy(true);
+    try {
+      if (linkKind === "child") {
+        // 逐一移動，各自獨立、重送安全；失敗的留在選取裡，可修正後重試。不是單一交易
+        let moved = 0;
+        let already = 0;
+        const failedIds: string[] = [];
+        const failedMsgs: string[] = [];
+        for (const tid of targets) {
+          try {
+            const r = await api.moveBoardQuestion(tid, src);
+            if (r.moved) moved++;
+            else already++;
+          } catch (e) {
+            failedIds.push(tid);
+            failedMsgs.push(`「${nameOf(tid)}」：${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        await onBoardsChanged();
+        if (failedIds.length > 0) {
+          report(new Error(failedMsgs.join("\n")), `已移動 ${moved}/${targets.length} 塊到「${nameOf(src)}」底下，以下失敗：`);
+          setLinkSel([src, ...failedIds]);
+        } else {
+          info(`已把 ${moved} 塊白板移到「${nameOf(src)}」底下${already > 0 ? `，${already} 塊原本就在` : ""}`);
+          setLinkSel([src]);
+        }
+      } else {
+        // 單一交易：任何一個目標被拒絕就一筆都不寫，選取保留
+        const r = await api.createQuestionRelationsBatch({ source_board_id: src, target_board_ids: targets, relation_type: linkKind });
+        const fresh = r.results.filter((x) => !x.existed).length;
+        const dup = r.results.length - fresh;
+        info(`已建立 ${fresh} 筆關聯${dup > 0 ? `，${dup} 筆原本就有` : ""}`);
+        setLinkSel([src]);
+        setRelTick((n) => n + 1);
+      }
+    } catch (e) {
+      report(e, "建立聯繫失敗：");
+    } finally {
+      setLinkBusy(false);
+    }
+  };
+
+  // 新母白板＝最上層的一般白板（沒有問題列）。建立後直接進入連結模式，以它為來源、預設母子，方便接著把白板掛上去
+  const createParentBoard = async () => {
+    if (linkBusy) return;
+    const name = window.prompt("新母白板（最上層白板）的名稱")?.trim();
+    if (!name) return;
+    setLinkBusy(true);
+    try {
+      const b = await api.createBoard(name);
+      await onBoardsChanged();
+      setLinkMode(true);
+      setLinkKind("child");
+      setLinkSel([b.id]);
+      info(`已建立母白板「${name}」；點其他白板加入目標，再按「移動」即可掛到它底下`);
+    } catch (e) {
+      report(e, "建立母白板失敗：");
+    } finally {
+      setLinkBusy(false);
+    }
+  };
+
+  return (
+    <div className="concept-graph" role="region" aria-label="白板關聯網路圖">
+      <div className="graph-controls">
+        <button onClick={onShowTags} title="切換回概念標籤的共現圖">
+          ◂ 概念標籤圖
+        </button>
+        <button onClick={() => setPan({ x: 0, y: 0, zoom: 1 })} title="重設圖譜視角">
+          重置視角
+        </button>
+        <button onClick={() => void createParentBoard()} disabled={linkBusy} title="建立一塊新的最上層白板（母白板）">
+          ＋ 新增母白板
+        </button>
+        <button
+          aria-pressed={linkMode}
+          onClick={toggleLinkMode}
+          style={linkMode ? { borderColor: "var(--accent)" } : undefined}
+          title="開啟後單擊白板＝選取（第一塊為來源），可建立關聯或把白板掛到來源底下；關閉才是開小視窗"
+        >
+          連結模式
+        </button>
+        {pickedList.length > 0 && (
+          <>
+            <span role="status">已選 {pickedList.length} 張卡片</span>
+            <button className="primary" onClick={() => setCreating(true)} title="以所選卡片建立新白板（卡片只是放入參照，不會從原白板移除）">
+              以所選卡片建立白板…
+            </button>
+            <button onClick={() => setPicked({})}>清除選取</button>
+          </>
+        )}
+      </div>
+
+      <svg
+        ref={svgRef}
+        className="graph-svg"
+        viewBox="-480 -340 960 680"
+        onWheel={(e) => {
+          e.preventDefault();
+          const factor = e.deltaY < 0 ? 1.12 : 0.9;
+          setPan((p) => ({ ...p, zoom: Math.min(2.8, Math.max(0.25, Number((p.zoom * factor).toFixed(3)))) }));
+        }}
+        onPointerDown={(e) => {
+          if (e.target === svgRef.current) {
+            dragState.current = { startX: e.clientX, startY: e.clientY, origX: pan.x, origY: pan.y };
+          }
+        }}
+        onPointerMove={(e) => {
+          const st = dragState.current;
+          if (st) setPan((p) => ({ ...p, x: st.origX + (e.clientX - st.startX), y: st.origY + (e.clientY - st.startY) }));
+        }}
+        onPointerUp={() => {
+          dragState.current = null;
+        }}
+      >
+        <defs>
+          {QUESTION_RELATION_TYPES.filter((t) => QUESTION_DIRECTED_RELATIONS.has(t)).map((t) => (
+            <marker key={t} id={`bg-arrow-${t}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill={BOARD_REL_COLORS[t]} />
+            </marker>
+          ))}
+        </defs>
+        <g transform={`translate(${pan.x}, ${pan.y}) scale(${pan.zoom * fit.zoom}) translate(${-fit.cx}, ${-fit.cy})`}>
+          {treeLines.map((l) => {
+            const hi = hoveredId !== null && (l.parent === hoveredId || l.child === hoveredId);
+            const dim = hoveredId !== null && !hi;
+            return (
+              <line
+                key={l.key}
+                x1={l.x1}
+                y1={l.y1}
+                x2={l.x2}
+                y2={l.y2}
+                stroke="var(--muted)"
+                strokeWidth={hi ? 2 : 1.2}
+                opacity={dim ? 0.1 : hi ? 0.9 : 0.45}
+              />
+            );
+          })}
+
+          {shapes.map(({ r, d, mx, my }) => {
+            const hi = hoveredId !== null && (r.board_a === hoveredId || r.board_b === hoveredId);
+            const dim = hoveredId !== null && !hi;
+            const directed = QUESTION_DIRECTED_RELATIONS.has(r.relation_type);
+            const label = QUESTION_RELATION_LABELS[r.relation_type];
+            return (
+              <g key={r.id} opacity={dim ? 0.14 : 0.9}>
+                <path
+                  d={d}
+                  fill="none"
+                  stroke={BOARD_REL_COLORS[r.relation_type]}
+                  strokeWidth={hi ? 2.8 : 1.8}
+                  markerEnd={directed ? `url(#bg-arrow-${r.relation_type})` : undefined}
+                />
+                <title>{`${nameOf(r.board_a)} ${label}${directed ? " →" : "（無方向）"} ${nameOf(r.board_b)}`}</title>
+                {hi && (
+                  <text
+                    x={mx}
+                    y={my}
+                    textAnchor="middle"
+                    fontSize="11"
+                    fontWeight={600}
+                    fill="var(--text)"
+                    style={{ pointerEvents: "none", paintOrder: "stroke", stroke: "var(--bg)", strokeWidth: 3, strokeLinejoin: "round" }}
+                  >
+                    {label}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+
+          {layout.map((node) => {
+            const color = colorForNode(node);
+            const isDimmed = connected !== null && !connected.has(node.id);
+            return (
+              <g
+                key={node.id}
+                className="graph-node"
+                transform={`translate(${node.x}, ${node.y})`}
+                opacity={isDimmed ? 0.22 : 1}
+                onPointerEnter={() => setHoveredId(node.id)}
+                onPointerLeave={() => setHoveredId((cur) => (cur === node.id ? null : cur))}
+              >
+                <circle
+                  r={node.r}
+                  fill={color}
+                  fillOpacity={0.6}
+                  stroke={linkSel.includes(node.id) || openIds.includes(node.id) ? "var(--accent)" : color}
+                  strokeWidth={linkSel[0] === node.id ? 5 : linkSel.includes(node.id) || openIds.includes(node.id) ? 3 : 2}
+                  strokeDasharray={linkSel.slice(1).includes(node.id) ? "4 3" : undefined}
+                  onClick={() => (linkMode ? pickLink(node.id) : openPeek(node.id))}
+                />
+                <text
+                  textAnchor="middle"
+                  y={node.r + 14}
+                  fontSize="12"
+                  fontWeight={600}
+                  fill="var(--text)"
+                  style={{ pointerEvents: "none", userSelect: "none", paintOrder: "stroke", stroke: "var(--bg)", strokeWidth: 3, strokeLinejoin: "round" }}
+                >
+                  {node.name}
+                </text>
+                <title>{`${node.name}（${node.card_count} 張卡片、${degree.get(node.id) ?? 0} 筆關聯）`}</title>
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+
+      {openIds.length > 0 && (
+        <div
+          className="bg-peeks"
+          style={{ position: "absolute", top: 48, left: 10, right: 10, bottom: 10, display: "grid", gridTemplateColumns: `repeat(${MAX_PEEKS}, minmax(0, 300px))`, gridTemplateRows: "minmax(0, 1fr)", justifyContent: "end", columnGap: 8, zIndex: 5, pointerEvents: "none" }}
+        >
+          {/* 拖曳視窗時才出現的三個落點；先於視窗渲染，所以空格與有視窗的格都能放 */}
+          {dragId !== null &&
+            Array.from({ length: MAX_PEEKS }, (_, i) => (
+              <div
+                key={`slot-${i}`}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  moveToSlot(dragId, i);
+                  setDragId(null);
+                }}
+                style={{ gridColumn: i + 1, gridRow: 1, pointerEvents: "auto", border: "2px dashed var(--accent)", borderRadius: 10, background: "rgba(96,165,250,0.08)" }}
+              />
+            ))}
+          {openIds.map((id) => {
+            const pk = peeks[id];
+            const data = pk?.data ?? null;
+            const notes = data?.notes?.length ?? 0;
+            const lits = data?.literatures?.length ?? 0;
+            return (
+              <section
+                key={id}
+                role="dialog"
+                aria-label={`白板「${nameOf(id)}」的卡片`}
+                onDragOver={(e) => {
+                  if (dragId === null) return; // 只接受「移動視窗」的拖曳，不吃反白文字的拖曳
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                }}
+                onDrop={(e) => {
+                  if (dragId === null) return;
+                  e.preventDefault();
+                  moveToSlot(dragId, slotOf[id] ?? 0);
+                  setDragId(null);
+                }}
+                style={{ pointerEvents: "auto", gridColumn: (slotOf[id] ?? 0) + 1, gridRow: 1, alignSelf: "flex-start", minWidth: 0, minHeight: 0, height: winH[id], maxHeight: "100%", display: "flex", flexDirection: "column", background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 10, boxShadow: "0 6px 24px rgba(0,0,0,0.35)", fontSize: 12, color: "var(--text)" }}
+              >
+                <header
+                  draggable
+                  onDragStart={(e) => {
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("text/plain", id); // Firefox 沒有資料就不會開始拖曳
+                    setDragId(id);
+                  }}
+                  onDragEnd={() => setDragId(null)}
+                  title="拖曳標題列可移到其他格"
+                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderBottom: "1px solid var(--line)", cursor: "grab" }}
+                >
+                  <strong style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={nameOf(id)}>
+                    {nameOf(id)}
+                  </strong>
+                  <span style={{ color: "var(--muted)" }}>{data ? `${data.cards.length} 張卡片` : ""}</span>
+                  <button onClick={() => closePeek(id)} aria-label={`關閉「${nameOf(id)}」`}>
+                    ✕
+                  </button>
+                </header>
+                <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                  {pk?.error && <div style={{ color: "var(--muted)" }}>載入失敗{data ? "（顯示的是舊內容）" : ""}</div>}
+                  {!data && !pk?.error && <div style={{ color: "var(--muted)" }}>載入中…</div>}
+                  {data && data.cards.length === 0 && <div style={{ color: "var(--muted)" }}>這塊白板上沒有卡片</div>}
+                  {data?.cards.map((c) => {
+                    const key = `${id}:${c.card_id}`;
+                    const h = heights[key] ?? PEEK_CARD_H;
+                    const active = activeKey === key;
+                    return (
+                      <div key={c.card_id} style={{ display: "flex", gap: 6, alignItems: "flex-start", flexShrink: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={key in picked}
+                        onChange={() => togglePick(id, c.card_id, c.title)}
+                        aria-label={`選取卡片「${c.title || "（無標題）"}」`}
+                        title="選取後可跨視窗合併成新白板"
+                        style={{ marginTop: 9, flexShrink: 0 }}
+                      />
+                      <div
+                        role="region"
+                        aria-label={c.title || "（無標題）"}
+                        title="單擊在右側欄「內容」分頁開啟；可直接反白複製內文"
+                        onClick={(e) => {
+                          if ((window.getSelection()?.toString() ?? "").length > 0) return; // 正在反白內文，不當成點擊
+                          if ((e.target as HTMLElement).closest("a, button")) return; // 內文裡的連結自己處理
+                          setActiveKey(key);
+                          onPreviewCard(c.card_id);
+                        }}
+                        style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, height: h, flexShrink: 0, boxSizing: "border-box", overflow: "hidden", border: active ? "2px solid var(--accent)" : "1px solid var(--line)", borderRadius: 8, cursor: "pointer" }}
+                      >
+                        <div style={{ flexShrink: 0, padding: "6px 8px 2px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {c.title || "（無標題）"}
+                        </div>
+                        <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "0 8px 6px", wordBreak: "break-word" }}>
+                          {c.body.trim() === "" ? <span style={{ color: "var(--muted)" }}>（無內文）</span> : <Markdown source={c.body} />}
+                        </div>
+                        <div
+                          onPointerDown={(e) => startResize(e, key, h)}
+                          title="按住拖曳調整卡片高度"
+                          aria-label="調整卡片高度"
+                          style={{ flexShrink: 0, height: 12, display: "flex", alignItems: "center", justifyContent: "center", cursor: "ns-resize", touchAction: "none" }}
+                        >
+                          <span style={{ width: 32, height: 3, borderRadius: 2, background: "var(--line)" }} />
+                        </div>
+                      </div>
+                      </div>
+                    );
+                  })}
+                  {data && notes + lits > 0 && (
+                    <div style={{ color: "var(--muted)" }}>
+                      另有 {notes} 則靈感、{lits} 篇文獻（此視窗只列卡片）
+                    </div>
+                  )}
+                </div>
+                <div
+                  onPointerDown={(e) => startWinResize(e, id)}
+                  title="按住拖曳調整視窗高度"
+                  aria-label="調整視窗高度"
+                  style={{ flexShrink: 0, height: 12, display: "flex", alignItems: "center", justifyContent: "center", cursor: "ns-resize", touchAction: "none", borderTop: "1px solid var(--line)" }}
+                >
+                  <span style={{ width: 32, height: 3, borderRadius: 2, background: "var(--line)" }} />
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      )}
+      {linkMode && (
+        <div
+          role="region"
+          aria-label="建立白板聯繫"
+          style={{ position: "absolute", top: 48, left: 10, width: 260, zIndex: 6, display: "flex", flexDirection: "column", gap: 8, padding: 10, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 10, boxShadow: "0 6px 24px rgba(0,0,0,0.35)", fontSize: 12, color: "var(--text)" }}
+        >
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }} role="group" aria-label="聯繫類型">
+            {QUESTION_RELATION_TYPES.map((k) => (
+              <button key={k} type="button" aria-pressed={linkKind === k} onClick={() => setLinkKind(k)} style={linkKind === k ? { borderColor: "var(--accent)" } : undefined}>
+                {QUESTION_RELATION_LABELS[k]}
+              </button>
+            ))}
+            <button type="button" aria-pressed={linkKind === "child"} onClick={() => setLinkKind("child")} style={linkKind === "child" ? { borderColor: "var(--accent)" } : undefined} title="把目標白板（連同子孫）移到來源底下">
+              母子（掛到來源底下）
+            </button>
+          </div>
+          <div>
+            {linkSel.length === 0 ? (
+              <span style={{ color: "var(--muted)" }}>點一塊白板當來源</span>
+            ) : (
+              <>
+                <strong>{nameOf(linkSel[0]) || "（新白板）"}</strong>{" "}
+                {linkKind === "child"
+                  ? "→ 目標會移到它底下"
+                  : QUESTION_DIRECTED_RELATIONS.has(linkKind)
+                    ? `${QUESTION_RELATION_LABELS[linkKind]} →`
+                    : `${QUESTION_RELATION_LABELS[linkKind]}（無方向）`}
+              </>
+            )}
+          </div>
+          <div>
+            {linkSel.slice(1).map((id) => (
+              <span key={id} style={{ display: "inline-flex", alignItems: "center", gap: 4, border: "1px dashed var(--accent)", borderRadius: 999, padding: "1px 4px 1px 10px", margin: "0 4px 4px 0" }}>
+                {nameOf(id) || "（未知）"}
+                <button type="button" aria-label={`移除目標「${nameOf(id)}」`} onClick={() => pickLink(id)} style={{ background: "transparent", border: 0, color: "var(--text)", cursor: "pointer" }}>
+                  ✕
+                </button>
+              </span>
+            ))}
+            {linkSel.length === 1 && <span style={{ color: "var(--muted)" }}>再點其他白板加入目標</span>}
+          </div>
+          {linkKind === "child" && (
+            <div style={{ color: "var(--muted)" }}>只有問題白板能被移動；最上層的一般白板不能當目標。移動後會放在來源畫布最右邊的子問題右側。</div>
+          )}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {linkKind !== "child" && QUESTION_DIRECTED_RELATIONS.has(linkKind) && linkSel.length === 2 && (
+              <button type="button" onClick={() => setLinkSel([linkSel[1], linkSel[0]])} title="對調來源與目標">
+                ⇄ 對調方向
+              </button>
+            )}
+            <button type="button" className="primary" disabled={linkBusy || linkSel.length < 2} onClick={() => void createLinks()}>
+              {linkKind === "child" ? `移動 ${Math.max(0, linkSel.length - 1)} 塊` : `建立 ${Math.max(0, linkSel.length - 1)} 筆`}
+            </button>
+            <button type="button" disabled={linkBusy || linkSel.length === 0} onClick={() => setLinkSel([])}>
+              清除
+            </button>
+          </div>
+        </div>
+      )}
+      {creating && (
+        <NewBoardDialog
+          boards={usable}
+          picked={pickedList}
+          report={report}
+          info={info}
+          onBoardsChanged={onBoardsChanged}
+          onClose={() => setCreating(false)}
+          onDone={(keepPicked) => {
+            setCreating(false);
+            if (!keepPicked) setPicked({});
+          }}
+        />
+      )}
+      {rels === null ? (
+        <div className="board-hint">載入白板關聯失敗</div>
+      ) : (
+        layout.length === 0 && (
+          <div className="board-hint">目前沒有任何白板。</div>
+        )
+      )}
+      <div className="graph-legend">
+        {QUESTION_RELATION_TYPES.map((t) => (
+          <span key={t} style={{ color: BOARD_REL_COLORS[t] }}>
+            ━ {QUESTION_RELATION_LABELS[t]}
+            {QUESTION_DIRECTED_RELATIONS.has(t) ? " →" : ""}
+          </span>
+        ))}
+        <span>·</span>
+        <span>箭頭＝來源指向目標；滑過白板顯示關聯類型；大小＝連線數（關聯＋母子）；顏色＝自動偵測的群落（灰色＝孤立）</span>
+        <span>·</span>
+        <span>細灰線＝母子（拆分）關係</span>
       </div>
     </div>
   );

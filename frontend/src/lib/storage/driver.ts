@@ -3,6 +3,7 @@ import type {
   BoardCard,
   BoardData,
   BoardGroup,
+  BoardImage,
   BoardLink,
   BoardLiterature,
   BoardNote,
@@ -121,6 +122,16 @@ export interface StorageDriver {
   addLiteratureToBoard(board_id: string, body: { literature_id: string; x: number; y: number; w?: number; h?: number }): Promise<BoardLiterature>;
   patchBoardLiterature(board_id: string, literature_id: string, patch: { x?: number; y?: number; w?: number; h?: number }): Promise<BoardLiterature>;
   removeLiteratureFromBoard(board_id: string, literature_id: string): Promise<{ removed: boolean }>;
+  // 白板圖片與圖片連線（僅電腦端）：Dexie 端寫入丟 UNSUPPORTED_ON_DEXIE
+  createBoardImage(board_id: string, body: { media_id: string; x: number; y: number; w: number; h: number }): Promise<BoardImage>;
+  patchBoardImage(
+    board_id: string,
+    image_id: string,
+    patch: { x?: number; y?: number; w?: number; h?: number; crop_x?: number; crop_y?: number; crop_w?: number; crop_h?: number },
+  ): Promise<BoardImage>;
+  deleteBoardImage(board_id: string, image_id: string): Promise<{ deleted: boolean }>;
+  putBoardImageLink(board_id: string, image_id: string, card_id: string): Promise<{ existed: boolean }>;
+  deleteBoardImageLink(board_id: string, image_id: string, card_id: string): Promise<{ deleted: boolean }>;
 
   // 同步、檔案與選取操作
   syncExport(): Promise<SyncPackage>;

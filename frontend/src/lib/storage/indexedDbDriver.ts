@@ -1,7 +1,9 @@
 // @depends-on ./driver.ts
 // @depends-on ./dexieDb.ts
+// @depends-on ../relations.ts
 // @depends-on ../../types.ts
 import { ApiError } from "../../api";
+import { LEGACY_FORCE_HYPOTHESIS, LEGACY_RELATION_MAP } from "../relations";
 import type {
   BoardCard,
   BoardData,
@@ -1004,18 +1006,12 @@ export class IndexedDbDriver implements StorageDriver {
     };
   }
 
-  // 舊版英文關聯向後相容映射表
+  // 舊版英文關聯向後相容映射表（統一由 relations.ts 維護，禁止在此處私自定義字面值）
+  // @depends-on ../relations.ts::LEGACY_RELATION_MAP, LEGACY_FORCE_HYPOTHESIS
   private upgradeRelationType(raw: string): { relation_type: RelationType; forceHypothesis: boolean } {
-    const legacyMap: Record<string, RelationType> = {
-      support: "支持",
-      refute: "反駁",
-      influence: "導致",
-      instance_of: "實例",
-      applied_to: "應用於",
-      extend: "延伸",
-    };
-    if (raw in legacyMap) {
-      return { relation_type: legacyMap[raw], forceHypothesis: raw === "influence" };
+    const target = LEGACY_RELATION_MAP[raw as keyof typeof LEGACY_RELATION_MAP];
+    if (target) {
+      return { relation_type: target as RelationType, forceHypothesis: LEGACY_FORCE_HYPOTHESIS.has(raw) };
     }
     return { relation_type: (raw as RelationType) || "延伸", forceHypothesis: false };
   }
@@ -1599,6 +1595,27 @@ export class IndexedDbDriver implements StorageDriver {
   }
   async removeLiteratureFromBoard(): Promise<never> {
     return this.literatureUnsupported();
+  }
+
+  // ---- 白板圖片（僅電腦端 SQLite，不納入 Dexie 與同步封包）----
+  // assumption: 網頁／iPad 版沒有白板圖片功能（Board.tsx 在 dexie 下不註冊貼上與右鍵項目）；寫入大聲報錯
+  private imagesUnsupported(): never {
+    throw new ApiError("UNSUPPORTED_ON_DEXIE", "此功能僅電腦端可用", 400);
+  }
+  async createBoardImage(): Promise<never> {
+    return this.imagesUnsupported();
+  }
+  async patchBoardImage(): Promise<never> {
+    return this.imagesUnsupported();
+  }
+  async deleteBoardImage(): Promise<never> {
+    return this.imagesUnsupported();
+  }
+  async putBoardImageLink(): Promise<never> {
+    return this.imagesUnsupported();
+  }
+  async deleteBoardImageLink(): Promise<never> {
+    return this.imagesUnsupported();
   }
 }
 

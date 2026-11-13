@@ -38,6 +38,7 @@ import { Markdown } from "./Markdown";
 import { RelationBox } from "./RelationBox";
 import { LiteratureField } from "./LiteratureField";
 import { SourcesField } from "./SourcesField";
+import { BoardRecommend } from "./BoardRecommend";
 
 // 原因：MentionPanel 的 effect 把 loadCardTitles 放在依賴陣列，行內箭頭每次渲染都是新身分，會反覆重抓全部標題。
 // api 在呼叫時才解析 driver（不在模組載入時），所以 HTTP／Dexie 切換後仍走對的那一邊。
@@ -365,7 +366,9 @@ interface Props {
   onSelectCard(id: string, options?: { findText?: string }): void;
   onPreviewCard?(id: string | null): void;
   onCreateCard?(): void;
-  onAddToBoard(id: string): void;
+  onAddToBoard(id: string): void | Promise<unknown>; // 推薦模式靠它回傳的 Promise 判斷何時重算；沒回傳時清單要按「重新整理」才會更新
+  onAddLiteratureToBoard?(id: string): void | Promise<unknown>; // 推薦模式的文獻「加入白板」；沒傳就不顯示文獻區
+  boardCardCount?: number; // 目前白板的卡片數（來自 boards[].card_count）：變動時推薦清單重抓，避免已加入白板的卡片還掛在推薦裡
   onSaved(card: CardDetail): void;
   onCardDeleted(id: string): void;
   onLinkAdded?(sourceId: string, targetId: string, extra?: Partial<BoardLink>): void;
@@ -1278,6 +1281,10 @@ function SearchTab(p: Props) {
   const [boardLocations, setBoardLocations] = useState<Map<string, string[]>>(new Map());
   const seq = useRef(0);
   const { tagId, unclassified, curationStatus } = p.filter;
+  // 【搜尋｜推薦】：推薦只在切到時才掛載計算；Dexie 沒有問題白板與跨板資料，不顯示切換鈕
+  const canRecommend = getPreferredDriverType() !== "dexie";
+  const [mode, setMode] = useState<"search" | "recommend">("search");
+  const recommending = canRecommend && mode === "recommend";
 
   // 文獻：另一個 API、另一份清單。標籤／位置／收件夾篩選只作用在卡片，文獻沒有這些屬性，篩選中就不顯示文獻
   const [litItems, setLitItems] = useState<LiteratureSummary[]>([]);
@@ -1408,9 +1415,50 @@ function SearchTab(p: Props) {
         : tagId
           ? tagPath(p.tags, tagId)
           : "";
+  const modeBar = canRecommend ? (
+    <div role="tablist" aria-label="搜尋或推薦" style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={!recommending}
+        className={!recommending ? "on" : ""}
+        onClick={() => setMode("search")}
+      >
+        搜尋
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={recommending}
+        className={recommending ? "on" : ""}
+        onClick={() => setMode("recommend")}
+        title="以整塊白板為錨點，推薦不在這塊白板上的卡片與文獻"
+      >
+        推薦
+      </button>
+    </div>
+  ) : null;
+  // 提早返回放在所有 hooks 之後：切換時狀態（搜尋字、預覽）留在 SearchTab，切回來不會消失
+  if (recommending) {
+    return (
+      <div className="search search-split">
+        <div className="search-upper">
+          {modeBar}
+          <BoardRecommend
+            boardId={p.boardId ?? null}
+            onAddCard={p.onAddToBoard}
+            onAddLiterature={p.onAddLiteratureToBoard}
+            refreshKey={p.boardCardCount}
+            report={p.report}
+          />
+        </div>
+      </div>
+    );
+  }
   return (
     <div className={`search search-split${paneOpen ? " with-preview" : ""}`}>
       <div className="search-upper">
+        {modeBar}
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <input
             value={q}

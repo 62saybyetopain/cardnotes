@@ -325,6 +325,9 @@ function collectMediaIds(pkg: SyncPackage): string[] {
   for (const c of pkg.cards) {
     for (const id of extractMediaIds(c.body)) ids.add(id);
   }
+  // 白板圖片的圖檔不在任何內文裡，只被 board_images 引用；不加進來就不會上傳雲端，且沒有任何提示
+  // @depends-on types.ts::SyncPackage.board_images / backend cards.py::sync_export（沒有此欄＝iPad 封包或舊備份，視為沒有）
+  for (const im of pkg.board_images ?? []) ids.add(im.media_id);
   return Array.from(ids);
 }
 
@@ -338,7 +341,7 @@ export interface MediaBackupReport {
 
 /**
  * 電腦端：一鍵將電腦完整資料庫備份上傳至 Google Drive (cardboard-pc-backup.json)。
- * 卡片引用的圖片各存成一個雲端檔，已存在且有內容的不重傳；
+ * 卡片內文與白板圖片引用的圖檔各存成一個雲端檔，已存在且有內容的不重傳；
  * 封包 JSON 最後才上傳，任何一步失敗時雲端仍是上一版完整備份。
  */
 export async function uploadPcBackupToCloud(

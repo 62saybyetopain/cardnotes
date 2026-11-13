@@ -1,0 +1,387 @@
+// @depends-on ../api.ts (getBoard／boardQuestionPage／createBoardQuestion／patchBoardQuestion／renameBoard)
+// @depends-on ../lib/layout.ts (GRID_SIZE, snapToGridValue, snapDimension)
+// @depends-on ./BoardDeleteDialog.tsx（刪除／封存問題的選項與提示）
+// @depends-on Board.tsx（nodeTypes 的 boardQuestion、useBoardQuestions 的接線點：載入、拖曳結束、雙擊、右鍵、Delete）
+import { NodeResizer, type Node, type NodeProps } from "@xyflow/react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type ReactNode, type RefObject, type SetStateAction } from "react";
+import { api } from "../api";
+import { GRID_SIZE, snapDimension, snapToGridValue } from "../lib/layout";
+import type { BoardData, BoardQuestionNode, QuestionKind, QuestionStatus } from "../types";
+import { BoardDeleteDialog } from "./BoardDeleteDialog";
+
+export const QUESTION_NODE_MIN_W = 200;
+export const QUESTION_NODE_MIN_H = 90;
+const NEW_NODE_GAP = 40; // 新問題放在目標畫布上最右邊子問題的右側，間隔多少
+const STATUS_LABEL: Record<QuestionStatus, string> = { open: "研究中", splitting: "拆分中", concluded: "已有結論" };
+
+// 樣式放在這裡（由 Board 掛載一次），不必同步修改全域 CSS；hover／選取才顯示操作列
+export const QUESTION_NODE_CSS = `
+.qnode{position:relative;box-sizing:border-box;width:100%;height:100%;display:flex;flex-direction:column;gap:4px;padding:8px 10px;border-radius:12px;background:var(--panel,#1e293b);border:1.5px solid var(--line,#475569);border-left:5px solid var(--accent,#60a5fa);color:var(--text);overflow:hidden}
+.qnode.selected{border-color:var(--accent,#60a5fa);box-shadow:0 0 0 2px rgba(96,165,250,.35)}
+.qnode-head{display:flex;align-items:center;gap:6px;font-size:11px;opacity:.75}
+.qnode-title{font-size:15px;font-weight:600;line-height:1.3;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;word-break:break-word}
+.qnode-meta{font-size:11px;opacity:.7;margin-top:auto}
+.qnode-actions{position:absolute;top:4px;right:4px;display:flex;gap:4px;opacity:0;transition:opacity .12s;pointer-events:none}
+.qnode:hover .qnode-actions,.qnode.selected .qnode-actions,.qnode-actions:focus-within{opacity:1;pointer-events:auto}
+.qnode-actions button{background:var(--panel,#1e293b);border:1px solid var(--line,#475569);color:var(--text);border-radius:6px;padding:1px 7px;font-size:12px;line-height:18px;cursor:pointer}
+.qnode-actions button:hover,.qnode-actions button:focus-visible{border-color:var(--accent,#60a5fa);outline:none}
+.qmenu{position:absolute;z-index:30;min-width:170px;padding:4px;border-radius:8px;background:var(--panel,#1e293b);border:1px solid var(--line,#475569);box-shadow:0 6px 24px rgba(0,0,0,.35);color:var(--text)}
+.qmenu button{display:block;width:100%;text-align:left;background:transparent;border:0;color:inherit;padding:5px 10px;border-radius:5px;font-size:13px;cursor:pointer}
+.qmenu button:hover,.qmenu button:focus-visible{background:var(--row-hover,rgba(59,130,246,.15));outline:none}
+.qmenu button.danger{color:var(--danger,#f87171)}
+.qmenu hr{border:0;border-top:1px solid var(--line,#475569);margin:4px 0}
+@media (prefers-reduced-motion:reduce){.qnode-actions{transition:none}}
+`;
+
+export interface QuestionNodeData extends Record<string, unknown> {
+  boardId: string;
+  name: string;
+  kind: QuestionKind;
+  status: QuestionStatus;
+  reason: string;
+  childCount: number;
+  cardCount: number;
+  literatureCount: number;
+  noteCount: number;
+  onEnter: (boardId: string) => void;
+  onAddChild: (boardId: string) => void;
+  onMenu: (boardId: string, clientX: number, clientY: number) => void;
+  onResizeEnd: (boardId: string, p: { x: number; y: number; width: number; height: number }) => void;
+}
+export type QuestionFlowNode = Node<QuestionNodeData, "boardQuestion">;
+
+export function QuestionNode({ data, selected }: NodeProps<QuestionFlowNode>) {
+  const meta = [`${data.cardCount} 張卡片`, `${data.literatureCount} 篇文獻`];
+  if (data.noteCount > 0) meta.push(`${data.noteCount} 則靈感`);
+  meta.push(`${data.childCount} 個子問題`);
+  return (
+    <div className={`qnode${selected ? " selected" : ""}`} title={data.reason || undefined}>
+      <NodeResizer
+        minWidth={QUESTION_NODE_MIN_W}
+        minHeight={QUESTION_NODE_MIN_H}
+        isVisible={!!selected}
+        onResizeEnd={(_e, p) => data.onResizeEnd(data.boardId, p)}
+      />
+      <div className="qnode-head">
+        <span>{STATUS_LABEL[data.status]}</span>
+      </div>
+      <div className="qnode-title">{data.name}</div>
+      <div className="qnode-meta">{meta.join(" · ")}</div>
+      <div className="qnode-actions nodrag nopan">
+        <button aria-label="進入這個問題" title="進入這個問題（也可雙擊節點）" onClick={() => data.onEnter(data.boardId)}>
+          進入 ›
+        </button>
+        <button aria-label="新增子問題" title="從這個問題拆出下一個問題" onClick={() => data.onAddChild(data.boardId)}>
+          ＋
+        </button>
+        <button aria-label="更多" title="更多" onClick={(e) => data.onMenu(data.boardId, e.clientX, e.clientY)}>
+          ⋯
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface MenuItem {
+  label: string;
+  onClick(): void;
+  danger?: boolean;
+  sep?: boolean; // 在這一項上方畫分隔線
+}
+type MenuState = { x: number; y: number; items: MenuItem[] };
+
+function FloatMenu({ menu, onClose }: { menu: MenuState; onClose(): void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const down = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as HTMLElement)) onClose();
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("pointerdown", down, true);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("pointerdown", down, true);
+      document.removeEventListener("keydown", key);
+    };
+  }, [onClose]);
+  return (
+    <div ref={ref} className="qmenu" role="menu" style={{ left: menu.x, top: menu.y }}>
+      {menu.items.map((it, i) => (
+        <div key={i}>
+          {it.sep && <hr />}
+          <button
+            role="menuitem"
+            className={it.danger ? "danger" : undefined}
+            onClick={() => {
+              onClose();
+              it.onClick();
+            }}
+          >
+            {it.label}
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+interface Geometry {
+  x: number;
+  y: number;
+  w: number | null;
+  h: number | null;
+}
+
+interface HookArgs<N extends Node> {
+  boardId: string | null;
+  enabled: boolean; // 僅電腦版（SQLite）有問題白板；網頁版 false
+  wrapRef: RefObject<HTMLElement | null>;
+  screenToFlow(p: { x: number; y: number }): { x: number; y: number };
+  getNodes(): N[];
+  setNodes: Dispatch<SetStateAction<N[]>>;
+  saved: MutableRefObject<Map<string, Geometry>>;
+  snapRef: MutableRefObject<boolean>;
+  onSelectBoard?(id: string): void;
+  onBoardsChanged?(): void | Promise<void>;
+  report(e: unknown, prefix?: string): void;
+}
+
+const nodeId = (bid: string) => `q:${bid}`;
+const MENU_W = 190;
+const MENU_ITEM_H = 30;
+
+// 畫布上的問題節點：載入、拖曳／縮放儲存、進入、新增（依入口決定是否跳轉）、改名、狀態、刪除／封存
+export function useBoardQuestions<N extends Node>(a: HookArgs<N>) {
+  const cb = useRef(a);
+  cb.current = a;
+  const [menu, setMenu] = useState<MenuState | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const closeMenu = useCallback(() => setMenu(null), []);
+  useEffect(() => setMenu(null), [a.boardId]);
+
+  const patchData = useCallback((bid: string, patch: Partial<QuestionNodeData>) => {
+    cb.current.setNodes((ns) => ns.map((n) => (n.id === nodeId(bid) ? ({ ...n, data: { ...n.data, ...patch } } as N) : n)));
+  }, []);
+
+  const enter = useCallback((bid: string) => cb.current.onSelectBoard?.(bid), []);
+
+  // 建立之後一律「進入」新問題（從畫布建立＝馬上往下想）；導航器的新增才留在原地
+  const createAndEnter = useCallback(async (parentId: string, kind: QuestionKind, label: string, slot: () => Promise<{ x: number; y: number }>) => {
+    const name = window.prompt(label)?.trim();
+    if (!name) return;
+    try {
+      const { x, y } = await slot();
+      const r = await api.createBoardQuestion(parentId, { name, kind, x, y });
+      await cb.current.onBoardsChanged?.(); // 先讓白板清單含有新白板，再切換，避免被清單重整退回別的白板
+      cb.current.onSelectBoard?.(r.id);
+    } catch (e) {
+      cb.current.report(e, "新增問題失敗：");
+    }
+  }, []);
+
+  const addChild = useCallback(
+    (parentId: string) =>
+      createAndEnter(parentId, "question", "新增子問題的名稱", async () => {
+        // 放在子問題畫布上最右邊那個的右側；還沒有就放左上角
+        const page = await api.boardQuestionPage(parentId);
+        const last = page.children.reduce<BoardQuestionNode | null>((m, c) => (!m || c.x + c.w > m.x + m.w ? c : m), null);
+        return last ? { x: last.x + last.w + NEW_NODE_GAP, y: last.y } : { x: 80, y: 80 };
+      }),
+    [createAndEnter],
+  );
+
+  const resizeEnd = useCallback(async (bid: string, p: { x: number; y: number; width: number; height: number }) => {
+    const { snapRef, saved, setNodes, report } = cb.current;
+    const id = nodeId(bid);
+    const snap = snapRef.current;
+    const x = snap ? snapToGridValue(p.x, GRID_SIZE) : p.x;
+    const y = snap ? snapToGridValue(p.y, GRID_SIZE) : p.y;
+    const w = snap ? snapDimension(p.width, QUESTION_NODE_MIN_W, GRID_SIZE) : p.width;
+    const h = snap ? snapDimension(p.height, QUESTION_NODE_MIN_H, GRID_SIZE) : p.height;
+    const put = (g: { x: number; y: number; w: number; h: number }) =>
+      setNodes((ns) =>
+        ns.map((n) => (n.id === id && n.type === "boardQuestion" ? ({ ...n, position: { x: g.x, y: g.y }, width: g.w, height: g.h, style: { width: g.w, height: g.h } } as N) : n)),
+      );
+    try {
+      await api.patchBoardQuestion(bid, { x, y, w, h });
+      saved.current.set(id, { x, y, w, h });
+      put({ x, y, w, h });
+    } catch (e) {
+      const g = saved.current.get(id);
+      if (g) put({ x: g.x, y: g.y, w: g.w ?? 260, h: g.h ?? 120 });
+      report(e, "儲存問題節點大小失敗，已回復：");
+    }
+  }, []);
+
+  const toNode = useCallback(
+    (q: BoardQuestionNode): QuestionFlowNode => ({
+      id: nodeId(q.board_id),
+      type: "boardQuestion",
+      position: { x: q.x, y: q.y },
+      width: q.w,
+      height: q.h,
+      style: { width: q.w, height: q.h },
+      data: {
+        boardId: q.board_id,
+        name: q.name,
+        kind: q.kind,
+        status: q.status,
+        reason: q.reason,
+        childCount: q.child_count,
+        cardCount: q.card_count,
+        literatureCount: q.literature_count,
+        noteCount: q.note_count,
+        onEnter: enter,
+        onAddChild: (bid) => void addChild(bid),
+        onMenu: (bid, cx, cy) => openNodeMenu(bid, cx, cy),
+        onResizeEnd: (bid, p) => void resizeEnd(bid, p),
+      },
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [enter, addChild, resizeEnd],
+  );
+
+  // 載入白板時呼叫：登記伺服器確認過的位置並回傳節點
+  const loadFrom = useCallback(
+    (b: BoardData): QuestionFlowNode[] =>
+      (b.questions ?? []).map((q) => {
+        cb.current.saved.current.set(nodeId(q.board_id), { x: q.x, y: q.y, w: q.w, h: q.h });
+        return toNode(q);
+      }),
+    [toNode],
+  );
+
+  // 刪除／封存之後：子問題可能被提升到這塊畫布，重新取得這塊白板的問題節點
+  const reload = useCallback(async () => {
+    const bid = cb.current.boardId;
+    if (!bid) return;
+    try {
+      const b = await api.getBoard(bid);
+      if (cb.current.boardId !== bid) return;
+      for (const k of Array.from(cb.current.saved.current.keys())) if (k.startsWith("q:")) cb.current.saved.current.delete(k);
+      const fresh = loadFrom(b) as unknown as N[];
+      cb.current.setNodes((ns) => [...ns.filter((n) => n.type !== "boardQuestion"), ...fresh]);
+    } catch (e) {
+      cb.current.report(e, "重新載入問題節點失敗：");
+    }
+  }, [loadFrom]);
+
+  const popup = (clientX: number, clientY: number, items: MenuItem[]) => {
+    const r = cb.current.wrapRef.current?.getBoundingClientRect();
+    const left = r ? clientX - r.left : clientX;
+    const top = r ? clientY - r.top : clientY;
+    const x = r ? Math.max(4, Math.min(left, r.width - MENU_W - 4)) : left;
+    const y = r ? Math.max(4, Math.min(top, r.height - items.length * MENU_ITEM_H - 12)) : top;
+    setMenu({ x, y, items });
+  };
+
+  function openNodeMenu(bid: string, clientX: number, clientY: number) {
+    const n = cb.current.getNodes().find((x) => x.id === nodeId(bid));
+    if (!n) return;
+    const d = n.data as QuestionNodeData;
+    const setStatus = (status: QuestionStatus) => async () => {
+      try {
+        await api.patchBoardQuestion(bid, { status });
+        patchData(bid, { status });
+      } catch (e) {
+        cb.current.report(e, "更新狀態失敗：");
+      }
+    };
+    const items: MenuItem[] = [
+      { label: "進入", onClick: () => enter(bid) },
+      {
+        label: "改名",
+        onClick: async () => {
+          const next = window.prompt("問題名稱", d.name)?.trim();
+          if (!next || next === d.name) return;
+          try {
+            await api.renameBoard(bid, next);
+            patchData(bid, { name: next });
+            await cb.current.onBoardsChanged?.();
+          } catch (e) {
+            cb.current.report(e, "改名失敗：");
+          }
+        },
+      },
+      ...(Object.keys(STATUS_LABEL) as QuestionStatus[]).map((s, i) => ({
+        label: `${d.status === s ? "✓ " : "　"}${STATUS_LABEL[s]}`,
+        onClick: setStatus(s),
+        sep: i === 0,
+      })),
+      { label: "刪除或封存…", danger: true, sep: true, onClick: () => setDeleting(bid) },
+    ];
+    popup(clientX, clientY, items);
+  }
+
+  // 空白處右鍵：新增問題／想法（建立後直接進入）
+  const onPaneContextMenu = useCallback(
+    (e: MouseEvent | React.MouseEvent) => {
+      e.preventDefault();
+      const { enabled, boardId, screenToFlow } = cb.current;
+      if (!enabled || !boardId) return;
+      const at = screenToFlow({ x: e.clientX, y: e.clientY });
+      const spot = { x: Math.round(at.x), y: Math.round(at.y) };
+      popup(e.clientX, e.clientY, [
+        { label: "新增問題", onClick: () => void createAndEnter(boardId, "question", "新問題的名稱", async () => spot) },
+      ]);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [createAndEnter],
+  );
+
+  // 拖曳結束：只存位置（自動對齊開啟時取整到格距）；失敗回到伺服器確認的位置。不參與分組框歸屬與避讓
+  const persistMoved = useCallback(async (dragged: Node[]) => {
+    const { boardId, snapRef, saved, setNodes, report } = cb.current;
+    if (!boardId) return;
+    for (const n of dragged) {
+      if (n.type !== "boardQuestion") continue;
+      const data = n.data as QuestionNodeData;
+      const x = snapRef.current ? snapToGridValue(n.position.x, GRID_SIZE) : n.position.x;
+      const y = snapRef.current ? snapToGridValue(n.position.y, GRID_SIZE) : n.position.y;
+      const prev = saved.current.get(n.id);
+      if (prev && prev.x === x && prev.y === y) continue;
+      try {
+        await api.patchBoardQuestion(data.boardId, { x, y });
+        saved.current.set(n.id, { x, y, w: prev?.w ?? null, h: prev?.h ?? null });
+        if (x !== n.position.x || y !== n.position.y) {
+          setNodes((ns) => ns.map((m) => (m.id === n.id ? ({ ...m, position: { x, y } } as N) : m)));
+        }
+      } catch (e) {
+        if (prev) setNodes((ns) => ns.map((m) => (m.id === n.id ? ({ ...m, position: { x: prev.x, y: prev.y } } as N) : m)));
+        report(e, "儲存問題節點位置失敗，已回到原位：");
+      }
+    }
+  }, []);
+
+  const askDelete = useCallback((bid: string) => setDeleting(bid), []);
+
+  const overlay: ReactNode = a.enabled ? (
+    <>
+      <style>{QUESTION_NODE_CSS}</style>
+      {menu && <FloatMenu menu={menu} onClose={closeMenu} />}
+      {deleting && (
+        <BoardDeleteDialog
+          boardId={deleting}
+          onClose={() => setDeleting(null)}
+          onDone={() => {
+            setDeleting(null);
+            void reload();
+            void cb.current.onBoardsChanged?.();
+          }}
+          report={a.report}
+        />
+      )}
+    </>
+  ) : null;
+
+  return {
+    loadFrom,
+    persistMoved,
+    onPaneContextMenu,
+    enter,
+    askDelete,
+    overlay,
+  };
+}

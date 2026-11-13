@@ -514,6 +514,43 @@ summary .add { float: right; border: 0; background: transparent; }
 .note-text { display: block; width: 100%; flex: 1; min-height: 0; resize: none; overflow: auto; border: 0; background: transparent; padding: 0 10px 8px; font: inherit; font-size: 13px; line-height: 1.5; color: var(--text); }
 .note-text:focus { outline: none; }
 
+/* 白板圖片：無邊框、只有陰影；選取時才出現選取框與工具列。
+   @depends-on components/ImageNode.tsx（class 名稱；工具列、縮放把手都只在選取時由 xyflow 渲染） */
+.react-flow__node-boardImage { display: flex; }
+.img-node { position: relative; width: 100%; height: 100%; }
+.img-node.selected .img-frame { outline: 2px solid var(--accent); outline-offset: 3px; }
+.img-frame { position: absolute; inset: 0; overflow: hidden; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28), 0 1px 3px rgba(0, 0, 0, 0.18); }
+.img-frame img, .img-crop-layer img { position: absolute; max-width: none; display: block; user-select: none; -webkit-user-drag: none; pointer-events: none; }
+.img-broken { display: grid; place-items: center; width: 100%; height: 100%; background: var(--panel); color: var(--danger); font-size: 12px; }
+/* 連接點平常隱形（但仍可作為放開目標），滑過或選取才顯示 */
+.react-flow__node-boardImage .react-flow__handle { opacity: 0; }
+.react-flow__node-boardImage:hover .react-flow__handle { opacity: 0.6; }
+.react-flow__node-boardImage.selected .react-flow__handle { opacity: 1; }
+.img-toolbar { display: flex; gap: 4px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2); }
+.img-toolbar button { font-size: 12px; padding: 2px 8px; white-space: nowrap; }
+.img-toolbar button.del { color: var(--danger); border-color: var(--danger); }
+/* 裁切模式：整張原圖變暗，裁切框內維持原亮度；定位與尺寸由行內百分比決定 */
+.img-crop-layer { position: absolute; z-index: 5; }
+.img-crop-dim { width: 100%; height: 100%; left: 0; top: 0; opacity: 0.35; }
+.img-crop-rect { position: absolute; cursor: move; outline: 1.5px dashed #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); }
+.img-crop-clip { position: absolute; inset: 0; overflow: hidden; }
+.img-crop-h { position: absolute; width: 10px; height: 10px; background: #fff; border: 1px solid var(--accent); touch-action: none; }
+.img-crop-h.nw { left: -5px; top: -5px; cursor: nwse-resize; }
+.img-crop-h.n { left: calc(50% - 5px); top: -5px; cursor: ns-resize; }
+.img-crop-h.ne { right: -5px; top: -5px; cursor: nesw-resize; }
+.img-crop-h.e { right: -5px; top: calc(50% - 5px); cursor: ew-resize; }
+.img-crop-h.se { right: -5px; bottom: -5px; cursor: nwse-resize; }
+.img-crop-h.s { left: calc(50% - 5px); bottom: -5px; cursor: ns-resize; }
+.img-crop-h.sw { left: -5px; bottom: -5px; cursor: nesw-resize; }
+.img-crop-h.w { left: -5px; top: calc(50% - 5px); cursor: ew-resize; }
+
+/* 圖片連線的刪除確認：連線旁彈出的 ○／✕ 小浮層；left／top 由 Board.tsx 以相對 .board 的像素座標行內指定。
+   @depends-on components/Board.tsx（ImageLinkConfirm 的 class 名稱） */
+.img-link-confirm { position: absolute; z-index: 31; display: flex; gap: 2px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22); transform: translate(10px, 10px); }
+/* 按鈕無邊框、平常灰色線條；滑過與取得焦點只加淡灰底，不用紅藍色（焦點預設在 ○「關閉」，所以焦點樣式也必須是中性的） */
+.img-link-confirm button { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; min-height: 30px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted); outline: none; transition: background-color 0.12s ease, color 0.12s ease; }
+.img-link-confirm button:hover, .img-link-confirm button:focus-visible { background: color-mix(in srgb, var(--text) 10%, transparent); color: var(--text); }
+
 
 /* 視圖切換與全域概念地圖（Concept Graph View） */
 .view-switch { display: inline-flex; background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 2px; gap: 2px; }
