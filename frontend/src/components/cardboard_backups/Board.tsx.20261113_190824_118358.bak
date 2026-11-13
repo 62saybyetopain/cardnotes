@@ -1,5 +1,5 @@
 // @depends-on ../api.ts (createBoardNote / patchBoardNote / deleteBoardNote：便利貼三個方法，driver.ts、httpDriver.ts、indexedDbDriver.ts 必須同步)
-// @depends-on ./ImageNode.tsx + ../api.ts (createBoardImage / patchBoardImage / deleteBoardImage / putBoardImageLink / deleteBoardImageLink) + backend boards.py、db.py::BOARD_IMAGES_DDL、types.ts::BoardImage：白板圖片節點 id 一律是 "img:<image_id>"，所有以 "group:"／"note:"／"lit:"／"q:" 排除非卡片節點的判斷都要一併排除 "img:"；圖片連線（imageLinks）純視覺，邊 id 為 "imglink:…"，不可進 links／LinkEditorModal
+// @depends-on ./ImageNode.tsx + ../api.ts (createBoardImage / patchBoardImage / deleteBoardImage / putBoardImageLink / deleteBoardImageLink / listBoards / createBoard) + backend boards.py、db.py::BOARD_IMAGES_DDL、types.ts::BoardImage：白板圖片節點 id 一律是 "img:<image_id>"，所有以 "group:"／"note:"／"lit:"／"q:" 排除非卡片節點的判斷都要一併排除 "img:"；圖片連線（imageLinks）純視覺，邊 id 為 "imglink:…"，不可進 links／LinkEditorModal
 // @depends-on ./QuestionNode.tsx (useBoardQuestions 的 paneExtras：右鍵「貼上圖片」併入同一個選單)
 // @depends-on backend media.py::cleanup_media（已把 board_images.media_id 算作被引用）、cards.py::sync_export／sync_overwrite（備份還原帶 board_images／board_image_links）：兩處都不能漏，否則清理與還原會讓圖片消失
 // @depends-on 便利貼高度 h：db.py::board_notes.h、schemas.py::BoardNote*／NOTE_DEFAULT_H、boards.py、types.ts::BoardNote.h、indexedDbDriver 預設值必須同為「卡片預設高×3」(420)；缺值（舊 Dexie 資料）一律用 NOTE_DEFAULT_H
@@ -496,7 +496,7 @@ function stripImagesKeepCode(body: string): string {
   return out.join("\n").trim();
 }
 
-// 圖片連線的刪除確認：在連線旁彈出 ○（確定移除）與 ✕（取消）。Esc、點到別處都視為取消；焦點預設在 ✕，避免只按 Enter 就誤刪。
+// 圖片連線的刪除確認：在連線旁彈出 ✕（刪除）與 ○（關閉）。Esc、點到別處都視為關閉；焦點預設在 ○，避免只按 Enter 就誤刪。
 // 位置是相對 .board 容器的像素座標，畫布平移或縮放時由 Board 關閉，所以不需要跟著畫布縮放。
 // @depends-on ../styles.css (.img-link-confirm)
 function ImageLinkConfirm(props: { x: number; y: number; onConfirm(): void; onCancel(): void }) {
@@ -521,12 +521,12 @@ function ImageLinkConfirm(props: { x: number; y: number; onConfirm(): void; onCa
   const icon = { width: 18, height: 18, viewBox: "0 0 18 18", fill: "none", stroke: "currentColor", strokeWidth: 1.9, strokeLinecap: "round" as const, "aria-hidden": true };
   return (
     <div ref={ref} className="img-link-confirm" role="group" aria-label="確認移除圖片連線" style={{ left: x, top: y }}>
-      <button type="button" className="ok" onClick={onConfirm} title="確定移除這條連線（圖片與卡片都不會被刪除）" aria-label="確定移除連線">
+      <button type="button" className="cancel" autoFocus onClick={onCancel} title="關閉" aria-label="關閉">
         <svg {...icon}>
           <circle cx="9" cy="9" r="5.6" />
         </svg>
       </button>
-      <button type="button" className="no" autoFocus onClick={onCancel} title="取消" aria-label="取消">
+      <button type="button" className="confirm" onClick={onConfirm} title="刪除這條連線（圖片與卡片都不會被刪除）" aria-label="刪除連線">
         <svg {...icon}>
           <path d="M5.4 5.4l7.2 7.2M12.6 5.4l-7.2 7.2" />
         </svg>
@@ -2802,10 +2802,259 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
     return () => document.removeEventListener("keydown", onKey);
   }, [active, removeSelected]);
 
-  // ---- 自動排版與單次復原 ----
+  // ---- 多選節點計算（卡片、文獻、圖片）與自動排版／批次轉移 ----
   const selectedCards = useMemo(
     () => nodes.filter((n): n is CardFlowNode => n.type === "card" && !!n.selected),
     [nodes],
+  );
+  const selectedLiteratures = useMemo(
+    () => nodes.filter((n): n is LiteratureFlowNode => n.type === "boardLiterature" && !!n.selected),
+    [nodes],
+  );
+  const selectedImages = useMemo(
+    () => nodes.filter((n): n is ImageFlowNode => n.type === "boardImage" && !!n.selected),
+    [nodes],
+  );
+  const selectedTransferCount = selectedCards.length + selectedLiteratures.length + selectedImages.length;
+  const [showTransferModal, setShowTransferModal] = useState(false);
+
+  // 批次複製或轉移已選取的卡片／文獻／圖片到指定白板或新建白板（嚴格先寫入目標白板成功，才從來源白板移除，確保零資料遺失）
+  const executeBatchTransfer = useCallback(
+    async (
+      target: { type: "existing"; id: string; name: string } | { type: "new"; name: string },
+      mode: "copy" | "move",
+      switchAfter: boolean,
+    ) => {
+      if (!boardId) return;
+      if (target.type === "existing" && target.id === boardId) return;
+
+      const curCards = nodesRef.current.filter((n): n is CardFlowNode => n.type === "card" && !!n.selected);
+      const curLits = nodesRef.current.filter((n): n is LiteratureFlowNode => n.type === "boardLiterature" && !!n.selected);
+      const curImgs = nodesRef.current.filter((n): n is ImageFlowNode => n.type === "boardImage" && !!n.selected);
+      if (curCards.length + curLits.length + curImgs.length === 0) return;
+
+      let targetBoardId = "";
+      let targetBoardName = "";
+      let createdNewBoard = false;
+
+      if (target.type === "new") {
+        const cleanName = target.name.trim();
+        if (!cleanName) {
+          report(new Error("請輸入新白板名稱"), "建立白板失敗");
+          return;
+        }
+        try {
+          const created = await api.createBoard(cleanName);
+          targetBoardId = created.id;
+          targetBoardName = created.name;
+          createdNewBoard = true;
+        } catch (e) {
+          report(e, "建立新白板失敗，未移動任何資料");
+          return;
+        }
+      } else {
+        targetBoardId = target.id;
+        targetBoardName = target.name;
+      }
+      // 移除重複宣告的 curLits / curImgs，直接沿用上方已取得之選取節點陣列。
+      const allSel = [...curCards, ...curLits, ...curImgs];
+
+      // 計算整批左上角基準點，保留各節點之間的相對排版位置並錨定於目標白板 (120, 120)
+      const minX = Math.min(...allSel.map((n) => n.position.x));
+      const minY = Math.min(...allSel.map((n) => n.position.y));
+      const mapPos = (x: number, y: number) => ({
+        x: snapRef.current ? snapToGridValue(120 + (x - minX), GRID_SIZE) : Math.round(120 + (x - minX)),
+        y: snapRef.current ? snapToGridValue(120 + (y - minY), GRID_SIZE) : Math.round(120 + (y - minY)),
+      });
+
+      let addedCards = 0;
+      let existedCards = 0;
+      let addedLits = 0;
+      let existedLits = 0;
+      let addedImgs = 0;
+      let failedCount = 0;
+
+      const removedCardIds = new Set<string>();
+      const removedLitIds = new Set<string>();
+      const removedImgIds = new Set<string>();
+      const transferredCardIds = new Set<string>();
+      const oldToNewImageId = new Map<string, string>();
+
+      // 1. 處理卡片
+      for (const cn of curCards) {
+        const pos = mapPos(cn.position.x, cn.position.y);
+        const geom = saved.current.get(cn.id);
+        const w = geom?.w ?? cn.width ?? DEFAULT_CARD_W;
+        const h = geom?.h ?? (typeof cn.height === "number" ? cn.height : null);
+        let okOnTarget = false;
+        try {
+          await api.addToBoard(targetBoardId, cn.id, pos.x, pos.y);
+          if (w !== DEFAULT_CARD_W || h != null) {
+            await api.patchBoardCards(targetBoardId, [{ card_id: cn.id, x: pos.x, y: pos.y, w, h }]);
+          }
+          addedCards++;
+          okOnTarget = true;
+        } catch (e: any) {
+          if (e?.code === "CARD_ALREADY_ON_BOARD" || e?.status === 409) {
+            existedCards++;
+            okOnTarget = true;
+          } else {
+            failedCount++;
+            report(e, `複製卡片「${cn.data.title || "（無標題）"}」失敗`);
+          }
+        }
+        if (okOnTarget) {
+          transferredCardIds.add(cn.id);
+          if (mode === "move") {
+            try {
+              await api.removeFromBoard(boardId, cn.id);
+              removedCardIds.add(cn.id);
+            } catch (e) {
+              failedCount++;
+              report(e, `已複製到目標白板，但從目前白板移除卡片「${cn.data.title || "（無標題）"}」失敗`);
+            }
+          }
+        }
+      }
+
+      // 2. 處理文獻
+      for (const ln of curLits) {
+        const pos = mapPos(ln.position.x, ln.position.y);
+        const geom = saved.current.get(ln.id);
+        const w = geom?.w ?? ln.width ?? LIT_DEFAULT_W;
+        const h = geom?.h ?? ln.height ?? LIT_DEFAULT_H;
+        let okOnTarget = false;
+        try {
+          await api.addLiteratureToBoard(targetBoardId, {
+            literature_id: ln.data.litId,
+            x: pos.x,
+            y: pos.y,
+            w,
+            h,
+          });
+          addedLits++;
+          okOnTarget = true;
+        } catch (e: any) {
+          if (e?.status === 409) {
+            existedLits++;
+            okOnTarget = true;
+          } else {
+            failedCount++;
+            report(e, `複製文獻「${ln.data.title || "（無標題）"}」失敗`);
+          }
+        }
+        if (okOnTarget && mode === "move") {
+          try {
+            await api.removeLiteratureFromBoard(boardId, ln.data.litId);
+            removedLitIds.add(ln.data.litId);
+          } catch (e) {
+            failedCount++;
+            report(e, `已複製到目標白板，但從目前白板移除文獻「${ln.data.title || "（無標題）"}」失敗`);
+          }
+        }
+      }
+
+      // 3. 處理圖片（含非破壞式裁切比例還原）
+      for (const imn of curImgs) {
+        const pos = mapPos(imn.position.x, imn.position.y);
+        const { mediaId, w, h, cropX, cropY, cropW, cropH, imageId } = imn.data;
+        let newImageId: string | null = null;
+        try {
+          const created = await api.createBoardImage(targetBoardId, { media_id: mediaId, x: pos.x, y: pos.y, w, h });
+          newImageId = created.id;
+          const hasCrop = cropX > 1e-6 || cropY > 1e-6 || cropW < 1 - 1e-6 || cropH < 1 - 1e-6;
+          if (hasCrop) {
+            await api.patchBoardImage(targetBoardId, created.id, {
+              crop_x: cropX,
+              crop_y: cropY,
+              crop_w: cropW,
+              crop_h: cropH,
+            });
+          }
+          addedImgs++;
+          oldToNewImageId.set(imageId, created.id);
+        } catch (e) {
+          failedCount++;
+          report(e, "複製圖片至目標白板失敗");
+        }
+        if (newImageId && mode === "move") {
+          try {
+            await api.deleteBoardImage(boardId, imageId);
+            removedImgIds.add(imageId);
+          } catch (e) {
+            failedCount++;
+            report(e, "已複製圖片到目標白板，但從目前白板移除圖片失敗");
+          }
+        }
+      }
+
+      // 4. 若選取的圖片與選取的卡片原本有視覺連線，一併在目標白板重建連線
+      if (oldToNewImageId.size > 0 && transferredCardIds.size > 0) {
+        for (const il of imageLinks) {
+          const mappedImgId = oldToNewImageId.get(il.image_id);
+          if (mappedImgId && transferredCardIds.has(il.card_id)) {
+            await api.putBoardImageLink(targetBoardId, mappedImgId, il.card_id).catch(() => {});
+          }
+        }
+      }
+
+      // 5. 若為「轉移」模式，同步更新目前白板的畫面狀態與計數
+      if (mode === "move" && (removedCardIds.size > 0 || removedLitIds.size > 0 || removedImgIds.size > 0)) {
+        setNodes((ns) =>
+          ns.filter((n) => {
+            if (n.type === "card" && removedCardIds.has(n.id)) return false;
+            if (n.type === "boardLiterature" && removedLitIds.has(n.data.litId)) return false;
+            if (n.type === "boardImage" && removedImgIds.has(n.data.imageId)) return false;
+            return true;
+          }),
+        );
+        if (removedCardIds.size > 0) {
+          setLinks((ls) => ls.filter((l) => !removedCardIds.has(l.source_id) && !removedCardIds.has(l.target_id)));
+          removedCardIds.forEach((id) => saved.current.delete(id));
+          onCountChanged();
+        }
+        if (removedLitIds.size > 0) {
+          removedLitIds.forEach((id) => saved.current.delete(`lit:${id}`));
+        }
+        if (removedImgIds.size > 0 || removedCardIds.size > 0) {
+          setImageLinks((ls) => ls.filter((l) => !removedImgIds.has(l.image_id) && !removedCardIds.has(l.card_id)));
+          removedImgIds.forEach((id) => saved.current.delete(`img:${id}`));
+        }
+      }
+
+      const actionLabel = mode === "move" ? "轉移" : "複製";
+      const parts: string[] = [];
+      if (addedCards > 0) parts.push(`${addedCards} 張卡片`);
+      if (addedLits > 0) parts.push(`${addedLits} 份文獻`);
+      if (addedImgs > 0) parts.push(`${addedImgs} 張圖片`);
+      const skipParts: string[] = [];
+      if (existedCards > 0) skipParts.push(`${existedCards} 張卡片已存在`);
+      if (existedLits > 0) skipParts.push(`${existedLits} 份文獻已存在`);
+
+      if (createdNewBoard || addedCards > 0) {
+        await props.onBoardsChanged?.();
+        onCountChanged();
+      }
+
+      if (parts.length > 0 || skipParts.length > 0) {
+        const prefix = createdNewBoard ? `已建立新白板「${targetBoardName}」並` : "已";
+        const mainMsg =
+          parts.length > 0
+            ? `${prefix}${actionLabel} ${parts.join("、")}${createdNewBoard ? "" : `至「${targetBoardName}」`}`
+            : `目標白板「${targetBoardName}」已包含所選項目`;
+        const extraMsg = skipParts.length > 0 ? `（${skipParts.join("、")}）` : "";
+        info(mainMsg + extraMsg);
+      } else if (createdNewBoard) {
+        info(`已建立新白板「${targetBoardName}」`);
+      } else if (failedCount === 0) {
+        info("未處理任何項目");
+      }
+
+      if (switchAfter && targetBoardId) {
+        props.onSelectBoard?.(targetBoardId);
+      }
+    },
+    [boardId, imageLinks, info, onCountChanged, props, report],
   );
 
   // 取消選取（少於 2 張）視為排版使用完畢：快照只對排版當下那批卡片有效，留著會讓之後的復原蓋掉新位置
@@ -3470,16 +3719,33 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       )}
 
       {/* active=false（中央編輯、其他視圖）時 Board 仍掛載且保留選取，面板必須跟著隱藏，否則會浮在編輯器上擋住畫面 */}
-      {active && boardId && selectedCards.length >= 2 && (
+      {active && boardId && selectedTransferCount >= 2 && (
         <div className="board-multi-toolbar" role="toolbar" aria-label="多選批次與自動排列工具列">
-          <span className="multi-count">已選 {selectedCards.length} 張</span>
+          <span className="multi-count">
+            已選{" "}
+            {[
+              selectedCards.length > 0 ? `${selectedCards.length} 張卡片` : "",
+              selectedLiteratures.length > 0 ? `${selectedLiteratures.length} 份文獻` : "",
+              selectedImages.length > 0 ? `${selectedImages.length} 張圖片` : "",
+            ]
+              .filter(Boolean)
+              .join("、")}
+          </span>
+
+          <button
+            type="button"
+            onClick={() => setShowTransferModal(true)}
+            title="將選取的卡片、文獻或圖片批量複製或轉移（移動）到指定的其他白板"
+          >
+             轉移／複製到白板…
+          </button>
 
           {selectedCards.length >= 2 && (
             <button
               onClick={() => void copySelectedCards()}
               title="複製已選卡片的標題與內容（不含圖片，保留代碼）"
             >
-              📋 複製內容
+              複製內容
             </button>
           )}
 
@@ -3940,6 +4206,261 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           }}
         />
       )}
+      {showTransferModal && boardId && (
+        <BatchTransferModal
+          canSwitchBoard={Boolean(props.onSelectBoard)}
+          cardCount={selectedCards.length}
+          currentBoardId={boardId}
+          imgCount={selectedImages.length}
+          initialBoards={props.boards}
+          litCount={selectedLiteratures.length}
+          // 原因:JSX 屬性的 {} 不可被加上引號,否則會變成字串並打亂後續括號;此處改為標準多行寫法。
+          onClose={() => setShowTransferModal(false)}
+          onConfirm={async (target, mode, switchAfter) => {
+            setShowTransferModal(false);
+            await executeBatchTransfer(target, mode, switchAfter);
+          }}
+          report={report}
+        />
+      )}
+    </div>
+  );
+}
+
+function BatchTransferModal(props: {
+  currentBoardId: string;
+  initialBoards?: BoardSummary[];
+  cardCount: number;
+  litCount: number;
+  imgCount: number;
+  canSwitchBoard: boolean;
+  onClose(): void;
+  onConfirm(
+    target: { type: "existing"; id: string; name: string } | { type: "new"; name: string },
+    mode: "copy" | "move",
+    switchAfter: boolean,
+  ): Promise<void>;
+  report(e: unknown, prefix?: string): void;
+}) {
+  const { currentBoardId, initialBoards, cardCount, litCount, imgCount, canSwitchBoard, onClose, onConfirm, report } = props;
+  const [boards, setBoards] = useState<BoardSummary[]>(() => initialBoards ?? []);
+  const [loading, setLoading] = useState<boolean>(!initialBoards);
+  const [targetType, setTargetType] = useState<"existing" | "new">("existing");
+  const [targetId, setTargetId] = useState<string>("");
+  const [newBoardName, setNewBoardName] = useState<string>("");
+  const [mode, setMode] = useState<"copy" | "move">("copy");
+  const [switchAfter, setSwitchAfter] = useState<boolean>(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const availableBoards = useMemo(
+    () => boards.filter((b) => b.id !== currentBoardId && !b.question?.archived_at),
+    [boards, currentBoardId],
+  );
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    api
+      .listBoards()
+      .then((res) => {
+        if (!alive) return;
+        setBoards(res.boards);
+      })
+      .catch((e) => {
+        if (alive) report(e, "讀取白板清單失敗");
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [report]);
+
+  useEffect(() => {
+    if (availableBoards.length > 0) {
+      if (!availableBoards.some((b) => b.id === targetId)) {
+        setTargetId(availableBoards[0].id);
+      }
+    } else if (!loading) {
+      setTargetType("new");
+    }
+  }, [availableBoards, loading, targetId]);
+
+  const summaryText = [
+    cardCount > 0 ? `${cardCount} 張卡片` : "",
+    litCount > 0 ? `${litCount} 份文獻` : "",
+    imgCount > 0 ? `${imgCount} 張圖片` : "",
+  ]
+    .filter(Boolean)
+    .join("、");
+
+  const selectedBoard = availableBoards.find((b) => b.id === targetId);
+  const canSubmit =
+    !submitting &&
+    (targetType === "existing" ? Boolean(selectedBoard) : newBoardName.trim().length > 0);
+
+  const handleSubmit = async () => {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    try {
+      if (targetType === "new") {
+        await onConfirm({ type: "new", name: newBoardName.trim() }, mode, switchAfter);
+      } else if (selectedBoard) {
+        await onConfirm({ type: "existing", id: selectedBoard.id, name: selectedBoard.name }, mode, switchAfter);
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="modal" role="dialog" aria-label="批量轉移或複製到指定白板">
+      <div className="modal-card" style={{ maxWidth: 460 }}>
+        <h4>批量轉移／複製到白板</h4>
+        <div style={{ fontSize: 13, margin: "8px 0 12px" }}>
+          已選取：<strong>{summaryText}</strong>
+        </div>
+
+        <div className="field-row">
+          <span className="muted">目標白板：</span>
+          <div style={{ display: "flex", gap: 14, marginTop: 4, marginBottom: 6, fontSize: 13 }}>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="batchTargetType"
+                checked={targetType === "existing"}
+                onChange={() => setTargetType("existing")}
+                disabled={submitting || availableBoards.length === 0}
+              />
+              <span>選擇既有白板</span>
+            </label>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="batchTargetType"
+                checked={targetType === "new"}
+                onChange={() => setTargetType("new")}
+                disabled={submitting}
+              />
+              <span>建立新白板</span>
+            </label>
+          </div>
+
+          {targetType === "existing" ? (
+            loading && availableBoards.length === 0 ? (
+              <div className="muted" style={{ fontSize: 12 }}>
+                正在載入白板清單…
+              </div>
+            ) : availableBoards.length === 0 ? (
+              <div className="muted" style={{ fontSize: 12 }}>
+                目前沒有其他可用的既有白板，請選擇「建立新白板」。
+              </div>
+            ) : (
+              <select
+                value={targetId}
+                onChange={(e) => setTargetId(e.target.value)}
+                disabled={submitting}
+                autoFocus
+              >
+                {availableBoards.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.question ? `↳ ${b.name}` : b.name}（目前 {b.card_count} 張卡片）
+                  </option>
+                ))}
+              </select>
+            )
+          ) : (
+            <input
+              type="text"
+              value={newBoardName}
+              onChange={(e) => setNewBoardName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && canSubmit) {
+                  e.preventDefault();
+                  void handleSubmit();
+                }
+              }}
+              placeholder="輸入新白板名稱（建立後將自動置入所選資料）"
+              disabled={submitting}
+              autoFocus
+            />
+          )}
+        </div>
+
+        <div className="field-row" style={{ marginTop: 12 }}>
+          <span className="muted">操作方式：</span>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4, fontSize: 13 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="batchTransferMode"
+                checked={mode === "copy"}
+                onChange={() => setMode("copy")}
+                disabled={submitting}
+              />
+              <span>
+                <strong>複製</strong>（保留目前白板上的項目）
+              </span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="batchTransferMode"
+                checked={mode === "move"}
+                onChange={() => setMode("move")}
+                disabled={submitting}
+              />
+              <span>
+                <strong>轉移</strong>（置入目標白板後，從目前白板移除）
+              </span>
+            </label>
+          </div>
+        </div>
+
+        {canSwitchBoard && (
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              marginTop: 12,
+              fontSize: 12,
+              cursor: "pointer",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={switchAfter}
+              onChange={(e) => setSwitchAfter(e.target.checked)}
+              disabled={submitting}
+            />
+            <span>完成後直接切換至目標白板</span>
+          </label>
+        )}
+
+        <div className="modal-actions" style={{ marginTop: 16, justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" onClick={onClose} disabled={submitting}>
+            取消
+          </button>
+          <button
+            type="button"
+            className="primary"
+            onClick={() => void handleSubmit()}
+            disabled={!canSubmit}
+          >
+            {submitting
+              ? "處理中…"
+              : targetType === "new"
+                ? mode === "move"
+                  ? "建立新白板並轉移"
+                  : "建立新白板並複製"
+                : mode === "move"
+                  ? `確認轉移至「${selectedBoard?.name ?? ""}」`
+                  : `確認複製至「${selectedBoard?.name ?? ""}」`}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -100,13 +100,30 @@ interface IpadSyncBaseline {
   card_signatures: Record<string, string>;
 }
 
-function cardSignature(c: CardDetail, cardTags: { card_id: string; tag_id: string }[]): string {
+function cardSignature(
+  c: CardDetail,
+  cardTags: { card_id: string; tag_id: string }[],
+  links: { source_id: string; target_id: string; relation_type: string; status?: string; reason?: string }[] = [],
+  boardCards: { board_id: string; card_id: string; x?: number; y?: number }[] = [],
+): string {
+  // 納入 body、card_type、curation_status 與 sources，確保任何欄位修改都能被簽章偵測，不單純依賴 updated_at。
   const tids = cardTags
     .filter((ct) => ct.card_id === c.id)
     .map((ct) => ct.tag_id)
     .sort()
     .join(",");
-  return `${c.updated_at}|${c.title}|${tids}`;
+  const lids = links
+    .filter((l) => l.source_id === c.id || l.target_id === c.id)
+    .map((l) => `${l.source_id}->${l.target_id}:${l.relation_type}:${l.status ?? ""}:${l.reason ?? ""}`)
+    .sort()
+    .join(";");
+  const bids = boardCards
+    .filter((bc) => bc.card_id === c.id)
+    .map((bc) => `${bc.board_id}@${Math.round(bc.x ?? 0)},${Math.round(bc.y ?? 0)}`)
+    .sort()
+    .join(",");
+  const srcs = (c.sources ?? []).join(",");
+  return `${c.updated_at}|${c.title}|${c.body}|${c.card_type}|${c.curation_status}|${srcs}|${tids}|${lids}|${bids}`;
 }
 
 function loadIpadBaseline(): IpadSyncBaseline | null {
@@ -124,8 +141,10 @@ function loadIpadBaseline(): IpadSyncBaseline | null {
 function saveIpadBaseline(pkg: SyncPackage): IpadSyncBaseline {
   const sigs: Record<string, string> = {};
   const cts = pkg.card_tags ?? [];
+  const lks = pkg.links ?? [];
+  const bcs = pkg.board_cards ?? [];
   for (const c of pkg.cards ?? []) {
-    sigs[c.id] = cardSignature(c, cts);
+    sigs[c.id] = cardSignature(c, cts, lks, bcs);
   }
   const baseline: IpadSyncBaseline = {
     imported_at: new Date().toISOString(),
@@ -182,15 +201,12 @@ async function overwriteIpadLocal(pkg: SyncPackage): Promise<boolean> {
   if (baseline) {
     const local = await storage.syncExport();
     const localTags = local.card_tags ?? [];
-    const incoming = new Map<string, string>(pkg.cards.map((c) => [c.id, c.updated_at]));
+    const localLinks = local.links ?? [];
+    const localBcs = local.board_cards ?? [];
     const modified = local.cards.filter((c) => {
       const prev = baseline.card_signatures[c.id];
-      return (
-        prev !== undefined &&
-        cardSignature(c, localTags) !== prev &&
-        incoming.has(c.id) &&
-        incoming.get(c.id) !== c.updated_at
-      );
+      // 只要 iPad 本機簽章與上次同步快照不同即代表有未同步變更；移除 incoming.get(c.id) !== c.updated_at，避免僅改連結或白板位置時因 updated_at 未變而漏判並靜默覆蓋。
+      return prev !== undefined && cardSignature(c, localTags, localLinks, localBcs) !== prev;
     });
     if (modified.length > 0) {
       const shown = modified
@@ -279,23 +295,27 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
   const handlePcOverwriteImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (
-      !window.confirm(
-        "⚠️ 【警告：完整覆蓋還原】\n" +
-          "此動作將會【完全清空】目前電腦端的資料庫，並以選取的備份檔案 100% 取代！\n" +
-          "包含卡片、標籤、白板、分組框與關係句型皆會被此檔案完全覆寫。\n\n" +
-          "確定要繼續覆蓋還原嗎？",
-      )
-    ) {
-      if (overwriteInputRef.current) overwriteInputRef.current.value = "";
-      return;
-    }
     setApplying(true);
     try {
+      // 先解析並驗證備份檔來源與時間，在清空電腦端資料庫「之前」讓使用者確認，避免誤用 iPad 備份檔覆蓋導致電腦端專屬資料永久遺失。
       const text = await file.text();
       const parsed = JSON.parse(text) as SyncPackage;
       if (!parsed || !Array.isArray(parsed.cards)) {
         throw new Error("無效的備份檔案格式（缺少 cards 陣列）");
+      }
+      const srcLabel = parsed.source_device === "ipad" ? "iPad / 網頁版（不含電腦端日誌、問題白板、文獻庫與白板圖片）" : (parsed.source_device || "電腦版");
+      const timeLabel = formatSyncTime(parsed.exported_at);
+      if (
+        !window.confirm(
+          "⚠️ 【警告：完整覆蓋還原】\n" +
+            `備份來源：${srcLabel}\n` +
+            `備份時間：${timeLabel}（共 ${parsed.cards.length} 張卡片）\n\n` +
+            "此動作將會以選取的備份檔案覆蓋電腦端的卡片、標籤、連結與白板配置！\n" +
+            "（若備份檔未包含日誌、問題白板、文獻庫、關係句型或白板圖片，本機既有資料會盡量保留，但依附於已刪除卡片／白板的項目將會一併清除。）\n\n" +
+            "確定要繼續覆蓋還原嗎？",
+        )
+      ) {
+        return;
       }
       const res = await api.syncOverwrite(parsed);
       info(`完整還原成功！已由備份檔重組 ${res.cards_count} 張卡片與資料庫結構。`);
@@ -305,8 +325,9 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       if (res.daily_pruned.converted_refs) lost.push(`${res.daily_pruned.converted_refs} 筆日誌已轉卡片標記`);
       if (res.questions_pruned) lost.push(`${res.questions_pruned} 塊問題白板`);
       if (res.relations_pruned) lost.push(`${res.relations_pruned} 條問題關聯`);
-      if (res.images_pruned.images) lost.push(`${res.images_pruned.images} 張白板圖片`);
-      if (res.images_pruned.links) lost.push(`${res.images_pruned.links} 條白板圖片連線`);
+      // 對齊後端 cards.py::sync_overwrite 實際回傳的 images_pruned 與 image_links_pruned 整數欄位，避免讀取 number 的 .images 屬性永遠得到 undefined 而靜默吞掉遺失警告。
+      if (res.images_pruned) lost.push(`${res.images_pruned} 張白板圖片`);
+      if (res.image_links_pruned) lost.push(`${res.image_links_pruned} 條白板圖片連線`);
       if (lost.length > 0) {
         report(new Error(`備份檔沒有這些資料的對應內容，本機原有的已無法保留：${lost.join("、")}`), "還原完成但有資料被捨棄");
       }
@@ -374,6 +395,8 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
     if (!ipadFullPkg) return { pkg: null, matchedCards: [], totalCount: 0 };
     const allCards = ipadFullPkg.cards ?? [];
     const allCts = ipadFullPkg.card_tags ?? [];
+    const allLinks = ipadFullPkg.links ?? [];
+    const allBcs = ipadFullPkg.board_cards ?? [];
     if (!onlyChangedAfterBaseline) {
       return { pkg: ipadFullPkg, matchedCards: allCards, totalCount: allCards.length };
     }
@@ -383,12 +406,12 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
     const isUsingExactBaseline = Boolean(ipadBaseline && customCutoffLocal === baselineLocalStr);
 
     const matchedCards = allCards.filter((c) => {
-      // 1. 若有上次匯入備份的卡片簽章快照，且時間戳維持為上次匯入時間：直接比對是否為新增卡片或內容／標籤有異動
+      // 1. 若有上次匯入備份的卡片簽章快照，且時間戳維持為上次匯入時間：直接比對是否為新增卡片或內容／標籤／連結／白板有異動
       if (isUsingExactBaseline && ipadBaseline) {
         const prevSig = ipadBaseline.card_signatures[c.id];
         if (!prevSig) return true; // 匯入備份後在 iPad 新建的卡片
-        const curSig = cardSignature(c, allCts);
-        if (curSig !== prevSig) return true; // 匯入備份後在 iPad 修改過內文、標題或標籤的卡片
+        const curSig = cardSignature(c, allCts, allLinks, allBcs);
+        if (curSig !== prevSig) return true; // 匯入備份後在 iPad 修改過內容、標籤、連結或白板歸屬的卡片
         return false;
       }
       // 2. 若使用者手動調整了時間戳（或無快照僅有時間戳）：比對 created_at 或 updated_at 是否晚於該時間戳
@@ -405,8 +428,10 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       ...ipadFullPkg,
       exported_at: new Date().toISOString(),
       cards: matchedCards,
-      // 僅附帶這些新增／修改卡片的標籤關聯，避免未修改舊卡片的舊標籤覆寫回電腦端
+      // 僅附帶與這些新增／修改卡片相關的標籤、連結與白板歸屬，避免未變更舊資料覆寫回電腦端
       card_tags: allCts.filter((ct) => matchedIds.has(ct.card_id)),
+      links: allLinks.filter((l) => matchedIds.has(l.source_id) || matchedIds.has(l.target_id)),
+      board_cards: allBcs.filter((bc) => matchedIds.has(bc.card_id)),
     };
     return { pkg: filteredPkg, matchedCards, totalCount: allCards.length };
   }, [customCutoffLocal, ipadBaseline, ipadFullPkg, onlyChangedAfterBaseline]);
@@ -496,6 +521,19 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       return;
     }
     if (!ipadFilteredExport.pkg) return;
+    // 檢查待上傳卡片是否引用了本機媒體；因為 sendP2PPackage 只傳 JSON 不傳 IndexedDB 圖片，必須明確提醒使用者避免誤刪 iPad 圖片。
+    const hasMediaRefs = ipadFilteredExport.pkg.cards.some((c) => /!\[[^\]]*\]\(media:[0-9a-fA-F-]{36}\)/.test(c.body));
+    if (
+      hasMediaRefs &&
+      !window.confirm(
+        "⚠️ 注意：偵測到待上傳的卡片內文包含圖片引用。\n" +
+          "iPad 上傳雲端僅會同步文字與結構資料，【不會】上傳在 iPad 本機新貼入的圖片檔。\n" +
+          "請勿在電腦端合併後直接覆蓋回 iPad，以免新貼入的圖片遺失。\n\n" +
+          "確定要繼續上傳變更至 Drive 嗎？",
+      )
+    ) {
+      return;
+    }
     saveCloudCredential(cred);
     setCloudBusy(true);
     sendP2PPackage(

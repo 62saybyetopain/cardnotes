@@ -157,21 +157,31 @@ export function IPadCardView({
     }
   };
 
-  // 批次標記為已整理（移出收件夾）
+  // 批次標記為已整理（移出收件夾）：記錄已完成數量，中途失敗時仍刷新已變更項目並保留失敗項的勾選狀態
   const handleBatchMarkCurated = async () => {
     if (selectedIds.size === 0) return;
     setBatchOperating(true);
+    const ids = Array.from(selectedIds);
+    const succeeded = new Set<string>();
     try {
-      const ids = Array.from(selectedIds);
       for (const cardId of ids) {
         const c = await api.getCard(cardId);
         await api.patchCard(cardId, { curation_status: "curated" }, c.updated_at);
+        succeeded.add(cardId);
       }
       info(`已成功將 ${ids.length} 張卡片標記為已整理！`);
       clearSelection();
       onRefresh();
     } catch (e) {
-      report(e, "批次整理失敗");
+      if (succeeded.size > 0) {
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          succeeded.forEach((id) => next.delete(id));
+          return next;
+        });
+        onRefresh();
+      }
+      report(e, succeeded.size > 0 ? `部分批次整理失敗（已完成 ${succeeded.size}/${ids.length} 張）` : "批次整理失敗");
     } finally {
       setBatchOperating(false);
     }
@@ -361,6 +371,12 @@ export function IPadCardView({
       if (!(await overwriteLocal(demoPkg))) {
         info("已取消載入示範資料，iPad 上的資料沒有任何變動。");
         return;
+      }
+      // 整庫已被示範資料覆蓋，舊同步基準線已失效，必須清除以免後續同步誤判差異
+      try {
+        localStorage.removeItem("cardboard:ipad-sync-baseline");
+      } catch {
+        /* 忽略 localStorage 存取限制 */
       }
       info("已成功載入示範資料！已建立收納抽屜、概念標籤與關聯卡片。");
       onRefresh();
@@ -619,7 +635,7 @@ export function IPadCardView({
                 )}
               </div>
 
-              {/* 底部拖曳拉條：可拖曳調節卡片長度，最小高度限制為 200px */}
+              {/* 底部拖曳拉條：可拖曳調節卡片長度，最小高度限制為 DEFAULT_CARD_HEIGHT (136px) */}
               <div
                 className="ipad-card-resizer"
                 onMouseDown={(e) => startResize(e, c.id, currentHeight)}

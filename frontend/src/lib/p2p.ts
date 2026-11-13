@@ -428,6 +428,25 @@ export function sendP2PPackage(
   void (async () => {
     try {
       const token = await resolveAccessToken(credentialInput);
+      // 檢查雲端是否已有未合併的 iPad 封包：若既有封包包含本次未涵蓋的卡片，強制要求使用者確認才覆寫，避免連續上傳蓋掉前次未同步變更。
+      const existingId = await findDriveFileId(token, IPAD_SYNC_FILENAME);
+      if (existingId) {
+        const prevPkg = await downloadJsonFromDrive(token, IPAD_SYNC_FILENAME).catch(() => null);
+        if (prevPkg && Array.isArray(prevPkg.cards) && prevPkg.cards.length > 0) {
+          const nextIds = new Set(pkg.cards.map((c) => c.id));
+          const dropped = prevPkg.cards.filter((c) => !nextIds.has(c.id));
+          if (dropped.length > 0) {
+            const ok = window.confirm(
+              `⚠️ 雲端上已有一份 iPad 同步檔（匯出時間：${new Date(prevPkg.exported_at).toLocaleString()}），其中包含 ${dropped.length} 張本次未包含的卡片。\n` +
+                "若電腦端尚未拉取該份資料，直接上傳將會覆蓋它並導致這幾張卡片的變更遺失。\n\n確定要覆蓋雲端檔案嗎？",
+            );
+            if (!ok) {
+              onError(new Error("已取消上傳，雲端既有同步封包已保留"));
+              return;
+            }
+          }
+        }
+      }
       await uploadJsonToDrive(token, IPAD_SYNC_FILENAME, pkg);
       onSuccess();
     } catch (err) {

@@ -302,6 +302,7 @@ export const httpApi = {
   syncExport: () => request<SyncPackage>("GET", "/sync/export"),
   syncDiff: (pkg: SyncPackage) => request<SyncDiffReport>("POST", "/sync/diff", pkg),
   syncApply: (payload: SyncApplyRequest) => request<SyncApplyResult>("POST", "/sync/apply", payload),
+  // 對齊後端 cards.py::sync_overwrite 實際回傳欄位（images_pruned 與 image_links_pruned 為獨立整數），修正原先物件型別錯誤導致前端讀取為 undefined 而靜默吞掉圖片遺失警告的問題。
   syncOverwrite: (pkg: SyncPackage) =>
     request<{
       restored: boolean;
@@ -309,7 +310,8 @@ export const httpApi = {
       daily_pruned: { bindings: number; converted_refs: number };
       questions_pruned: number;
       relations_pruned: number;
-      images_pruned: { images: number; links: number };
+      images_pruned: number;
+      image_links_pruned: number;
     }>(
       "POST",
       "/sync/overwrite",

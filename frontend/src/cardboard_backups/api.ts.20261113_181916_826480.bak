@@ -2,6 +2,7 @@ import type {
   BoardCard,
   BoardData,
   BoardGroup,
+  BoardImage,
   BoardLink,
   BoardLiterature,
   BoardNote,
@@ -204,6 +205,13 @@ export const httpApi = {
   ) => request<BoardQuestion>("PATCH", `/boards/${board_id}/question`, patch),
   listArchivedQuestions: () => request<{ questions: ArchivedQuestion[] }>("GET", "/questions/archived"),
   boardQuestionPage: (id: string) => request<QuestionPage>("GET", `/boards/${id}/question-page`),
+  // 移動問題白板（連同子孫）到另一塊白板底下；已在目標底下回 moved:false。僅電腦端，httpDriver.ts 要同步，否則 Proxy 回 501
+  moveBoardQuestion: (board_id: string, new_parent_board_id: string) =>
+    request<{ moved: boolean; board_id: string; parent_board_id: string; x: number; y: number }>(
+      "POST",
+      `/boards/${board_id}/question/move`,
+      { new_parent_board_id },
+    ),
   // 問題關聯：僅電腦端 SQLite。新增方法時 httpDriver.ts 要同步，否則 Proxy 回 501
   listQuestionRelations: (board_id: string) =>
     request<{ relations: QuestionRelation[] }>("GET", `/boards/${board_id}/relations`),
@@ -258,6 +266,30 @@ export const httpApi = {
   ) => request<BoardLiterature>("PATCH", `/boards/${board_id}/literatures/${literature_id}`, patch),
   removeLiteratureFromBoard: (board_id: string, literature_id: string) =>
     request<{ removed: boolean }>("DELETE", `/boards/${board_id}/literatures/${literature_id}`),
+  // 白板圖片與圖片連線：僅電腦端 SQLite。新增方法時 driver.ts／httpDriver.ts／indexedDbDriver.ts 要同步
+  createBoardImage: (board_id: string, body: { media_id: string; x: number; y: number; w: number; h: number }) =>
+    request<BoardImage>("POST", `/boards/${board_id}/images`, body),
+  // 裁切四欄必須一起送（後端驗證）
+  patchBoardImage: (
+    board_id: string,
+    image_id: string,
+    patch: {
+      x?: number;
+      y?: number;
+      w?: number;
+      h?: number;
+      crop_x?: number;
+      crop_y?: number;
+      crop_w?: number;
+      crop_h?: number;
+    },
+  ) => request<BoardImage>("PATCH", `/boards/${board_id}/images/${image_id}`, patch),
+  deleteBoardImage: (board_id: string, image_id: string) =>
+    request<{ deleted: boolean }>("DELETE", `/boards/${board_id}/images/${image_id}`),
+  putBoardImageLink: (board_id: string, image_id: string, card_id: string) =>
+    request<{ existed: boolean }>("PUT", `/boards/${board_id}/image-links`, { image_id, card_id }),
+  deleteBoardImageLink: (board_id: string, image_id: string, card_id: string) =>
+    request<{ deleted: boolean }>("DELETE", `/boards/${board_id}/image-links/${image_id}/${card_id}`),
   // media
   uploadMedia: (file: File) => {
     const form = new FormData();
@@ -271,7 +303,14 @@ export const httpApi = {
   syncDiff: (pkg: SyncPackage) => request<SyncDiffReport>("POST", "/sync/diff", pkg),
   syncApply: (payload: SyncApplyRequest) => request<SyncApplyResult>("POST", "/sync/apply", payload),
   syncOverwrite: (pkg: SyncPackage) =>
-    request<{ restored: boolean; cards_count: number; daily_pruned?: { bindings: number; converted_refs: number } }>(
+    request<{
+      restored: boolean;
+      cards_count: number;
+      daily_pruned: { bindings: number; converted_refs: number };
+      questions_pruned: number;
+      relations_pruned: number;
+      images_pruned: { images: number; links: number };
+    }>(
       "POST",
       "/sync/overwrite",
       pkg,

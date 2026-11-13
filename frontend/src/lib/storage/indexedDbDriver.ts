@@ -451,7 +451,11 @@ export class IndexedDbDriver implements StorageDriver {
       };
     }
 
+    const now = utcNow();
     await db.links.add({ source_id: sId, target_id: tId, relation_type, status, reason });
+    // 同步更新雙端卡片的 updated_at，確保 iPad 依時間戳篩選匯出時能偵測到僅修改語意連結的卡片
+    await db.cards.update(sId, { updated_at: now });
+    await db.cards.update(tId, { updated_at: now });
     return {
       source_id: sId,
       target_id: tId,
@@ -491,6 +495,7 @@ export class IndexedDbDriver implements StorageDriver {
     const nextStatus = patch.status ?? match.status;
     const nextReason = patch.reason !== undefined ? patch.reason : match.reason;
 
+    const now = utcNow();
     await db.links.update(match.id, {
       source_id: nextS,
       target_id: nextT,
@@ -498,6 +503,8 @@ export class IndexedDbDriver implements StorageDriver {
       status: nextStatus,
       reason: nextReason,
     });
+    await db.cards.update(nextS, { updated_at: now });
+    await db.cards.update(nextT, { updated_at: now });
 
     return {
       source_id: nextS,
@@ -511,7 +518,7 @@ export class IndexedDbDriver implements StorageDriver {
   }
 
   async deleteLink(source_id: string, target_id: string, relation_type?: RelationType): Promise<{ deleted: boolean }> {
-    await db.links
+    const cnt = await db.links
       .filter(
         (l) =>
           l.source_id === source_id &&
@@ -519,6 +526,11 @@ export class IndexedDbDriver implements StorageDriver {
           (!relation_type || l.relation_type === relation_type),
       )
       .delete();
+    if (cnt > 0) {
+      const now = utcNow();
+      await db.cards.update(source_id, { updated_at: now });
+      await db.cards.update(target_id, { updated_at: now });
+    }
     return { deleted: true };
   }
 
@@ -732,12 +744,14 @@ export class IndexedDbDriver implements StorageDriver {
     const exists = await db.card_tags.where({ card_id, tag_id }).first();
     if (exists) return { existed: true };
     await db.card_tags.add({ card_id, tag_id });
+    await db.cards.update(card_id, { updated_at: utcNow() });
     return { existed: false };
   }
 
   async unassignTag(card_id: string, tag_id: string): Promise<{ removed: boolean }> {
     const cnt = await db.card_tags.where({ card_id, tag_id }).delete();
     if (cnt === 0) throw new ApiError("NOT_FOUND", "這張卡片沒有這個標籤", 404);
+    await db.cards.update(card_id, { updated_at: utcNow() });
     return { removed: true };
   }
 
@@ -846,6 +860,7 @@ export class IndexedDbDriver implements StorageDriver {
   }
 
   async patchBoardCards(board_id: string, items: { card_id: string; x: number; y: number; w?: number; h?: number }[]): Promise<{ updated: number }> {
+    const now = utcNow();
     for (const item of items) {
       const match = await db.board_cards.where({ board_id, card_id: item.card_id }).first();
       if (match && match.id !== undefined) {
@@ -855,6 +870,7 @@ export class IndexedDbDriver implements StorageDriver {
           w: item.w !== undefined ? item.w : match.w,
           h: item.h !== undefined ? item.h : match.h,
         });
+        await db.cards.update(item.card_id, { updated_at: now });
       }
     }
     return { updated: items.length };
@@ -1024,7 +1040,7 @@ export class IndexedDbDriver implements StorageDriver {
 
     await db.transaction(
       "rw",
-      [db.cards, db.tags, db.tag_aliases, db.card_tags, db.links, db.boards, db.board_cards, db.board_groups, db.board_notes],
+      [db.cards, db.tags, db.tag_aliases, db.card_tags, db.links, db.boards, db.board_cards, db.board_groups, db.board_notes, db.media],
       async () => {
         // 便利貼：封包沒帶 board_notes（舊版匯出）時，清空前先留下本機的，避免覆蓋同步悄悄刪光便利貼
         const keptNotes = Array.isArray(pkg.board_notes) ? null : await db.board_notes.toArray();
@@ -1066,13 +1082,13 @@ export class IndexedDbDriver implements StorageDriver {
           pendingTags.push(...remaining);
         }
 
-        // 3. 寫入卡片（完整保留 sources 出處欄位）
+        // 3. 寫入卡片（完整保留 sources 出處欄位；title 強制轉字串以維持 [title+id] 索引完整性）
         const importedCardIds = new Set<string>();
         for (const c of pkg.cards ?? []) {
           await db.cards.put({
             id: c.id,
-            title: c.title,
-            body: c.body,
+            title: c.title ?? "",
+            body: c.body ?? "",
             card_type: c.card_type ?? "untyped",
             curation_status: c.curation_status ?? "inbox",
             sources: Array.isArray(c.sources) ? c.sources : [],
@@ -1165,6 +1181,21 @@ export class IndexedDbDriver implements StorageDriver {
               created_at: n.created_at || utcNow(),
             });
           }
+        }
+
+        // 9. 清理 db.media 中已不被任何覆蓋後卡片引用的孤兒媒體檔，避免 iPad 舊本機貼圖永久殘留佔用儲存空間
+        const referencedMedia = new Set<string>();
+        const mediaRe = /!\[[^\]]*\]\(media:([0-9a-fA-F-]{36})\)/g;
+        for (const c of pkg.cards ?? []) {
+          let m: RegExpExecArray | null;
+          while ((m = mediaRe.exec(c.body ?? "")) !== null) {
+            referencedMedia.add(m[1].toLowerCase());
+          }
+        }
+        const allMediaKeys = await db.media.toCollection().primaryKeys();
+        const orphanMediaKeys = allMediaKeys.filter((id) => !referencedMedia.has(id.toLowerCase()));
+        if (orphanMediaKeys.length > 0) {
+          await db.media.bulkDelete(orphanMediaKeys);
         }
       },
     );

@@ -732,12 +732,14 @@ export class IndexedDbDriver implements StorageDriver {
     const exists = await db.card_tags.where({ card_id, tag_id }).first();
     if (exists) return { existed: true };
     await db.card_tags.add({ card_id, tag_id });
+    await db.cards.update(card_id, { updated_at: utcNow() });
     return { existed: false };
   }
 
   async unassignTag(card_id: string, tag_id: string): Promise<{ removed: boolean }> {
     const cnt = await db.card_tags.where({ card_id, tag_id }).delete();
     if (cnt === 0) throw new ApiError("NOT_FOUND", "這張卡片沒有這個標籤", 404);
+    await db.cards.update(card_id, { updated_at: utcNow() });
     return { removed: true };
   }
 
@@ -1066,13 +1068,13 @@ export class IndexedDbDriver implements StorageDriver {
           pendingTags.push(...remaining);
         }
 
-        // 3. 寫入卡片（完整保留 sources 出處欄位）
+        // 3. 寫入卡片（完整保留 sources 出處欄位；title 強制轉字串以維持 [title+id] 索引完整性）
         const importedCardIds = new Set<string>();
         for (const c of pkg.cards ?? []) {
           await db.cards.put({
             id: c.id,
-            title: c.title,
-            body: c.body,
+            title: c.title ?? "",
+            body: c.body ?? "",
             card_type: c.card_type ?? "untyped",
             curation_status: c.curation_status ?? "inbox",
             sources: Array.isArray(c.sources) ? c.sources : [],
@@ -1595,6 +1597,27 @@ export class IndexedDbDriver implements StorageDriver {
   }
   async removeLiteratureFromBoard(): Promise<never> {
     return this.literatureUnsupported();
+  }
+
+  // ---- 白板圖片（僅電腦端 SQLite，不納入 Dexie 與同步封包）----
+  // assumption: 網頁／iPad 版沒有白板圖片功能（Board.tsx 在 dexie 下不註冊貼上與右鍵項目）；寫入大聲報錯
+  private imagesUnsupported(): never {
+    throw new ApiError("UNSUPPORTED_ON_DEXIE", "此功能僅電腦端可用", 400);
+  }
+  async createBoardImage(): Promise<never> {
+    return this.imagesUnsupported();
+  }
+  async patchBoardImage(): Promise<never> {
+    return this.imagesUnsupported();
+  }
+  async deleteBoardImage(): Promise<never> {
+    return this.imagesUnsupported();
+  }
+  async putBoardImageLink(): Promise<never> {
+    return this.imagesUnsupported();
+  }
+  async deleteBoardImageLink(): Promise<never> {
+    return this.imagesUnsupported();
   }
 }
 
