@@ -302,8 +302,23 @@ export const httpApi = {
   syncExport: () => request<SyncPackage>("GET", "/sync/export"),
   syncDiff: (pkg: SyncPackage) => request<SyncDiffReport>("POST", "/sync/diff", pkg),
   syncApply: (payload: SyncApplyRequest) => request<SyncApplyResult>("POST", "/sync/apply", payload),
+  // 對齊後端 cards.py::sync_overwrite 實際回傳欄位（images_pruned 與 image_links_pruned 為獨立整數），修正原先物件型別錯誤導致前端讀取為 undefined 而靜默吞掉圖片遺失警告的問題。
   syncOverwrite: (pkg: SyncPackage) =>
-    request<{ restored: boolean; cards_count: number; daily_pruned?: { bindings: number; converted_refs: number } }>(
+    request<{
+      restored: boolean;
+      snapshot_path: string; // 對齊 cards.py::sync_overwrite 新增的回傳欄位：覆蓋前的整庫快照路徑
+      cards_count: number;
+      daily_pruned: { bindings: number; converted_refs: number };
+      notes_pruned: number;
+      patterns_pruned: number;
+      card_relations_pruned: number;
+      questions_pruned: number;
+      relations_pruned: number;
+      images_pruned: number;
+      image_links_pruned: number;
+      relation_patterns_pruned: number; // 對齊 cards.py::sync_overwrite：保留本機句型時被捨棄的筆數
+      // 刪除重複宣告的 card_relations_pruned（第 314 行已定義），消除 TS2300 重複識別碼錯誤。
+    }>(
       "POST",
       "/sync/overwrite",
       pkg,

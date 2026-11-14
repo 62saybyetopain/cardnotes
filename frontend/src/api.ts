@@ -306,19 +306,32 @@ export const httpApi = {
   syncOverwrite: (pkg: SyncPackage) =>
     request<{
       restored: boolean;
+      snapshot_path: string; // 對齊 cards.py::sync_overwrite 新增的回傳欄位：覆蓋前的整庫快照路徑
       cards_count: number;
       daily_pruned: { bindings: number; converted_refs: number };
       notes_pruned: number;
+      patterns_pruned: number;
+      card_relations_pruned: number;
       questions_pruned: number;
       relations_pruned: number;
       images_pruned: number;
       image_links_pruned: number;
+      relation_patterns_pruned: number; // 對齊 cards.py::sync_overwrite：保留本機句型時被捨棄的筆數
+      // 刪除重複宣告的 card_relations_pruned（第 314 行已定義），消除 TS2300 重複識別碼錯誤。
     }>(
       "POST",
       "/sync/overwrite",
       pkg,
     ),
-  syncSaveToFile: (target_path: string) => request<{ saved: boolean; path: string; exported_at: string }>("POST", "/sync/save-file", { target_path }),
+  syncSaveToFile: (target_path: string) =>
+    request<{
+      saved: boolean;
+      path: string;
+      exported_at: string;
+      kept_previous: boolean;
+      history_count: number;
+      history_dir: string | null;
+    }>("POST", "/sync/save-file", { target_path }),
   pickSystemFile: (body: {
     mode?: "open" | "save";
     title?: string;

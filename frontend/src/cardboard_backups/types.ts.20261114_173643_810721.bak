@@ -594,12 +594,15 @@ export interface SyncPackage {
   version: number;
   exported_at: string;
   source_device: string;
+  // true 代表僅包含篩選變更的局部差異封包，嚴禁用於整庫覆蓋還原
+  is_partial?: boolean;
   cards: CardDetail[];
   tags: Tag[];
   card_tags: { card_id: string; tag_id: string }[];
   links: BoardLink[];
   boards: { id: string; name: string }[];
-  board_cards: { board_id: string; card_id: string; x?: number; y?: number; w?: number; h?: number }[];
+  // z＝疊放順序，僅電腦端匯出會帶；沒有 z＝iPad 封包或舊備份，覆蓋時沿用本機同一張卡在同一塊白板上的 z（iPad 無法調整 z，匯出不帶）
+  board_cards: { board_id: string; card_id: string; x?: number; y?: number; w?: number; h?: number; z?: number }[];
   board_groups?: BoardGroup[];
   // 問題關聯（兩端可以是一般白板）。沒有此欄＝舊備份或 iPad 封包，覆蓋時保留本機原有的；與「空陣列＝關聯被清空」不同
   question_relations?: { id: string; board_a: string; board_b: string; relation_type: QuestionRelationType; created_at: string }[];
@@ -608,7 +611,10 @@ export interface SyncPackage {
   // 白板圖片（僅電腦端）。沒有這兩欄＝舊備份或 iPad 封包，覆蓋時保留本機原有的；兩欄必須同進同出（後端 schemas.SyncPackage 驗證）
   board_images?: BoardImage[];
   board_image_links?: { image_id: string; card_id: string; created_at: string }[];
-  // 電腦端雲端備份才有：卡片引用的圖片清單，iPad 據此下載缺少的圖片
+  // 後端 sync_export 的文獻區塊；前端只讀寫 items[].body（內文引用圖片），其餘欄位原樣保留。沒有此欄＝iPad 封包或舊備份
+  // 原因：collectMediaIds 與還原時的圖片 id 改寫都要碰文獻內文，沒有型別宣告就得用 any 繞過。
+  literature?: { items: { id: string; body: string }[]; [key: string]: unknown };
+  // 電腦端雲端備份才有：卡片內文與白板圖片引用的圖檔清單；iPad 據此下載缺少的圖片（iPad 不渲染白板圖片，不會下載它們）
   media?: SyncMediaEntry[];
 }
 

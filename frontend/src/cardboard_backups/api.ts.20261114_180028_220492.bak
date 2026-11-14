@@ -306,12 +306,18 @@ export const httpApi = {
   syncOverwrite: (pkg: SyncPackage) =>
     request<{
       restored: boolean;
+      snapshot_path: string; // 對齊 cards.py::sync_overwrite 新增的回傳欄位：覆蓋前的整庫快照路徑
       cards_count: number;
       daily_pruned: { bindings: number; converted_refs: number };
+      notes_pruned: number;
+      patterns_pruned: number;
+      card_relations_pruned: number;
       questions_pruned: number;
       relations_pruned: number;
       images_pruned: number;
       image_links_pruned: number;
+      relation_patterns_pruned: number; // 對齊 cards.py::sync_overwrite：保留本機句型時被捨棄的筆數
+      card_relations_pruned: number;
     }>(
       "POST",
       "/sync/overwrite",

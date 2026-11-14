@@ -5,11 +5,13 @@
 // @depends-on ../lib/storage/index.ts (getPreferredDriverType, storage)
 // @depends-on ../types.ts (CARD_TYPE_LABELS, CardDetail, CardType, SyncPackage, SyncDiffReport, SyncCardDiff)
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { mediaUrl } from "../lib/media";
 import {
+  collectMediaIds,
   downloadMediaFromCloud,
   getSavedCloudCredential,
+  markIpadPackageMerged,
   pullIpadPackageFromCloud,
   pullP2PPackageFromPc,
   saveCloudCredential,
@@ -218,11 +220,49 @@ async function overwriteIpadLocal(pkg: SyncPackage): Promise<boolean> {
     );
     if (!proceed) return false;
   }
+  // 原因：整庫覆蓋還會清掉 iPad 上封包沒有的白板、便利貼與分組框；它們不在上面的卡片比對內，合併流程也不會把它們同步回電腦端，不先列出就會靜默消失。
+  // 比對規則對齊 importPackageOverwrite：分組框一律以封包為準；封包沒帶 board_notes 時，只保留所屬白板仍存在的便利貼。
+  const local = await storage.syncExport();
+  const incomingBoards = new Set((pkg.boards ?? []).map((b) => b.id));
+  const incomingNotes = new Set((pkg.board_notes ?? []).map((n) => n.id));
+  const incomingGroups = new Set((pkg.board_groups ?? []).map((g) => g.id));
+  const lostBoards = local.boards.filter((b) => !incomingBoards.has(b.id));
+  const lostNotes = (local.board_notes ?? []).filter((n) =>
+    pkg.board_notes ? !incomingNotes.has(n.id) : !incomingBoards.has(n.board_id),
+  );
+  const lostGroups = (local.board_groups ?? []).filter((g) => !incomingGroups.has(g.id));
+  if (lostBoards.length + lostNotes.length + lostGroups.length > 0) {
+    const shownBoards = lostBoards
+      .slice(0, 5)
+      .map((b) => "・白板：" + (b.name || "（未命名）"))
+      .join("\n");
+    const proceedStructures = window.confirm(
+      "此 iPad 上有電腦備份沒有的項目，繼續覆蓋會永久刪除它們：\n" +
+        `白板 ${lostBoards.length} 個、便利貼 ${lostNotes.length} 張、分組框 ${lostGroups.length} 個\n` +
+        (shownBoards ? shownBoards + "\n" : "") +
+        "\n按「確定」繼續覆蓋，按「取消」中止（iPad 資料不會變動）。",
+    );
+    if (!proceedStructures) return false;
+  }
+  const baseline = await loadIpadBaseline();
+  // 原因：拉到比上次同步更舊的備份（例如 Drive 上的備份尚未更新）會讓 iPad 靜默回滾；用 Date.parse 比較，因為兩端時間戳格式不同。
+  if (baseline) {
+    const incomingMs = Date.parse(pkg.exported_at);
+    const baselineMs = Date.parse(baseline.backup_exported_at);
+    if (Number.isFinite(incomingMs) && Number.isFinite(baselineMs) && incomingMs < baselineMs) {
+      const proceedOld = window.confirm(
+        "⚠️ 這份備份（" +
+          formatSyncTime(pkg.exported_at) +
+          "）比 iPad 上次同步的備份（" +
+          formatSyncTime(baseline.backup_exported_at) +
+          "）更舊，覆蓋會讓 iPad 回到較舊的狀態。\n\n按「確定」繼續覆蓋，按「取消」中止（iPad 資料不會變動）。",
+      );
+      if (!proceedOld) return false;
+    }
+  }
   // 已修改的既有卡片：findLocalOnlyCards 看不到它們，覆蓋後 iPad 上的改動會靜默消失。
   // 以上次同步時記下的簽章為準（存於 IndexedDB sync_meta，與卡片資料同生命週期）
-  const baseline = await loadIpadBaseline();
   if (baseline) {
-    const local = await storage.syncExport();
     const localTags = local.card_tags ?? [];
     const localLinks = local.links ?? [];
     const localBcs = local.board_cards ?? [];
@@ -250,6 +290,60 @@ async function overwriteIpadLocal(pkg: SyncPackage): Promise<boolean> {
   }
   await storage.importPackageOverwrite(pkg);
   return true;
+}
+
+// @depends-on lib/p2p.ts::collectMediaIds / downloadMediaFromCloud（Drive 檔名＝前綴＋圖片編號，等同圖片清單）
+// @depends-on backend media.py::upload_media（以 sha256 去重，回傳的編號可能與原編號不同）/ GET /media/{id}/info（NOT_FOUND 須為 HTTP 404）
+// @depends-on 封包內三處圖片引用：cards[].body、literature.items[].body、board_images[].media_id；新增引用位置時必須同步改這裡
+// 原因：換電腦或重灌後只剩 .json 時，備份引用的圖檔在本機媒體庫不存在，直接覆蓋還原會讓所有圖片 404。
+// 做法：還原前逐一確認本機有無，缺的從 Drive 下載再上傳（本機會配發新編號），並同步改寫封包內三處引用；同機還原時全部都在，不會發出任何雲端請求。
+export async function restoreMissingMedia(
+  pkg: SyncPackage,
+): Promise<{ pkg: SyncPackage; missing: string[]; restored: number }> {
+  const absent: string[] = [];
+  for (const id of collectMediaIds(pkg)) {
+    try {
+      await api.mediaInfo(id);
+    } catch (e) {
+      // 只有 404 才代表本機確實沒有；連不上後端等其他錯誤不可當成「缺圖」，直接往上拋
+      if (e instanceof ApiError && e.status === 404) absent.push(id);
+      else throw e;
+    }
+  }
+  if (absent.length === 0) return { pkg, missing: [], restored: 0 };
+
+  const remap = new Map<string, string>();
+  const missing: string[] = [];
+  for (const id of absent) {
+    const blob = await downloadMediaFromCloud(id); // null＝雲端確實沒有；其餘失敗（沒金鑰、離線、內容被截斷）一律丟錯
+    if (!blob) {
+      missing.push(id);
+      continue;
+    }
+    const uploaded = await api.uploadMedia(new File([blob], id, { type: blob.type }));
+    if (uploaded.id.toLowerCase() !== id.toLowerCase()) remap.set(id.toLowerCase(), uploaded.id);
+  }
+  const restored = absent.length - missing.length;
+  if (remap.size === 0) return { pkg, missing, restored };
+
+  const re = /(!\[[^\]]*\]\(media:)([0-9a-fA-F-]{36})(\))/g;
+  const fix = (s: string) =>
+    s.replace(re, (full, pre, oldId, post) => {
+      const mapped = remap.get(String(oldId).toLowerCase());
+      return mapped ? `${pre}${mapped}${post}` : full;
+    });
+  return {
+    pkg: {
+      ...pkg,
+      cards: pkg.cards.map((c) => ({ ...c, body: fix(c.body) })),
+      board_images: pkg.board_images?.map((im) => ({ ...im, media_id: remap.get(im.media_id.toLowerCase()) ?? im.media_id })),
+      literature: pkg.literature
+        ? { ...pkg.literature, items: pkg.literature.items.map((it) => ({ ...it, body: fix(it.body) })) }
+        : pkg.literature,
+    },
+    missing,
+    restored,
+  };
 }
 
 export function SyncModal({ onClose, onApplied, report, info }: Props) {
@@ -307,7 +401,8 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       const res = await api.syncSaveToFile(autoBackupCfg.targetPath.trim());
       localStorage.setItem(LAST_BACKUP_TIME_KEY, res.exported_at);
       setLastBackupTime(res.exported_at);
-      info(`💾 已成功覆寫備份至本機固定檔案：${res.path}`);
+      const hist = res.history_count > 0 ? `；已保留 ${res.history_count} 份歷史版本（${res.history_dir}）` : "";
+      info(`💾 已成功備份至本機固定檔案：${res.path}${hist}`);
     } catch (err) {
       report(err, "手動覆寫備份失敗");
     } finally {
@@ -345,8 +440,30 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       ) {
         return;
       }
-      const res = await api.syncOverwrite(parsed);
-      info(`完整還原成功！已由備份檔重組 ${res.cards_count} 張卡片與資料庫結構。`);
+      // 原因：覆蓋前先把備份引用但本機缺少的圖檔從 Drive 補回；補回失敗或雲端也缺檔時由使用者決定是否仍覆蓋，不靜默繼續。
+      // 圖片補回發生在清空資料庫之前，中途失敗只會多出無人引用的媒體，資料庫不受影響。
+      let toRestore = parsed;
+      try {
+        const r = await restoreMissingMedia(parsed);
+        toRestore = r.pkg;
+        if (r.restored > 0) {
+          info(`☁️ 已從 Drive 補回 ${r.restored} 張圖片；還原後請重新「上傳雲端備份」，雲端圖片清單才會更新為新編號。`);
+        }
+        if (
+          r.missing.length > 0 &&
+          !window.confirm(`⚠️ 有 ${r.missing.length} 張圖片在本機與 Drive 都找不到，還原後會顯示為遺失。\n仍要繼續覆蓋還原嗎？`)
+        ) {
+          return;
+        }
+      } catch (mediaErr) {
+        const reason = mediaErr instanceof Error ? mediaErr.message : String(mediaErr);
+        if (!window.confirm(`⚠️ 無法確認或補回備份引用的圖片（${reason}）。\n仍要繼續覆蓋還原嗎？（缺少的圖片將顯示為遺失）`)) {
+          return;
+        }
+      }
+      const res = await api.syncOverwrite(toRestore);
+      // 原因：後端已在覆蓋前自動留整庫快照；把路徑顯示出來，還原結果不如預期時使用者才知道有救援點。
+      info(`完整還原成功！已由備份檔重組 ${res.cards_count} 張卡片與資料庫結構。還原前的資料庫快照：${res.snapshot_path}`);
       // 後端回報「補不回而被捨棄」的筆數；不顯示就等於把資料遺失報成成功
       const lost: string[] = [];
       if (res.daily_pruned.bindings) lost.push(`${res.daily_pruned.bindings} 筆日誌卡片綁定`);
@@ -355,9 +472,15 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       if (res.relations_pruned) lost.push(`${res.relations_pruned} 條問題關聯`);
       // 原因:後端覆蓋還原會一併修剪靈感筆記，前端沒回報就等於把資料遺失報成成功；比照其他欄位補上提示。
       if (res.notes_pruned) lost.push(`${res.notes_pruned} 張靈感筆記`);
+      if (res.patterns_pruned) lost.push(`${res.patterns_pruned} 個關係句型`);
+      if (res.card_relations_pruned) lost.push(`${res.card_relations_pruned} 筆卡片關係句`);
+
       // 對齊後端 cards.py::sync_overwrite 實際回傳的 images_pruned 與 image_links_pruned 整數欄位，避免讀取 number 的 .images 屬性永遠得到 undefined 而靜默吞掉遺失警告。
       if (res.images_pruned) lost.push(`${res.images_pruned} 張白板圖片`);
       if (res.image_links_pruned) lost.push(`${res.image_links_pruned} 條白板圖片連線`);
+      // 原因：後端保留本機關係句型時會濾掉橋樑標籤已不在備份內的句型與其關係句；不回報就是把資料遺失報成成功。
+      if (res.relation_patterns_pruned) lost.push(`${res.relation_patterns_pruned} 個關係句型（其橋樑標籤已不在備份中）`);
+      if (res.card_relations_pruned) lost.push(`${res.card_relations_pruned} 筆卡片關係句`);
       if (lost.length > 0) {
         report(new Error(`備份檔沒有這些資料的對應內容，本機原有的已無法保留：${lost.join("、")}`), "還原完成但有資料被捨棄");
       }
@@ -373,6 +496,8 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
 
   // ---- 電腦版專用狀態 ----
   const [pkg, setPkg] = useState<SyncPackage | null>(null);
+  // 原因：只有從 Drive 拉取的封包才有對應的雲端同步檔可標記；從本機檔案合併匯入時不可寫標記。
+  const [pkgFromCloud, setPkgFromCloud] = useState(false);
   const [diff, setDiff] = useState<SyncDiffReport | null>(null);
   const [activeTab, setActiveTab] = useState<"new" | "updated">("new");
   const [comparing, setComparing] = useState(false);
@@ -668,11 +793,16 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
 
       // 若 iPad 封包附帶媒體清單，從 Drive 下載圖檔寫入 PC 媒體庫（SHA256 自動去重）並將卡片內文舊 ID 映射為 PC 端正式 ID
       let downloadedMediaCount = 0;
+      // 原因：雲端確實沒有的圖原本直接 continue，卡片會帶著破圖進電腦端且沒有任何提示；改為收集並在比對完成後明確報錯。
+      const missingCloudMedia: string[] = [];
       if (Array.isArray(receivedPkg.media) && receivedPkg.media.length > 0) {
         const idRemap = new Map<string, string>();
         for (const m of receivedPkg.media) {
           const blob = await downloadMediaFromCloud(m.id);
-          if (!blob) continue;
+          if (!blob) {
+            missingCloudMedia.push(m.id);
+            continue;
+          }
           const ext = m.mime.split("/")[1]?.replace("jpeg", "jpg") || "bin";
           const file = new File([blob], `${m.id}.${ext}`, { type: m.mime || blob.type });
           const uploaded = await api.uploadMedia(file);
@@ -693,10 +823,22 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       }
 
       setPkg(receivedPkg);
+      setPkgFromCloud(true);
       const res: SyncDiffReport = await api.syncDiff(receivedPkg);
       initDiffSelection(res);
       const mediaMsg = downloadedMediaCount > 0 ? `、同步 ${downloadedMediaCount} 張圖片至電腦媒體庫` : "";
       info(`☁️ 已從 Google Drive 載入 iPad 資料：${res.cards_new.length} 張新卡片、${res.cards_updated.length} 張兩邊不一致${mediaMsg}`);
+      if (missingCloudMedia.length > 0) {
+        report(
+          new Error(
+            `有 ${missingCloudMedia.length} 張圖片在 Drive 找不到（編號開頭：${missingCloudMedia
+              .slice(0, 3)
+              .map((m) => m.slice(0, 8))
+              .join("、")}），套用後相關卡片會顯示圖片遺失；請先在 iPad 重新上傳`,
+          ),
+          "部分圖片未同步",
+        );
+      }
     } catch (err) {
       report(err, "從 Google Drive 拉取 iPad 資料失敗");
     } finally {
@@ -734,6 +876,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
         throw new Error("無效的同步封包格式（缺少 cards 陣列）");
       }
       setPkg(parsed);
+      setPkgFromCloud(false);
       const res: SyncDiffReport = await api.syncDiff(parsed);
       initDiffSelection(res);
       info(`已解析差異：${res.cards_new.length} 張新卡片、${res.cards_updated.length} 張兩邊不一致`);
@@ -794,8 +937,25 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
         card_tags_to_add: diff.card_tags_new,
         links_to_add: diff.links_new,
         board_cards_to_add: diff.board_cards_new,
+        // 原因：後端改為與「比對當下的電腦端時間戳」相等比對；只送被勾選更新的卡片，缺值時後端會大聲報錯而不是略過檢查。
+        card_expected_updated_at: Object.fromEntries(
+          diff.cards_updated
+            .filter((c) => selectedUpdateCardIds.has(c.id) && c.old_updated_at !== undefined)
+            .map((c) => [c.id, c.old_updated_at as string] as [string, string]),
+        ),
         package: pkg,
       });
+      // 原因：合併完成後在雲端記下「這一包已合併」，iPad 之後上傳才不會對已合併的卡片誤報；只在所有差異卡片都已勾選時標記，
+      // 否則未勾選的卡片仍只存在雲端舊檔與 iPad，標成已合併會讓覆蓋警告失效。標記失敗不影響已完成的合併，但必須大聲報錯。
+      const allSelected =
+        selectedNewCardIds.size === diff.cards_new.length && selectedUpdateCardIds.size === diff.cards_updated.length;
+      if (pkgFromCloud && allSelected) {
+        try {
+          await markIpadPackageMerged(cloudCredential.trim(), pkg.exported_at);
+        } catch (markErr) {
+          report(markErr, "合併已完成，但雲端「已合併」標記寫入失敗（iPad 下次上傳可能會多跳一次覆蓋確認）");
+        }
+      }
       const notes: string[] = [];
       if (res.applied.tags_merged) notes.push(`${res.applied.tags_merged} 個同名標籤已併入電腦端既有標籤`);
       if (res.applied.boards_created) notes.push(`已建立 ${res.applied.boards_created} 塊新白板`);

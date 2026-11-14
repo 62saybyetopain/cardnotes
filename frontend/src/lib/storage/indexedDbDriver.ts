@@ -1051,6 +1051,10 @@ export class IndexedDbDriver implements StorageDriver {
       async () => {
         // 便利貼：封包沒帶 board_notes（舊版匯出）時，清空前先留下本機的，避免覆蓋同步悄悄刪光便利貼
         const keptNotes = Array.isArray(pkg.board_notes) ? null : await db.board_notes.toArray();
+        // 白板卡片的疊放順序：封包沒帶 z（iPad 封包、舊備份）時沿用本機的；必須在 board_cards.clear() 之前留下
+        const keptZ = new Map<string, number>(
+          (await db.board_cards.toArray()).map((bc) => [`${bc.board_id}:${bc.card_id}`, bc.z] as [string, number]),
+        );
 
         // 1. 清空本地全部資料表
         await db.cards.clear();
@@ -1136,8 +1140,15 @@ export class IndexedDbDriver implements StorageDriver {
         // 6. 寫入白板與卡片關係（過濾孤兒白板卡片）
         const importedBoardIds = new Set<string>();
         for (const b of pkg.boards ?? []) {
-          await db.boards.put({ id: b.id, name: b.name, created_at: utcNow(), updated_at: utcNow() });
-          importedBoardIds.add(b.id);
+          // SyncPackage["boards"] 契約僅保證 id 與 name，透過可選擴充型別安全讀取執行期可能附帶的時間戳並補齊預設值，消除 TS2339 錯誤。
+          const boardMeta = b as { id: string; name: string; created_at?: string; updated_at?: string };
+          await db.boards.put({
+            id: boardMeta.id,
+            name: boardMeta.name,
+            created_at: boardMeta.created_at || utcNow(),
+            updated_at: boardMeta.updated_at || utcNow(),
+          });
+          importedBoardIds.add(boardMeta.id);
         }
         const seenBc = new Set<string>();
         for (const bc of pkg.board_cards ?? []) {
@@ -1151,7 +1162,7 @@ export class IndexedDbDriver implements StorageDriver {
               y: bc.y ?? 100,
               w: bc.w ?? 280,
               h: bc.h ?? null,
-              z: 0,
+              z: bc.z ?? keptZ.get(key) ?? 0,
             });
           }
         }

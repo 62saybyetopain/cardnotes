@@ -113,21 +113,40 @@ export function IPadCardView({
     }
     if (selectedIds.size === 0) return;
     setBatchOperating(true);
+    // 原因：卡片已在白板上會拋 409，原本會讓迴圈中斷、前面已加入的卡片不刷新且仍全部勾選（半套狀態）；
+    // 已在白板上視為目標狀態已成立，其他錯誤才中斷，並取消已完成項的勾選、刷新清單（比照 handleBatchMarkCurated）。
+    const ids = Array.from(selectedIds);
+    const done = new Set<string>();
+    let already = 0;
     try {
-      const ids = Array.from(selectedIds);
       let idx = 0;
       for (const cardId of ids) {
         const offX = 100 + (idx % 6) * 30;
         const offY = 100 + Math.floor(idx / 6) * 30;
-        await api.addToBoard(batchBoardId, cardId, offX, offY);
+        try {
+          await api.addToBoard(batchBoardId, cardId, offX, offY);
+        } catch (addErr) {
+          const err = addErr as { code?: string; status?: number };
+          if (err?.code !== "CARD_ALREADY_ON_BOARD" && err?.status !== 409) throw addErr;
+          already++;
+        }
+        done.add(cardId);
         idx++;
       }
       const bName = boards.find((b) => b.id === batchBoardId)?.name || "白板";
-      info(`已成功將 ${ids.length} 張卡片加入白板「${bName}」`);
+      info(`已成功將 ${ids.length} 張卡片加入白板「${bName}」${already > 0 ? `（其中 ${already} 張原本就在白板上）` : ""}`);
       clearSelection();
       onRefresh();
     } catch (e) {
-      report(e, "批次加入白板失敗");
+      if (done.size > 0) {
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          done.forEach((id) => next.delete(id));
+          return next;
+        });
+        onRefresh();
+      }
+      report(e, done.size > 0 ? `部分批次加入白板失敗（已完成 ${done.size}/${ids.length} 張）` : "批次加入白板失敗");
     } finally {
       setBatchOperating(false);
     }
@@ -141,17 +160,28 @@ export function IPadCardView({
     }
     if (selectedIds.size === 0) return;
     setBatchOperating(true);
+    // 原因：中途失敗時前幾張已歸入、畫面卻未刷新且仍全部勾選；記錄已完成項，失敗時取消其勾選並刷新（assignTag 本身冪等，重試安全）。
+    const ids = Array.from(selectedIds);
+    const done = new Set<string>();
     try {
-      const ids = Array.from(selectedIds);
       for (const cardId of ids) {
         await api.assignTag(cardId, batchTagId);
+        done.add(cardId);
       }
       const tName = tagPath(tags, batchTagId);
       info(`已成功將 ${ids.length} 張卡片歸入抽屜「${tName}」`);
       clearSelection();
       onRefresh();
     } catch (e) {
-      report(e, "批次歸入抽屜失敗");
+      if (done.size > 0) {
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          done.forEach((id) => next.delete(id));
+          return next;
+        });
+        onRefresh();
+      }
+      report(e, done.size > 0 ? `部分批次歸入抽屜失敗（已完成 ${done.size}/${ids.length} 張）` : "批次歸入抽屜失敗");
     } finally {
       setBatchOperating(false);
     }

@@ -425,7 +425,7 @@ export function sendP2PPackage(
   onSuccess: (mediaReport?: { uploaded: number; missing: string[] }) => void,
   onError: (err: unknown) => void,
   // 修正 TypeScript 聯集型別語法為 Blob | null
-  loadLocalBlob?: (id: string) => Promise<Blob null |>,
+  loadLocalBlob?: (id: string) => Promise<Blob | null>,
 ): void {
   void (async () => {
     try {
@@ -433,7 +433,16 @@ export function sendP2PPackage(
       // 檢查雲端是否已有未合併的 iPad 封包：若既有封包包含本次未涵蓋的卡片，強制要求使用者確認才覆寫，避免連續上傳蓋掉前次未同步變更。
       const existingId = await findDriveFileId(token, IPAD_SYNC_FILENAME);
       if (existingId) {
-        const prevPkg = await downloadJsonFromDrive(token, IPAD_SYNC_FILENAME).catch(() => null);
+        // 原因：下載失敗不等於「雲端沒有舊檔」；吞掉錯誤會讓防覆蓋檢查被靜默略過。改為讓使用者明確決定（舊檔損毀時也不會永遠無法上傳）。
+let prevPkg: SyncPackage | null = null;
+try {
+  prevPkg = await downloadJsonFromDrive(token, IPAD_SYNC_FILENAME);
+} catch (e) {
+  if (!window.confirm(`⚠️ 無法讀取雲端既有的 iPad 同步檔（${e instanceof Error ? e.message : String(e)}），無法確認是否有未合併變更。\n仍要覆蓋嗎？`)) {
+    onError(new Error("已取消上傳：無法確認雲端既有同步檔內容"));
+    return;
+  }
+}
         if (prevPkg && Array.isArray(prevPkg.cards) && prevPkg.cards.length > 0) {
           const nextIds = new Set(pkg.cards.map((c) => c.id));
           const dropped = prevPkg.cards.filter((c) => !nextIds.has(c.id));

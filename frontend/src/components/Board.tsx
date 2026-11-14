@@ -464,6 +464,56 @@ function normalizeLink(l: Partial<BoardLink> & { source_id: string; target_id: s
   };
 }
 
+// 只替換卡片內文中標註為 fileName 的圍欄代碼塊，其餘文字與圖片原樣保留；規則與後端 cards.py::find_code_blocks／select_block／inject_target_code 相同。
+// 原因：原本「覆蓋」把整張卡片內文換成單一代碼塊，卡片內其他文字與圖片會永久消失；改為只換同名代碼塊，找不到或有歧義時丟錯，不猜。
+// @depends-on backend cards.py::find_code_blocks / block_label_name / select_block / inject_target_code（正規表示式與選取規則必須同步修改）
+function replaceNamedCodeBlock(
+  body: string,
+  fileName: string,
+  lang: string,
+  content: string,
+): { body: string; mode: "replaced" | "appended" } {
+  const re = /^(?<indent>[ \t]*)(?<fence>`{3,}|~{3,})(?<info>[^\n]*)\n(?:(?<code>[\s\S]*?)\r?\n)?\k<indent>\k<fence>[ \t]*\r?$/gm;
+  const want = fileName.trim().toLowerCase();
+  const blocks = Array.from(body.matchAll(re)).map((m) => {
+    const start = m.index ?? 0;
+    const info = (m.groups?.info ?? "").trim();
+    const colon = info.indexOf(":");
+    const label = colon < 0 ? "" : (info.slice(colon + 1).trim().split(/[\\/]/).pop() ?? "").toLowerCase();
+    return { start, end: start + m[0].length, fence: m.groups?.fence ?? "", info, label };
+  });
+  const matched = blocks.filter((b) => b.label === want);
+  if (matched.length > 1) {
+    throw new Error(`卡片內有 ${matched.length} 個代碼塊都標註為「${fileName}」，無法判定要替換哪一個`);
+  }
+  const target = matched[0] ?? (blocks.length === 1 && blocks[0].label === "" ? blocks[0] : undefined);
+  if (!target && blocks.length > 0) {
+    throw new Error(
+      `卡片內沒有標註為「${fileName}」的代碼塊（共 ${blocks.length} 個其他代碼塊），為避免改錯地方已中止；請改選「另建新卡片」，或先在代碼塊標籤註明檔名（例如 ts:${fileName}）`,
+    );
+  }
+  // 圍欄長度必須比內容裡最長的連續同字元更長，否則內容含圍欄時會提前結束代碼塊
+  const fenceChar = target ? target.fence[0] : "`";
+  let run = 0;
+  let maxRun = 0;
+  for (const ch of content) {
+    run = ch === fenceChar ? run + 1 : 0;
+    if (run > maxRun) maxRun = run;
+  }
+  const fence = fenceChar.repeat(Math.max(target ? target.fence.length : 3, maxRun + 1, 3));
+  if (target) {
+    return {
+      body: body.slice(0, target.start) + fence + target.info + "\n" + content + "\n" + fence + body.slice(target.end),
+      mode: "replaced",
+    };
+  }
+  const sep = body.trim() ? "\n\n" : "";
+  return {
+    body: body.replace(/\s+$/, "") + sep + fence + lang + ":" + fileName + "\n" + content + "\n" + fence + "\n",
+    mode: "appended",
+  };
+}
+
 // 複製用：移除圖片／影片引用，代碼塊內的內容原樣保留
 function stripImagesKeepCode(body: string): string {
   const FENCE = "`".repeat(3);
@@ -3214,25 +3264,40 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         }
       }
 
-      const created = await api.createCard();
-      const updated = await api.patchCard(created.id, { title: fileName, body }, created.updated_at);
-      const added = await api.addToBoard(boardId, created.id, initX, initY);
-      saved.current.set(created.id, { x: added.x, y: added.y, w: added.w, h: added.h });
-      const node = toNode({ ...added, title: updated.title, body: updated.body, updated_at: updated.updated_at });
-      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), { ...node, selected: true }]);
-      onSelectCard(created.id);
-      onCountChanged();
-      info(`已由代碼檔案 ${fileName} 建立卡片`);
+      // 原因：onBoardDrop 與衝突對話框都沒有 try/catch，建卡中途失敗會變成 unhandled rejection，使用者看不到訊息，還可能留下沒上白板的空卡；
+      // 改在這裡統一報錯，並說明已建立的卡片（比照 notePromoteImpl）。檔案本身仍在硬碟上，內容不會遺失。
+      let createdId: string | null = null;
+      try {
+        const created = await api.createCard();
+        createdId = created.id;
+        const updated = await api.patchCard(created.id, { title: fileName, body }, created.updated_at);
+        const added = await api.addToBoard(boardId, created.id, initX, initY);
+        saved.current.set(created.id, { x: added.x, y: added.y, w: added.w, h: added.h });
+        const node = toNode({ ...added, title: updated.title, body: updated.body, updated_at: updated.updated_at });
+        setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), { ...node, selected: true }]);
+        onSelectCard(created.id);
+        onCountChanged();
+        info(`已由代碼檔案 ${fileName} 建立卡片`);
+      } catch (e) {
+        report(
+          e,
+          createdId
+            ? `由檔案「${fileName}」建立卡片中斷：卡片（${createdId.slice(0, 8)}）已建立但可能內容為空或未放上白板，請到收件夾確認`
+            : `由檔案「${fileName}」建立卡片失敗`,
+        );
+      }
     },
-    [boardId, info, onCountChanged, onSelectCard, toNode],
+    [boardId, info, onCountChanged, onSelectCard, report, toNode],
   );
 
   // 覆蓋既有同名卡片的輔助邏輯
   const overwriteCardFromDrop = useCallback(
-    async (cardId: string, fileName: string, body: string) => {
+    async (cardId: string, fileName: string, lang: string, content: string) => {
       try {
         const cur = await api.getCard(cardId);
-        const updated = await api.patchCard(cardId, { title: fileName, body }, cur.updated_at);
+        // 原因：新內文由剛讀到的 cur.body 算出、再用同一個 cur.updated_at 送出，期間被別處改動時會得到 STALE_VERSION，樂觀鎖才真正有效。
+        const next = replaceNamedCodeBlock(cur.body, fileName, lang, content);
+        const updated = await api.patchCard(cardId, { title: fileName, body: next.body }, cur.updated_at);
         notifyCardTitleUpdated(cardId, updated.title);
         setNodes((ns) =>
           ns.map((n) =>
@@ -3241,7 +3306,11 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
               : n,
           ),
         );
-        info(`已覆蓋卡片「${fileName}」`);
+        info(
+          next.mode === "replaced"
+            ? `已替換卡片「${fileName}」內的代碼塊（其餘內容未變動）`
+            : `卡片「${fileName}」內沒有代碼塊，已將檔案內容附加在內文最後（原內容未變動）`,
+        );
       } catch (err) {
         report(err, `覆蓋卡片「${fileName}」失敗`);
       }
@@ -4188,7 +4257,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
               for (const it of conflictQueue) {
                 const b = "```" + it.lang + ":" + it.file.name + "\n" + it.content + "\n```\n";
                 if (decision === "overwrite") {
-                  await overwriteCardFromDrop(it.matchedCard.id, it.file.name, b);
+                  await overwriteCardFromDrop(it.matchedCard.id, it.file.name, it.lang, it.content);
                 } else if (decision === "create_new") {
                   await createCardFromDrop(it.file.name, b, it.dropX, it.dropY);
                 }
@@ -4197,7 +4266,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
             } else {
               // 單筆處理
               if (decision === "overwrite") {
-                await overwriteCardFromDrop(currentItem.matchedCard.id, currentItem.file.name, currentBody);
+                await overwriteCardFromDrop(currentItem.matchedCard.id, currentItem.file.name, currentItem.lang, currentItem.content);
               } else if (decision === "create_new") {
                 await createCardFromDrop(currentItem.file.name, currentBody, currentItem.dropX, currentItem.dropY);
               }
@@ -4534,7 +4603,7 @@ function DropConflictModal(props: {
             另建新卡片
           </button>
           <button type="button" className="primary" onClick={() => void onResolve("overwrite", applyToAll)}>
-            覆蓋既有卡片
+            替換卡片內的代碼塊
           </button>
         </div>
       </div>

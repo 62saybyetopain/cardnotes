@@ -3214,17 +3214,30 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         }
       }
 
-      const created = await api.createCard();
-      const updated = await api.patchCard(created.id, { title: fileName, body }, created.updated_at);
-      const added = await api.addToBoard(boardId, created.id, initX, initY);
-      saved.current.set(created.id, { x: added.x, y: added.y, w: added.w, h: added.h });
-      const node = toNode({ ...added, title: updated.title, body: updated.body, updated_at: updated.updated_at });
-      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), { ...node, selected: true }]);
-      onSelectCard(created.id);
-      onCountChanged();
-      info(`已由代碼檔案 ${fileName} 建立卡片`);
+      // 原因：onBoardDrop 與衝突對話框都沒有 try/catch，建卡中途失敗會變成 unhandled rejection，使用者看不到訊息，還可能留下沒上白板的空卡；
+      // 改在這裡統一報錯，並說明已建立的卡片（比照 notePromoteImpl）。檔案本身仍在硬碟上，內容不會遺失。
+      let createdId: string | null = null;
+      try {
+        const created = await api.createCard();
+        createdId = created.id;
+        const updated = await api.patchCard(created.id, { title: fileName, body }, created.updated_at);
+        const added = await api.addToBoard(boardId, created.id, initX, initY);
+        saved.current.set(created.id, { x: added.x, y: added.y, w: added.w, h: added.h });
+        const node = toNode({ ...added, title: updated.title, body: updated.body, updated_at: updated.updated_at });
+        setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), { ...node, selected: true }]);
+        onSelectCard(created.id);
+        onCountChanged();
+        info(`已由代碼檔案 ${fileName} 建立卡片`);
+      } catch (e) {
+        report(
+          e,
+          createdId
+            ? `由檔案「${fileName}」建立卡片中斷：卡片（${createdId.slice(0, 8)}）已建立但可能內容為空或未放上白板，請到收件夾確認`
+            : `由檔案「${fileName}」建立卡片失敗`,
+        );
+      }
     },
-    [boardId, info, onCountChanged, onSelectCard, toNode],
+    [boardId, info, onCountChanged, onSelectCard, report, toNode],
   );
 
   // 覆蓋既有同名卡片的輔助邏輯
@@ -3737,7 +3750,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
             onClick={() => setShowTransferModal(true)}
             title="將選取的卡片、文獻或圖片批量複製或轉移（移動）到指定的其他白板"
           >
-            📤 轉移／複製到白板…
+             轉移／複製到白板…
           </button>
 
           {selectedCards.length >= 2 && (
@@ -3745,7 +3758,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
               onClick={() => void copySelectedCards()}
               title="複製已選卡片的標題與內容（不含圖片，保留代碼）"
             >
-              📋 複製內容
+              複製內容
             </button>
           )}
 
@@ -4468,6 +4481,7 @@ function BatchTransferModal(props: {
 function DropConflictModal(props: {
   item: {
     file: File;
+    content: string;
     matchedCard: CardFlowNode;
     scopeLabel: string;
   };
@@ -4476,15 +4490,42 @@ function DropConflictModal(props: {
 }) {
   const { item, remainingCount, onResolve } = props;
   const [applyToAll, setApplyToAll] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
 
   return (
     <div className="modal" role="dialog" aria-label="同名卡片覆蓋確認">
-      <div className="modal-card" style={{ maxWidth: 440 }}>
+      <div className="modal-card" style={{ maxWidth: showPreview ? 680 : 460 }}>
         <h4>⚠️ 發現同名卡片</h4>
         <div style={{ fontSize: 13, lineHeight: 1.6, margin: "10px 0" }}>
           在<strong>【{item.scopeLabel}】</strong>已存在一張名為<strong>「{item.file.name}」</strong>的卡片。
           <br />
           您希望如何處理此檔案？
+        </div>
+
+        <div style={{ marginBottom: 10 }}>
+          <button
+            type="button"
+            style={{ fontSize: 12, padding: "2px 8px" }}
+            onClick={() => setShowPreview((v) => !v)}
+          >
+            {showPreview ? "▴ 收合內容預覽" : "▾ 檢視既有卡片與新檔案內容預覽"}
+          </button>
+          {showPreview && (
+            <div className="diff-view-box" style={{ marginTop: 8 }}>
+              <div className="diff-pane">
+                <div className="diff-pane-head">既有卡片內容</div>
+                <pre className="diff-pane-body" style={{ maxHeight: 180 }}>
+                  {item.matchedCard.data.body || "（空內文）"}
+                </pre>
+              </div>
+              <div className="diff-pane new">
+                <div className="diff-pane-head">拖入新檔案內容</div>
+                <pre className="diff-pane-body" style={{ maxHeight: 180 }}>
+                  {item.content || "（空檔案）"}
+                </pre>
+              </div>
+            </div>
+          )}
         </div>
 
         {remainingCount > 1 && (

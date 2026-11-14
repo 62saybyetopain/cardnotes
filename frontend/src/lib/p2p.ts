@@ -18,6 +18,16 @@ const STORAGE_KEY = "cardboard_gdrive_credential";
 const PC_BACKUP_FILENAME = "cardboard-pc-backup.json";
 
 const IPAD_SYNC_FILENAME = "cardboard-ipad-sync.json";
+// 原因：連續上傳的覆蓋警告原本無法分辨「雲端舊檔已被電腦端合併」與「尚未合併」，合併後每一輪都誤報，使用者會習慣性按確定而讓保護失效。
+// 做法：電腦端合併成功後另寫此標記檔，記下被合併那一包的 exported_at；不改寫 iPad 同步檔本身，避免回寫時蓋掉 iPad 剛上傳的新包。
+// @depends-on SyncModal.tsx::applyChanges（PC 全部勾選合併成功後呼叫 markIpadPackageMerged）/ sendP2PPackage（以 exported_at 字串相等判斷，不比大小：iPad 時鐘被調回去時比大小會把新包誤判為已合併）
+const IPAD_MERGED_MARKER_FILENAME = "cardboard-ipad-sync-merged.json";
+
+interface IpadMergedMarker {
+  kind: "ipad-sync-merged";
+  merged_exported_at: string;
+  merged_at: string;
+}
 const MEDIA_FILE_PREFIX = "cardboard-media-";
 
 let cachedAccessToken: string | null = null;
@@ -142,7 +152,7 @@ async function findDriveFileId(accessToken: string, fileName: string): Promise<s
 async function uploadJsonToDrive(
   accessToken: string,
   fileName: string,
-  pkg: SyncPackage | SyncPackageWithMedia,
+  pkg: SyncPackage | SyncPackageWithMedia | IpadMergedMarker,
 ): Promise<void> {
   let fileId = await findDriveFileId(accessToken, fileName);
 
@@ -320,10 +330,15 @@ async function putDriveMedia(
   }
 }
 
-function collectMediaIds(pkg: SyncPackage): string[] {
+// @depends-on types.ts::SyncPackage.literature.items[].body / SyncModal.tsx::restoreMissingMedia（還原時以此函式決定要補哪些圖）
+export function collectMediaIds(pkg: SyncPackage): string[] {
   const ids = new Set<string>();
   for (const c of pkg.cards) {
     for (const id of extractMediaIds(c.body)) ids.add(id);
+  }
+  // 原因：文獻內文也引用圖片（media.py::cleanup_media 已把它算作被引用），漏掃會讓文獻圖片不上雲、備份無法還原；改為匯出並納入文獻後，上傳與還原共用同一份 id 清單。
+  for (const lit of pkg.literature?.items ?? []) {
+    for (const id of extractMediaIds(lit.body)) ids.add(id);
   }
   // 白板圖片的圖檔不在任何內文裡，只被 board_images 引用；不加進來就不會上傳雲端，且沒有任何提示
   // @depends-on types.ts::SyncPackage.board_images / backend cards.py::sync_export（沒有此欄＝iPad 封包或舊備份，視為沒有）
@@ -416,6 +431,38 @@ export async function pullIpadPackageFromCloud(credentialInput?: string): Promis
   return await downloadJsonFromDrive(token, IPAD_SYNC_FILENAME);
 }
 
+// 讀取「已合併」標記；雲端沒有標記檔回 null，標記檔內容損毀或讀取失敗一律丟錯（呼叫端把它當成「無法確認」，不當成「沒有標記」）
+async function readIpadMergedMarker(accessToken: string): Promise<IpadMergedMarker | null> {
+  const fileId = await findDriveFileId(accessToken, IPAD_MERGED_MARKER_FILENAME);
+  if (!fileId) return null;
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`讀取雲端合併標記失敗 (${res.status})：${errText}`);
+  }
+  const marker = (await res.json()) as Partial<IpadMergedMarker> | null;
+  if (!marker || marker.kind !== "ipad-sync-merged" || typeof marker.merged_exported_at !== "string") {
+    throw new Error("雲端合併標記檔格式無效");
+  }
+  return marker as IpadMergedMarker;
+}
+
+/**
+ * 電腦端：把「已合併」標記寫到 Google Drive，記下被合併的 iPad 封包的 exported_at。
+ * 同一包重複標記內容相同，重試安全；失敗時丟錯，由呼叫端明確回報。
+ */
+export async function markIpadPackageMerged(credentialInput: string | undefined, mergedExportedAt: string): Promise<void> {
+  const token = await resolveAccessToken(credentialInput);
+  await uploadJsonToDrive(token, IPAD_MERGED_MARKER_FILENAME, {
+    kind: "ipad-sync-merged",
+    merged_exported_at: mergedExportedAt,
+    merged_at: new Date().toISOString(),
+  });
+}
+
 /**
  * iPad 端：將 iPad 變更封包上傳至 Google Drive (cardboard-ipad-sync.json) 供電腦端拉取合併
  */
@@ -433,8 +480,26 @@ export function sendP2PPackage(
       // 檢查雲端是否已有未合併的 iPad 封包：若既有封包包含本次未涵蓋的卡片，強制要求使用者確認才覆寫，避免連續上傳蓋掉前次未同步變更。
       const existingId = await findDriveFileId(token, IPAD_SYNC_FILENAME);
       if (existingId) {
-        const prevPkg = await downloadJsonFromDrive(token, IPAD_SYNC_FILENAME).catch(() => null);
-        if (prevPkg && Array.isArray(prevPkg.cards) && prevPkg.cards.length > 0) {
+        // 原因：下載失敗不等於「雲端沒有舊檔」，吞掉錯誤會讓防覆蓋檢查被靜默略過，所以讀不到就讓使用者明確決定。
+        // 另外電腦端已合併的那一包（標記的 exported_at 與舊檔字串相同）不再跳警告，只有未合併的才攔，避免每輪誤報讓使用者習慣性按確定。
+        let prevPkg: SyncPackage | null = null;
+        let alreadyMerged = false;
+        try {
+          prevPkg = await downloadJsonFromDrive(token, IPAD_SYNC_FILENAME);
+          const marker = await readIpadMergedMarker(token);
+          alreadyMerged = marker !== null && marker.merged_exported_at === prevPkg.exported_at;
+        } catch (readErr) {
+          if (
+            !window.confirm(
+              `⚠️ 無法讀取雲端既有的 iPad 同步檔或其合併標記（${readErr instanceof Error ? readErr.message : String(readErr)}），無法確認是否有未合併變更。\n仍要覆蓋嗎？`,
+            )
+          ) {
+            onError(new Error("已取消上傳：無法確認雲端既有同步檔是否已合併"));
+            return;
+          }
+          prevPkg = null; // 使用者已明確同意覆蓋，不再重複詢問（舊檔已讀到但標記讀失敗時也一併放棄比對）
+        }
+        if (!alreadyMerged && prevPkg && Array.isArray(prevPkg.cards) && prevPkg.cards.length > 0) {
           const nextIds = new Set(pkg.cards.map((c) => c.id));
           const dropped = prevPkg.cards.filter((c) => !nextIds.has(c.id));
           if (dropped.length > 0) {
