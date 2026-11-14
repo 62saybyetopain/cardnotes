@@ -1169,24 +1169,35 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
           <>
             <div className="sync-section">
               <div className="sync-section-title">本機檔案</div>
+              <p className="sync-section-desc">
+                匯出完整備份：電腦端的全部資料（卡片、白板、日誌、文獻等）；圖檔本身不在內，請用下方雲端備份。
+                <br />
+                合併卡片：從 JSON 挑選要併入的卡片，只處理卡片、標籤、連結與白板位置，不刪除任何東西。
+                <br />
+                完整覆蓋還原：把整個資料庫換成 JSON 的內容。
+              </p>
               <div className="sync-actions">
-                <button type="button" onClick={() => void exportBackup()}>
-                  📥 匯出 JSON 備份
+                <button
+                  type="button"
+                  onClick={() => void exportBackup()}
+                  title="下載電腦端完整資料的 JSON 檔。不含圖檔本身；圖檔請用「上傳雲端備份」"
+                >
+                  📥 匯出完整備份 (.json)
                 </button>
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
                   disabled={cloudBusy}
-                  title="選取本機 JSON 檔案比對差異並合併入目前資料庫"
+                  title="從 JSON 檔（iPad 變更檔、舊備份、其他電腦的備份皆可）比對差異，勾選要併入的卡片。只處理卡片、標籤、連結與白板位置；不會刪除任何東西，也不會動日誌、文獻、問題白板等資料"
                 >
-                  📂 合併匯入…
+                  📂 合併卡片…
                 </button>
                 <button
                   type="button"
                   className="danger"
                   onClick={() => overwriteInputRef.current?.click()}
                   disabled={cloudBusy}
-                  title="【危險】選取本機 JSON 備份檔，完全清空並 100% 覆蓋還原目前資料庫"
+                  title="【危險】把整個資料庫換成所選 JSON 備份的內容（還原前會自動留一份目前資料庫的快照）"
                 >
                   ⚠️ 完整覆蓋還原…
                 </button>
@@ -1196,7 +1207,9 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
             <div className="sync-section">
               <div className="sync-section-title">Google Drive（與 iPad 同步）</div>
               <p className="sync-section-desc">
-                先上傳電腦版完整備份供 iPad 拉取；iPad 上傳變更後，再從這裡拉取並比對合併。
+                上傳雲端備份＝電腦端完整資料加上圖檔（本機 JSON 備份不含圖檔），供 iPad 拉取，也是換電腦後還原圖片的來源。
+                <br />
+                iPad 上傳變更後，從這裡拉取並比對合併（只併入卡片、標籤、連結與白板位置）。
               </p>
               <div className="sync-actions">
                 <button
@@ -1204,16 +1217,16 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                   className="primary"
                   onClick={() => void handleUploadPcBackupToCloud()}
                   disabled={cloudBusy}
-                  title="將電腦完整資料庫上傳至 Google Drive，供 iPad 隨時下載覆蓋"
+                  title="將電腦端完整資料與用到的圖檔上傳至 Google Drive，供 iPad 下載覆蓋，也可在換電腦還原時補回圖片"
                 >
-                  {cloudBusy ? "雲端處理中…" : "☁️ 上傳雲端備份 (供 iPad)"}
+                  {cloudBusy ? "雲端處理中…" : "☁️ 上傳雲端備份 (含圖檔，供 iPad)"}
                 </button>
                 <button
                   type="button"
                   className="primary"
                   onClick={() => void handlePullIpadFromCloud()}
                   disabled={cloudBusy}
-                  title="從 Google Drive 讀取 iPad 發送的資料並進行差異比對"
+                  title="從 Google Drive 讀取 iPad 上傳的變更，比對後勾選要併入的卡片（與「合併卡片」相同的流程，只是檔案來自 Drive）"
                 >
                   {cloudBusy ? "雲端處理中…" : "☁️ 拉取 iPad 資料 (Drive)"}
                 </button>
@@ -1255,6 +1268,10 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
 
               {autoBackupCfg.enabled && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
+                  <div className="muted" style={{ fontSize: 11 }}>
+                    內容與「匯出完整備份」相同（不含圖檔）。同一個檔案每次更新；內容有變動時，舊版會先存進該檔案旁的
+                    cardboard_backups 資料夾（保留最新 3 份＋近 14 天每天最新一份）。
+                  </div>
                   <div className="field-row" style={{ margin: 0, display: "flex", alignItems: "center", gap: 6 }}>
                     <span className="muted" style={{ minWidth: 120 }}>本機固定備份檔案：</span>
                     <input
@@ -1335,9 +1352,10 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                       type="button"
                       onClick={() => void handleManualBackupNow()}
                       disabled={savingBackupNow || !autoBackupCfg.targetPath.trim()}
+                      title="立即備份到上方的固定檔案；內容有變動時，舊版會先留進歷史資料夾"
                       style={{ marginLeft: "auto", fontSize: 11, padding: "3px 8px" }}
                     >
-                      {savingBackupNow ? "覆寫備份中…" : "立即覆寫備份一次"}
+                      {savingBackupNow ? "備份中…" : "立即備份一次"}
                     </button>
                   </div>
                 </div>
@@ -1349,14 +1367,14 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
             {diff && (
               <div className="sync-diff-container">
                 <div className="sync-summary-bar">
-                  <span>來源裝置：<strong>{diff.source_device || "iPad"}</strong></span>
+                  <span>來源裝置：<strong>{diff.source_device === "ipad" ? "iPad / 網頁版" : diff.source_device === "pc" ? "電腦版備份" : diff.source_device || "未知"}</strong></span>
                   <span>封包時間：{new Date(diff.exported_at).toLocaleString()}</span>
                   <span className="count">略過未變更／較舊卡片：{diff.cards_unchanged_count} 張</span>
                 </div>
 
                 {diff.tags_updated.length > 0 && (
                   <div className="muted" style={{ fontSize: 12, padding: "6px 0" }}>
-                    ⚠️ {diff.tags_updated.length} 個標籤在 iPad 與電腦端內容不同，本次<strong>不會套用</strong>
+                    ⚠️ {diff.tags_updated.length} 個標籤在匯入檔與電腦端內容不同，本次<strong>不會套用</strong>
                     （標籤沒有修改時間，無法判斷哪邊較新）：{diff.tags_updated.map((t) => t.name).join("、")}
                   </div>
                 )}
