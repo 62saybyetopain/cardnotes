@@ -599,7 +599,6 @@ export function LeftPanel(p: Props) {
             boards={p.boards}
             boardId={p.boardId}
             onOpen={p.onSelectBoard}
-            onCloseDrawer={p.onToggleCollapse}
             onRename={(b) => void renameBoard(b)}
             onDelete={deleteBoard}
           />
@@ -1074,9 +1073,8 @@ export function LeftPanel(p: Props) {
 // ---- 平板（Dexie 版）的白板樹 ----
 // 原因：電腦端問題白板可以一路拆下去，平鋪在側欄會變成一長串看不出層級的名單。
 // 操作分工（觸控沒有 hover，兩件事必須用不同的點擊區分開）：
-//   點最左邊的三角 ▸／▾ ＝ 只展開或收合，不切換白板
-//   點名稱 ＝ 第一次先選取（顯示「再點一次開啟」），第二次才真的開啟並收起側欄；點目前已開著的白板＝只收起側欄
-const BOARD_TREE_EXPANDED_KEY = "cardboard.boardTree.expanded";
+//   點最左邊的三角 ▸／▾ ＝ 只展開或收合這一層，不切換白板
+//   點名稱 ＝ 第一次先選取（該列反白），第二次點同一列才真的開啟白板，並把展開的層級全部收回；左側欄本身不收合
 
 interface BoardTreeNode {
   board: BoardSummary;
@@ -1127,34 +1125,19 @@ function BoardTree(props: {
   boards: BoardSummary[];
   boardId: string | null;
   onOpen(id: string): void;
-  onCloseDrawer(): void;
   onRename(b: BoardSummary): void;
   onDelete(b: BoardSummary): void;
 }) {
   const { roots, parentOf } = useMemo(() => buildBoardForest(props.boards), [props.boards]);
-  const [expanded, setExpanded] = useState<Set<string>>(() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem(BOARD_TREE_EXPANDED_KEY) ?? "[]");
-      return new Set(Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string") : []);
-    } catch {
-      return new Set(); // 讀不到（無痕、被封鎖）就從全部收合開始，只是不記住
-    }
-  });
+  // 展開狀態只在瀏覽期間有效：開啟白板後會全部收回，所以不另外存起來
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [pendingId, setPendingId] = useState<string | null>(null);
 
-  const save = (s: Set<string>) => {
-    try {
-      localStorage.setItem(BOARD_TREE_EXPANDED_KEY, JSON.stringify([...s]));
-    } catch {
-      /* 寫不進去只是下次不記住展開狀態 */
-    }
-  };
   const toggle = (id: string) =>
     setExpanded((prev) => {
       const n = new Set(prev);
       if (n.has(id)) n.delete(id);
       else n.add(id);
-      save(n);
       return n;
     });
 
@@ -1165,31 +1148,20 @@ function BoardTree(props: {
     return s;
   }, [props.boardId, parentOf]);
 
-  // 切換白板後：待確認的選取作廢，並把祖先路徑展開（只展開這一條，不動其他分支）。
-  // 不依賴 expanded：使用者之後手動收合祖先，不應被這裡再次撐開
+  // 白板切換後（含從別處切換），待確認的選取作廢
   useEffect(() => {
     setPendingId(null);
-    if (ancestors.size === 0) return;
-    setExpanded((prev) => {
-      if ([...ancestors].every((id) => prev.has(id))) return prev;
-      const n = new Set(prev);
-      ancestors.forEach((id) => n.add(id));
-      save(n);
-      return n;
-    });
-  }, [props.boardId, ancestors]);
+  }, [props.boardId]);
 
+  // 第一次點＝選取；第二次點同一列＝開啟，並把展開的層級全部收回
   const tap = (b: BoardSummary) => {
-    if (b.id === props.boardId) {
-      setPendingId(null);
-      props.onCloseDrawer();
-    } else if (b.id === pendingId) {
-      setPendingId(null);
-      props.onOpen(b.id);
-      props.onCloseDrawer();
-    } else {
+    if (b.id !== pendingId) {
       setPendingId(b.id);
+      return;
     }
+    setPendingId(null);
+    setExpanded(new Set());
+    props.onOpen(b.id);
   };
 
   const renderNode = (n: BoardTreeNode, depth: number): ReactNode => {
@@ -1220,7 +1192,7 @@ function BoardTree(props: {
             <span className="board-name">{b.name}</span>
             {hasKids && !open && <span className="count">子 {n.children.length}</span>}
             <span className="count">{b.card_count}</span>
-            {b.id === pendingId && <span className="board-confirm">再點一次開啟</span>}
+
           </button>
           {/* 只有一般白板保留改名／刪除；平板刪除不會處理底下的子白板，所以問題白板不提供 */}
           {!b.question && (
