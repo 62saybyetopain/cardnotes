@@ -111,6 +111,16 @@ h3, h4 { margin: 4px 0; font-size: 13px; color: var(--muted); }
 .row .actions button { border: 0; background: transparent; padding: 0 4px; }
 .count { color: var(--muted); font-size: 12px; margin-left: 4px; }
 
+/* 平板白板樹：觸控目標至少 44px；點三角＝展開收合，點名稱＝第一次選取、第二次才開啟 */
+.board-tree-list .row { min-height: 44px; }
+.board-tree-list .row .twisty { width: 44px; align-self: stretch; flex-shrink: 0; font-size: 16px; color: var(--muted); }
+.board-tree-list .row .label { display: flex; align-items: center; align-self: stretch; gap: 6px; min-width: 0; }
+.board-tree-list .board-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-tree-list .row.pending { outline: 1px dashed var(--accent); outline-offset: -1px; }
+.board-tree-list .board-confirm { flex-shrink: 0; font-size: 11px; color: var(--accent); }
+/* 目前白板藏在收合的這一支裡：名稱前加小圓點 */
+.board-tree-list .row.has-current > .label::before { content: "●"; font-size: 8px; color: var(--accent); }
+
 /* 側邊欄導覽列：圖標＋名稱靠左、數量靠右 */
 .nav-row .label { display: flex; align-items: center; gap: 6px; }
 .nav-row .count { margin-left: auto; }

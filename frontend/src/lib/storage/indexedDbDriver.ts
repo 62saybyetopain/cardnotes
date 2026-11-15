@@ -10,6 +10,7 @@ import type {
   BoardGroup,
   BoardLink,
   BoardNote,
+  BoardQuestion,
   BoardSummary,
   CardDetail,
   CardImpact,
@@ -760,8 +761,10 @@ export class IndexedDbDriver implements StorageDriver {
     const rawBoards = await db.boards.toArray();
     const boards: BoardSummary[] = [];
     for (const b of rawBoards) {
+      // 已封存的問題不列出（與電腦端 list_boards 一致）；留著會讓封存的白板重新出現在側欄
+      if (b.question?.archived_at) continue;
       const card_count = await db.board_cards.where("board_id").equals(b.id).count();
-      boards.push({ id: b.id, name: b.name, card_count });
+      boards.push({ id: b.id, name: b.name, card_count, question: b.question ?? null });
     }
     return { boards };
   }
@@ -1056,6 +1059,16 @@ export class IndexedDbDriver implements StorageDriver {
           (await db.board_cards.toArray()).map((bc) => [`${bc.board_id}:${bc.card_id}`, bc.z] as [string, number]),
         );
 
+        // 問題白板的母子結構：封包有 board_questions 就用封包的；沒帶（iPad 封包、舊備份）時沿用本機的，
+        // 不然覆蓋一次就會讓所有子白板變回一般白板。必須在 boards.clear() 之前留下
+        const questionByBoard = new Map<string, BoardQuestion>(
+          Array.isArray(pkg.board_questions)
+            ? pkg.board_questions.map(({ board_id, ...q }) => [board_id, q] as [string, BoardQuestion])
+            : (await db.boards.toArray())
+                .filter((b) => b.question)
+                .map((b) => [b.id, b.question as BoardQuestion] as [string, BoardQuestion]),
+        );
+
         // 1. 清空本地全部資料表
         await db.cards.clear();
         await db.tags.clear();
@@ -1147,6 +1160,7 @@ export class IndexedDbDriver implements StorageDriver {
             name: boardMeta.name,
             created_at: boardMeta.created_at || utcNow(),
             updated_at: boardMeta.updated_at || utcNow(),
+            question: questionByBoard.get(boardMeta.id) ?? null,
           });
           importedBoardIds.add(boardMeta.id);
         }
@@ -1445,6 +1459,10 @@ export class IndexedDbDriver implements StorageDriver {
         const pkgBoardCardMap = new Map(
           (pkg.board_cards ?? []).map((b) => [`${b.board_id}:${b.card_id}`, b]),
         );
+        // 補建的白板若在封包裡是問題白板，一併帶上母子結構，側欄才掛得回樹上
+        const pkgQuestionMap = new Map<string, BoardQuestion>(
+          (pkg.board_questions ?? []).map(({ board_id, ...q }) => [board_id, q] as [string, BoardQuestion]),
+        );
         for (const bc of payload.board_cards_to_add ?? []) {
           if (!(await db.cards.get(bc.card_id))) continue;
           const exists = await db.board_cards.where({ board_id: bc.board_id, card_id: bc.card_id }).first();
@@ -1457,7 +1475,13 @@ export class IndexedDbDriver implements StorageDriver {
               continue;
             }
             const now = utcNow();
-            await db.boards.add({ id: bc.board_id, name: srcBoard.name, created_at: now, updated_at: now });
+            await db.boards.add({
+              id: bc.board_id,
+              name: srcBoard.name,
+              created_at: now,
+              updated_at: now,
+              question: pkgQuestionMap.get(bc.board_id) ?? null,
+            });
             applied.boards_created++;
           }
 

@@ -5,6 +5,7 @@ import type {
   Axis,
   BoardGroup,
   BoardNote,
+  BoardQuestion,
   CardType,
   CurationStatus,
 } from "../../types";
@@ -47,6 +48,8 @@ export interface DbBoard {
   name: string;
   created_at?: string;
   updated_at?: string;
+  // 電腦端問題白板的母子結構；一般白板沒有。非索引欄位，Dexie 不需要升版，舊資料沒有此欄
+  question?: BoardQuestion | null;
 }
 
 export interface DbBoardCard {

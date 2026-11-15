@@ -544,6 +544,13 @@ summary .add { float: right; border: 0; background: transparent; }
 .img-crop-h.sw { left: -5px; bottom: -5px; cursor: nesw-resize; }
 .img-crop-h.w { left: -5px; top: calc(50% - 5px); cursor: ew-resize; }
 
+/* 圖片連線的刪除確認：連線旁彈出的 ○／✕ 小浮層；left／top 由 Board.tsx 以相對 .board 的像素座標行內指定。
+   @depends-on components/Board.tsx（ImageLinkConfirm 的 class 名稱） */
+.img-link-confirm { position: absolute; z-index: 31; display: flex; gap: 2px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22); transform: translate(10px, 10px); }
+/* 按鈕無邊框、平常灰色線條；滑過與取得焦點只加淡灰底，不用紅藍色（焦點預設在 ○「關閉」，所以焦點樣式也必須是中性的） */
+.img-link-confirm button { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; min-height: 30px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted); outline: none; transition: background-color 0.12s ease, color 0.12s ease; }
+.img-link-confirm button:hover, .img-link-confirm button:focus-visible { background: color-mix(in srgb, var(--text) 10%, transparent); color: var(--text); }
+
 
 /* 視圖切換與全域概念地圖（Concept Graph View） */
 .view-switch { display: inline-flex; background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 2px; gap: 2px; }

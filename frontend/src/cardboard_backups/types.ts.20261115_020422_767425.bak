@@ -327,7 +327,9 @@ export interface CardDetail {
   sources?: string[]; // 出處（多筆）；舊資料沒有此欄時視為 []
   tags: Tag[];
   links: CardLink[];
-  boards: { id: string; name: string }[];
+  // created_at／updated_at 僅電腦端匯出會帶；沒有＝iPad 封包或舊備份，電腦端覆蓋時沿用本機同一塊白板的時間戳（iPad 匯出不帶，避免把已被重設的時間蓋過電腦端的）
+  boards: { id: string; name: string; created_at?: string; updated_at?: string }[];
+  // z＝疊放順序
   warnings: Warning[];
 }
 
@@ -601,7 +603,8 @@ export interface SyncPackage {
   card_tags: { card_id: string; tag_id: string }[];
   links: BoardLink[];
   boards: { id: string; name: string }[];
-  board_cards: { board_id: string; card_id: string; x?: number; y?: number; w?: number; h?: number }[];
+  // z＝疊放順序，僅電腦端匯出會帶；沒有 z＝iPad 封包或舊備份，覆蓋時沿用本機同一張卡在同一塊白板上的 z（iPad 無法調整 z，匯出不帶）
+  board_cards: { board_id: string; card_id: string; x?: number; y?: number; w?: number; h?: number; z?: number }[];
   board_groups?: BoardGroup[];
   // 問題關聯（兩端可以是一般白板）。沒有此欄＝舊備份或 iPad 封包，覆蓋時保留本機原有的；與「空陣列＝關聯被清空」不同
   question_relations?: { id: string; board_a: string; board_b: string; relation_type: QuestionRelationType; created_at: string }[];
@@ -649,6 +652,8 @@ export interface SyncApplyRequest {
   card_tags_to_add: { card_id: string; tag_id: string }[];
   links_to_add: BoardLink[];
   board_cards_to_add: { board_id: string; card_id: string }[];
+  // 比對差異當下的電腦端 updated_at（key＝card_ids_to_update 內的卡片 id）；後端以相等比較偵測比對後被改動的卡片，見 cards.py::sync_apply
+  card_expected_updated_at: Record<string, string>;
   package: SyncPackage;
 }
 

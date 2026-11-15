@@ -1056,8 +1056,6 @@ export class IndexedDbDriver implements StorageDriver {
           (await db.board_cards.toArray()).map((bc) => [`${bc.board_id}:${bc.card_id}`, bc.z] as [string, number]),
         );
 
-indexedDbDriver.ts，重灌時寫入：
-
         // 1. 清空本地全部資料表
         await db.cards.clear();
         await db.tags.clear();
@@ -1142,8 +1140,15 @@ indexedDbDriver.ts，重灌時寫入：
         // 6. 寫入白板與卡片關係（過濾孤兒白板卡片）
         const importedBoardIds = new Set<string>();
         for (const b of pkg.boards ?? []) {
-          await db.boards.put({ id: b.id, name: b.name, created_at: utcNow(), updated_at: utcNow() });
-          importedBoardIds.add(b.id);
+          // SyncPackage["boards"] 契約僅保證 id 與 name，透過可選擴充型別安全讀取執行期可能附帶的時間戳並補齊預設值，消除 TS2339 錯誤。
+          const boardMeta = b as { id: string; name: string; created_at?: string; updated_at?: string };
+          await db.boards.put({
+            id: boardMeta.id,
+            name: boardMeta.name,
+            created_at: boardMeta.created_at || utcNow(),
+            updated_at: boardMeta.updated_at || utcNow(),
+          });
+          importedBoardIds.add(boardMeta.id);
         }
         const seenBc = new Set<string>();
         for (const bc of pkg.board_cards ?? []) {

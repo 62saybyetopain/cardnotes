@@ -594,7 +594,17 @@ export function LeftPanel(p: Props) {
           </button>
         </div>
         {p.boards.length === 0 && <div className="muted pad">還沒有白板</div>}
-        <ul className="plain">
+        {isDexie && (
+          <BoardTree
+            boards={p.boards}
+            boardId={p.boardId}
+            onOpen={p.onSelectBoard}
+            onCloseDrawer={p.onToggleCollapse}
+            onRename={(b) => void renameBoard(b)}
+            onDelete={deleteBoard}
+          />
+        )}
+        {!isDexie && <ul className="plain">
           {/* 只列一般白板；問題白板從母白板進入，不在這裡平鋪 */}
           {p.boards.filter((b) => !b.question).map((b) => (
             <li key={b.id} className={`row${b.id === p.boardId ? " on" : ""}`}>
@@ -611,7 +621,7 @@ export function LeftPanel(p: Props) {
               </span>
             </li>
           ))}
-        </ul>
+        </ul>}
       </section>
 
       {archived.length > 0 && (
@@ -1059,6 +1069,177 @@ export function LeftPanel(p: Props) {
       )}
     </nav>
   );
+}
+
+// ---- 平板（Dexie 版）的白板樹 ----
+// 原因：電腦端問題白板可以一路拆下去，平鋪在側欄會變成一長串看不出層級的名單。
+// 操作分工（觸控沒有 hover，兩件事必須用不同的點擊區分開）：
+//   點最左邊的三角 ▸／▾ ＝ 只展開或收合，不切換白板
+//   點名稱 ＝ 第一次先選取（顯示「再點一次開啟」），第二次才真的開啟並收起側欄；點目前已開著的白板＝只收起側欄
+const BOARD_TREE_EXPANDED_KEY = "cardboard.boardTree.expanded";
+
+interface BoardTreeNode {
+  board: BoardSummary;
+  children: BoardTreeNode[];
+}
+
+// 由 question.parent_board_id 組森林。母白板不在清單內（例如已封存）或母子鏈有環的白板一律掛到最上層，
+// 絕不讓任何白板變成點不到；有環時大聲警告，不默默吞掉
+function buildBoardForest(boards: BoardSummary[]): { roots: BoardTreeNode[]; parentOf: Map<string, string> } {
+  const nodes = new Map<string, BoardTreeNode>(boards.map((b) => [b.id, { board: b, children: [] }]));
+  const roots: BoardTreeNode[] = [];
+  const parentOf = new Map<string, string>();
+  for (const b of boards) {
+    const node = nodes.get(b.id)!;
+    const pid = b.question?.parent_board_id ?? null;
+    const parent = pid && pid !== b.id ? nodes.get(pid) : undefined;
+    if (parent) {
+      parent.children.push(node);
+      parentOf.set(b.id, pid!);
+    } else {
+      roots.push(node);
+    }
+  }
+  const seen = new Set<string>();
+  const walk = (n: BoardTreeNode) => {
+    if (seen.has(n.board.id)) return;
+    seen.add(n.board.id);
+    n.children.forEach(walk);
+  };
+  roots.forEach(walk);
+  for (const b of boards) {
+    if (seen.has(b.id)) continue;
+    console.warn(`白板母子關係有環，已把「${b.name}」改掛到最上層`, b.id);
+    const node = nodes.get(b.id)!;
+    const pid = parentOf.get(b.id);
+    if (pid) {
+      const sibs = nodes.get(pid)!.children;
+      sibs.splice(sibs.indexOf(node), 1);
+      parentOf.delete(b.id);
+    }
+    roots.push(node);
+    walk(node);
+  }
+  return { roots, parentOf };
+}
+
+function BoardTree(props: {
+  boards: BoardSummary[];
+  boardId: string | null;
+  onOpen(id: string): void;
+  onCloseDrawer(): void;
+  onRename(b: BoardSummary): void;
+  onDelete(b: BoardSummary): void;
+}) {
+  const { roots, parentOf } = useMemo(() => buildBoardForest(props.boards), [props.boards]);
+  const [expanded, setExpanded] = useState<Set<string>>(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(BOARD_TREE_EXPANDED_KEY) ?? "[]");
+      return new Set(Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string") : []);
+    } catch {
+      return new Set(); // 讀不到（無痕、被封鎖）就從全部收合開始，只是不記住
+    }
+  });
+  const [pendingId, setPendingId] = useState<string | null>(null);
+
+  const save = (s: Set<string>) => {
+    try {
+      localStorage.setItem(BOARD_TREE_EXPANDED_KEY, JSON.stringify([...s]));
+    } catch {
+      /* 寫不進去只是下次不記住展開狀態 */
+    }
+  };
+  const toggle = (id: string) =>
+    setExpanded((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      save(n);
+      return n;
+    });
+
+  // 目前開著的白板的所有祖先；收合時用來標示「目前白板藏在這一支裡」
+  const ancestors = useMemo(() => {
+    const s = new Set<string>();
+    for (let id = props.boardId ? parentOf.get(props.boardId) : undefined; id && !s.has(id); id = parentOf.get(id)) s.add(id);
+    return s;
+  }, [props.boardId, parentOf]);
+
+  // 切換白板後：待確認的選取作廢，並把祖先路徑展開（只展開這一條，不動其他分支）。
+  // 不依賴 expanded：使用者之後手動收合祖先，不應被這裡再次撐開
+  useEffect(() => {
+    setPendingId(null);
+    if (ancestors.size === 0) return;
+    setExpanded((prev) => {
+      if ([...ancestors].every((id) => prev.has(id))) return prev;
+      const n = new Set(prev);
+      ancestors.forEach((id) => n.add(id));
+      save(n);
+      return n;
+    });
+  }, [props.boardId, ancestors]);
+
+  const tap = (b: BoardSummary) => {
+    if (b.id === props.boardId) {
+      setPendingId(null);
+      props.onCloseDrawer();
+    } else if (b.id === pendingId) {
+      setPendingId(null);
+      props.onOpen(b.id);
+      props.onCloseDrawer();
+    } else {
+      setPendingId(b.id);
+    }
+  };
+
+  const renderNode = (n: BoardTreeNode, depth: number): ReactNode => {
+    const b = n.board;
+    const hasKids = n.children.length > 0;
+    const open = expanded.has(b.id);
+    const cls = ["row"];
+    if (b.id === props.boardId) cls.push("on");
+    if (b.id === pendingId) cls.push("pending");
+    if (hasKids && !open && ancestors.has(b.id)) cls.push("has-current");
+    return (
+      <li key={b.id}>
+        <div className={cls.join(" ")} style={{ paddingLeft: depth * 14 }}>
+          {hasKids ? (
+            <button
+              type="button"
+              className="twisty"
+              aria-expanded={open}
+              aria-label={`${open ? "收合" : "展開"} ${b.name}`}
+              onClick={() => toggle(b.id)}
+            >
+              {open ? "▾" : "▸"}
+            </button>
+          ) : (
+            <span className="twisty" />
+          )}
+          <button type="button" className="label" onClick={() => tap(b)}>
+            <span className="board-name">{b.name}</span>
+            {hasKids && !open && <span className="count">子 {n.children.length}</span>}
+            <span className="count">{b.card_count}</span>
+            {b.id === pendingId && <span className="board-confirm">再點一次開啟</span>}
+          </button>
+          {/* 只有一般白板保留改名／刪除；平板刪除不會處理底下的子白板，所以問題白板不提供 */}
+          {!b.question && (
+            <span className="actions">
+              <button onClick={() => props.onRename(b)} aria-label={`重新命名 ${b.name}`}>
+                <Icon name="pencil" size={12} />
+              </button>
+              <button onClick={() => props.onDelete(b)} aria-label={`刪除白板 ${b.name}`}>
+                <Icon name="x" size={12} />
+              </button>
+            </span>
+          )}
+        </div>
+        {hasKids && open && <ul className="plain">{n.children.map((c) => renderNode(c, depth + 1))}</ul>}
+      </li>
+    );
+  };
+
+  return <ul className="plain board-tree-list">{roots.map((n) => renderNode(n, 0))}</ul>;
 }
 
 function Tree(props: {

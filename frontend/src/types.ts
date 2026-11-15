@@ -606,6 +606,9 @@ export interface SyncPackage {
   // z＝疊放順序，僅電腦端匯出會帶；沒有 z＝iPad 封包或舊備份，覆蓋時沿用本機同一張卡在同一塊白板上的 z（iPad 無法調整 z，匯出不帶）
   board_cards: { board_id: string; card_id: string; x?: number; y?: number; w?: number; h?: number; z?: number }[];
   board_groups?: BoardGroup[];
+  // 問題白板的母子結構（僅電腦端匯出會帶）。沒有此欄＝iPad 封包或舊備份，覆蓋時沿用本機白板上已有的 question
+  // 原因：平板側欄要靠 parent_board_id 組出樹；沒有它，所有子白板會被當成一般白板平鋪
+  board_questions?: (BoardQuestion & { board_id: string })[];
   // 問題關聯（兩端可以是一般白板）。沒有此欄＝舊備份或 iPad 封包，覆蓋時保留本機原有的；與「空陣列＝關聯被清空」不同
   question_relations?: { id: string; board_a: string; board_b: string; relation_type: QuestionRelationType; created_at: string }[];
   // 沒有此欄＝舊版匯出；覆蓋匯入時要保留本機原有的便利貼，不可當成「清空」
