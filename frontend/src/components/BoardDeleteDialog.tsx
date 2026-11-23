@@ -11,14 +11,14 @@ interface Props {
   report(e: unknown, prefix?: string): void;
 }
 
-const hasContents = (c: BoardContents) => c.cards + c.literatures + c.notes + c.groups > 0;
+const hasContents = (c: BoardContents) => c.cards + c.literatures + c.notes + c.groups + (c.mind_nodes ?? 0) > 0;
 
-// 卡片與文獻本體永遠不會被刪；靈感筆記的文字與分組框只存在這塊白板，永久刪除後就沒了
+// 卡片與文獻本體永遠不會被刪；靈感筆記的文字、分組框與心智圖節點只存在這塊白板，永久刪除後就沒了
 function ContentsLine({ c }: { c: BoardContents }) {
   if (!hasContents(c)) return <span className="muted">（空白）</span>;
   return (
     <span className="muted">
-      卡片 {c.cards}・文獻 {c.literatures}・靈感筆記 {c.notes}・分組框 {c.groups}
+      卡片 {c.cards}・文獻 {c.literatures}・靈感筆記 {c.notes}・分組框 {c.groups}・心智圖節點 {c.mind_nodes ?? 0}
     </span>
   );
 }
@@ -58,7 +58,7 @@ export function BoardDeleteDialog({ boardId, onClose, onDone, report }: Props) {
   const keeping = canKeep && keepRecord;
   // 這次會永久消失的「無法由別處找回」的內容：靈感筆記與分組框只存在白板自己身上。
   // 提升一級時子問題都還在；封存時全部原封不動，所以只有「永久刪除」才需要警告
-  const lostHere = (c: BoardContents) => c.notes + c.groups;
+  const lostHere = (c: BoardContents) => c.notes + c.groups + (c.mind_nodes ?? 0);
   const losing = keeping
     ? 0
     : lostHere(plan.contents) + (mode === "promote" ? 0 : plan.descendants.reduce((n, d) => n + lostHere(d.contents), 0));
@@ -149,7 +149,7 @@ export function BoardDeleteDialog({ boardId, onClose, onDone, report }: Props) {
 
         {losing > 0 && (
           <p style={{ margin: "4px 0", color: "var(--danger, #f87171)", fontSize: 12 }}>
-            永久刪除後，將有 {losing} 個靈感筆記與分組框消失，無法復原。
+            永久刪除後，將有 {losing} 個靈感筆記、分組框與心智圖節點消失，無法復原。
           </p>
         )}
 

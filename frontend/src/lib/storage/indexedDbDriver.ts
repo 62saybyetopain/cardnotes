@@ -21,9 +21,23 @@ import type {
   CleanupResult,
   ConceptGraphResponse,
   CurationStatus,
+  DailyChange,
+  DailyChangesResponse,
+  DailyStatus,
+  DailyStream,
+  DailyStreamCardSyncItem,
+  DailyStreamKind,
+  DailyStreamsRangeResponse,
+  DailyStreamSyncItem,
   DeletePreview,
   LinkStatus,
   MediaInfo,
+  MindMapData,
+  MindNode,
+  MindNodeChildrenMode,
+  MindNodeRefStatus,
+  MindNodeSyncItem,
+  MindNodeType,
   RelationPattern,
   RelationPatternCreate,
   RelationPatternPatch,
@@ -31,13 +45,19 @@ import type {
   RelationType,
   SyncApplyRequest,
   SyncApplyResult,
+  SyncDailyStreamDiff,
   SyncDiffReport,
+  SyncLinkUpdateDiff,
+  SyncMindMapDiff,
   SyncPackage,
+  SyncTombstoneItem,
+  SyncTombstonePending,
   Tag,
   TagResolveResponse,
   TagsResponse,
+  TombstoneEntityType,
 } from "../../types";
-import { db, type DbBoardCard, type DbCard } from "./dexieDb";
+import { db, type DbBoardCard, type DbCard, type DbDailyStream, type DbMindNode } from "./dexieDb";
 import type { StorageDriver } from "./driver";
 
 function utcNow(): string {
@@ -74,6 +94,127 @@ function makeSnippet(body: string, q?: string): string {
     }
   }
   return body.slice(0, 160);
+}
+
+const DAILY_TEXT_MAX = 100_000;
+const MAX_DAILY_CHANGES = 500;
+const MAX_DAILY_ARCHIVE = 300;
+
+function parseDay(raw: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!m) {
+    throw new ApiError("VALIDATION_ERROR", `日期格式錯誤（需為 YYYY-MM-DD）：${raw}`, 422);
+  }
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) {
+    throw new ApiError("VALIDATION_ERROR", `日期格式錯誤（需為 YYYY-MM-DD）：${raw}`, 422);
+  }
+  return raw;
+}
+
+function parseUtcBound(raw: string, name: string): number {
+  if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    throw new ApiError("VALIDATION_ERROR", `${name} 必須帶時區（例如結尾 Z 或 +09:00）`, 422);
+  }
+  const ms = Date.parse(raw);
+  if (!Number.isFinite(ms)) {
+    throw new ApiError("VALIDATION_ERROR", `${name} 不是有效的 ISO 時間：${raw}`, 422);
+  }
+  return ms;
+}
+
+function validateDailyStreamInvariants(s: DailyStreamSyncItem): void {
+  if (s.kind === "journal") {
+    if (s.status !== "done" || s.unlocked_at !== null || s.peeked_at !== null || s.recall_text !== "") {
+      throw new ApiError("VALIDATION_ERROR", "靈感日記（journal）必須為 done 狀態且不可有盲寫或解鎖紀錄", 422);
+    }
+  } else {
+    if ((s.status === "recalling") !== (s.unlocked_at === null)) {
+      throw new ApiError("VALIDATION_ERROR", "卡片總結（card）的 recalling 狀態與 unlocked_at 必須一致", 422);
+    }
+  }
+  if (s.converted_card_id !== null && s.status !== "done") {
+    throw new ApiError("VALIDATION_ERROR", "已轉為卡片的紀錄必須為 done 狀態", 422);
+  }
+}
+
+function isoGt(a: string, b: string): boolean {
+  const ma = Date.parse(a);
+  const mb = Date.parse(b);
+  if (Number.isFinite(ma) && Number.isFinite(mb)) return ma > mb;
+  return a > b;
+}
+
+function isoGe(a: string, b: string): boolean {
+  const ma = Date.parse(a);
+  const mb = Date.parse(b);
+  if (Number.isFinite(ma) && Number.isFinite(mb)) return ma >= mb;
+  return a >= b;
+}
+
+function tombstoneKey(entity_type: TombstoneEntityType, entity_key: string): string {
+  return `${entity_type}::${entity_key}`;
+}
+
+async function recordTombstone(
+  entity_type: TombstoneEntityType,
+  entity_key: string,
+  label_snapshot = "",
+  deleted_at = utcNow(),
+): Promise<void> {
+  const key = tombstoneKey(entity_type, entity_key);
+  const prev = await db.sync_tombstones.get(key);
+  const nextDeletedAt = prev && isoGt(prev.deleted_at, deleted_at) ? prev.deleted_at : deleted_at;
+  const nextLabel = label_snapshot || prev?.label_snapshot || "";
+  await db.sync_tombstones.put({
+    key,
+    entity_type,
+    entity_key,
+    deleted_at: nextDeletedAt,
+    label_snapshot: nextLabel,
+  });
+}
+
+async function clearTombstone(entity_type: TombstoneEntityType, entity_key: string): Promise<void> {
+  await db.sync_tombstones.delete(tombstoneKey(entity_type, entity_key));
+}
+
+function assertMindNodesAcyclic(nodes: MindNodeSyncItem[]): void {
+  const byBoard = new Map<string, Map<string, string | null>>();
+  for (const mn of nodes) {
+    let m = byBoard.get(mn.board_id);
+    if (!m) {
+      m = new Map<string, string | null>();
+      byBoard.set(mn.board_id, m);
+    }
+    m.set(mn.id, mn.parent_id);
+  }
+  for (const [bid, parentOf] of byBoard.entries()) {
+    for (const [nid, pid] of parentOf.entries()) {
+      if (pid !== null && !parentOf.has(pid)) {
+        throw new ApiError("VALIDATION_ERROR", "心智圖節點的父節點不存在於同一塊白板", 422, {
+          board_id: bid,
+          node_id: nid,
+          parent_id: pid,
+        });
+      }
+      const seen = new Set<string>([nid]);
+      let cur = pid;
+      while (cur !== null) {
+        if (seen.has(cur)) {
+          throw new ApiError("CYCLE_DETECTED", "心智圖節點父子關係存在循環，拒絕寫入", 409, {
+            board_id: bid,
+            node_id: nid,
+          });
+        }
+        seen.add(cur);
+        cur = parentOf.get(cur) ?? null;
+      }
+    }
+  }
 }
 
 export class IndexedDbDriver implements StorageDriver {
@@ -323,12 +464,37 @@ export class IndexedDbDriver implements StorageDriver {
 
   async deleteCard(id: string): Promise<{ deleted: boolean }> {
     const impact = await this.cardImpact(id);
-    await db.transaction("rw", [db.cards, db.card_tags, db.links, db.board_cards], async () => {
-      await db.cards.delete(id);
-      await db.card_tags.where("card_id").equals(id).delete();
-      await db.links.filter((l) => l.source_id === id || l.target_id === id).delete();
-      await db.board_cards.where("card_id").equals(id).delete();
-    });
+    await db.transaction(
+      "rw",
+      [
+        db.cards,
+        db.card_tags,
+        db.links,
+        db.board_cards,
+        db.daily_stream_cards,
+        db.daily_streams,
+        db.mind_nodes,
+        db.sync_tombstones,
+      ],
+      async () => {
+        const card = await db.cards.get(id);
+        if (card) {
+          await db.mind_nodes
+            .where("ref_id")
+            .equals(id)
+            .modify((n) => {
+              if (n.type === "card") n.ref_title_snapshot = card.title;
+            });
+        }
+        await db.cards.delete(id);
+        await db.card_tags.where("card_id").equals(id).delete();
+        await db.links.filter((l) => l.source_id === id || l.target_id === id).delete();
+        await db.board_cards.where("card_id").equals(id).delete();
+        await db.daily_stream_cards.where("card_id").equals(id).delete();
+        await db.daily_streams.filter((s) => s.converted_card_id === id).modify({ converted_card_id: null });
+        await recordTombstone("card", id, card?.title ?? "");
+      },
+    );
     return { deleted: true, ...impact };
   }
 
@@ -453,10 +619,13 @@ export class IndexedDbDriver implements StorageDriver {
     }
 
     const now = utcNow();
-    await db.links.add({ source_id: sId, target_id: tId, relation_type, status, reason });
-    // 同步更新雙端卡片的 updated_at，確保 iPad 依時間戳篩選匯出時能偵測到僅修改語意連結的卡片
-    await db.cards.update(sId, { updated_at: now });
-    await db.cards.update(tId, { updated_at: now });
+    await db.transaction("rw", [db.links, db.cards, db.sync_tombstones], async () => {
+      await db.links.add({ source_id: sId, target_id: tId, relation_type, status, reason });
+      await clearTombstone("link", `${sId}|${tId}|${relation_type}`);
+      // 同步更新雙端卡片的 updated_at，確保 iPad 依時間戳篩選匯出時能偵測到僅修改語意連結的卡片
+      await db.cards.update(sId, { updated_at: now });
+      await db.cards.update(tId, { updated_at: now });
+    });
     return {
       source_id: sId,
       target_id: tId,
@@ -497,15 +666,21 @@ export class IndexedDbDriver implements StorageDriver {
     const nextReason = patch.reason !== undefined ? patch.reason : match.reason;
 
     const now = utcNow();
-    await db.links.update(match.id, {
-      source_id: nextS,
-      target_id: nextT,
-      relation_type: nextRel,
-      status: nextStatus,
-      reason: nextReason,
+    await db.transaction("rw", [db.links, db.cards, db.sync_tombstones], async () => {
+      await db.links.update(match.id!, {
+        source_id: nextS,
+        target_id: nextT,
+        relation_type: nextRel,
+        status: nextStatus,
+        reason: nextReason,
+      });
+      if (nextS !== oldS || nextT !== oldT || nextRel !== oldRel) {
+        await recordTombstone("link", `${oldS}|${oldT}|${oldRel}`, oldRel);
+      }
+      await clearTombstone("link", `${nextS}|${nextT}|${nextRel}`);
+      await db.cards.update(nextS, { updated_at: now });
+      await db.cards.update(nextT, { updated_at: now });
     });
-    await db.cards.update(nextS, { updated_at: now });
-    await db.cards.update(nextT, { updated_at: now });
 
     return {
       source_id: nextS,
@@ -519,19 +694,34 @@ export class IndexedDbDriver implements StorageDriver {
   }
 
   async deleteLink(source_id: string, target_id: string, relation_type?: RelationType): Promise<{ deleted: boolean }> {
-    const cnt = await db.links
-      .filter(
-        (l) =>
-          l.source_id === source_id &&
-          l.target_id === target_id &&
-          (!relation_type || l.relation_type === relation_type),
-      )
-      .delete();
-    if (cnt > 0) {
-      const now = utcNow();
-      await db.cards.update(source_id, { updated_at: now });
-      await db.cards.update(target_id, { updated_at: now });
-    }
+    await db.transaction("rw", [db.links, db.cards, db.sync_tombstones], async () => {
+      const targetRel = relation_type ? this.upgradeRelationType(relation_type).relation_type : undefined;
+      const targets = await db.links
+        .filter((l) => {
+          const normRel = this.upgradeRelationType(l.relation_type).relation_type;
+          if (targetRel) {
+            const [cs, ct] = this.canonicalEndpoints(targetRel, source_id, target_id);
+            const [ls, lt] = this.canonicalEndpoints(normRel, l.source_id, l.target_id);
+            return normRel === targetRel && ls === cs && lt === ct;
+          }
+          return (
+            (l.source_id === source_id && l.target_id === target_id) ||
+            (l.source_id === target_id && l.target_id === source_id)
+          );
+        })
+        .toArray();
+      if (targets.length > 0) {
+        for (const l of targets) {
+          if (l.id !== undefined) await db.links.delete(l.id);
+          const normRel = this.upgradeRelationType(l.relation_type).relation_type;
+          const [ls, lt] = this.canonicalEndpoints(normRel, l.source_id, l.target_id);
+          await recordTombstone("link", `${ls}|${lt}|${normRel}`, normRel);
+        }
+        const now = utcNow();
+        await db.cards.update(source_id, { updated_at: now });
+        await db.cards.update(target_id, { updated_at: now });
+      }
+    });
     return { deleted: true };
   }
 
@@ -678,7 +868,7 @@ export class IndexedDbDriver implements StorageDriver {
     const target = await db.tags.get(target_id);
     if (!source || !target) throw new ApiError("NOT_FOUND", "標籤不存在", 404);
 
-    await db.transaction("rw", [db.tags, db.card_tags, db.tag_aliases], async () => {
+    await db.transaction("rw", [db.tags, db.card_tags, db.tag_aliases, db.sync_tombstones], async () => {
       // 轉移子標籤
       await db.tags.where("parent_id").equals(source_id).modify({ parent_id: target_id });
       // 轉移卡片歸屬
@@ -687,6 +877,7 @@ export class IndexedDbDriver implements StorageDriver {
         const hasTarget = await db.card_tags.where({ card_id: ct.card_id, tag_id: target_id }).first();
         if (!hasTarget) {
           await db.card_tags.add({ card_id: ct.card_id, tag_id: target_id });
+          await clearTombstone("card_tag", `${ct.card_id}|${target_id}`);
         }
       }
       await db.card_tags.where("tag_id").equals(source_id).delete();
@@ -696,6 +887,7 @@ export class IndexedDbDriver implements StorageDriver {
         await db.tag_aliases.add({ tag_id: target_id, alias: source.name });
       }
       await db.tags.delete(source_id);
+      await recordTombstone("tag", source_id, source.name);
     });
 
     return this.buildTagDict(target_id);
@@ -723,7 +915,7 @@ export class IndexedDbDriver implements StorageDriver {
     const t = await db.tags.get(id);
     if (!t) throw new ApiError("NOT_FOUND", "標籤不存在", 404, { tag_id: id });
 
-    await db.transaction("rw", [db.tags, db.card_tags, db.tag_aliases], async () => {
+    await db.transaction("rw", [db.tags, db.card_tags, db.tag_aliases, db.sync_tombstones], async () => {
       // 子節點上移
       await db.tags.where("parent_id").equals(id).modify({ parent_id: t.parent_id });
       // 若有父節點，卡片改歸屬到父節點
@@ -731,28 +923,44 @@ export class IndexedDbDriver implements StorageDriver {
         const cts = await db.card_tags.where("tag_id").equals(id).toArray();
         for (const ct of cts) {
           const hasParent = await db.card_tags.where({ card_id: ct.card_id, tag_id: t.parent_id }).first();
-          if (!hasParent) await db.card_tags.add({ card_id: ct.card_id, tag_id: t.parent_id });
+          if (!hasParent) {
+            await db.card_tags.add({ card_id: ct.card_id, tag_id: t.parent_id });
+            await clearTombstone("card_tag", `${ct.card_id}|${t.parent_id}`);
+          }
         }
       }
       await db.card_tags.where("tag_id").equals(id).delete();
       await db.tag_aliases.where("tag_id").equals(id).delete();
       await db.tags.delete(id);
+      await recordTombstone("tag", id, t.name);
     });
     return { deleted: true };
   }
 
   async assignTag(card_id: string, tag_id: string): Promise<{ existed: boolean }> {
-    const exists = await db.card_tags.where({ card_id, tag_id }).first();
-    if (exists) return { existed: true };
-    await db.card_tags.add({ card_id, tag_id });
-    await db.cards.update(card_id, { updated_at: utcNow() });
-    return { existed: false };
+    let existed = false;
+    await db.transaction("rw", [db.card_tags, db.cards, db.sync_tombstones], async () => {
+      const exists = await db.card_tags.where({ card_id, tag_id }).first();
+      if (exists) {
+        existed = true;
+      } else {
+        await db.card_tags.add({ card_id, tag_id });
+        await db.cards.update(card_id, { updated_at: utcNow() });
+      }
+      await clearTombstone("card_tag", `${card_id}|${tag_id}`);
+    });
+    return { existed };
   }
 
   async unassignTag(card_id: string, tag_id: string): Promise<{ removed: boolean }> {
-    const cnt = await db.card_tags.where({ card_id, tag_id }).delete();
-    if (cnt === 0) throw new ApiError("NOT_FOUND", "這張卡片沒有這個標籤", 404);
-    await db.cards.update(card_id, { updated_at: utcNow() });
+    await db.transaction("rw", [db.card_tags, db.cards, db.tags, db.sync_tombstones], async () => {
+      const cnt = await db.card_tags.where({ card_id, tag_id }).delete();
+      if (cnt === 0) throw new ApiError("NOT_FOUND", "這張卡片沒有這個標籤", 404);
+      const [c, t] = await Promise.all([db.cards.get(card_id), db.tags.get(tag_id)]);
+      const label = `${c?.title || card_id.slice(0, 8)} / ${t?.name || tag_id.slice(0, 8)}`;
+      await recordTombstone("card_tag", `${card_id}|${tag_id}`, label);
+      await db.cards.update(card_id, { updated_at: utcNow() });
+    });
     return { removed: true };
   }
 
@@ -764,15 +972,21 @@ export class IndexedDbDriver implements StorageDriver {
       // 已封存的問題不列出（與電腦端 list_boards 一致）；留著會讓封存的白板重新出現在側欄
       if (b.question?.archived_at) continue;
       const card_count = await db.board_cards.where("board_id").equals(b.id).count();
-      boards.push({ id: b.id, name: b.name, card_count, question: b.question ?? null });
+      boards.push({
+        id: b.id,
+        name: b.name,
+        mindmap_title: b.mindmap_title ?? "",
+        card_count,
+        question: b.question ?? null,
+      });
     }
     return { boards };
   }
 
   async createBoard(name: string): Promise<BoardSummary> {
     const id = newId();
-    await db.boards.add({ id, name: name.trim(), created_at: utcNow(), updated_at: utcNow() });
-    return { id, name: name.trim(), card_count: 0 };
+    await db.boards.add({ id, name: name.trim(), mindmap_title: "", created_at: utcNow(), updated_at: utcNow() });
+    return { id, name: name.trim(), mindmap_title: "", card_count: 0 };
   }
 
   async renameBoard(id: string, name: string): Promise<{ id: string; name: string }> {
@@ -783,12 +997,36 @@ export class IndexedDbDriver implements StorageDriver {
   }
 
   async deleteBoard(id: string): Promise<{ deleted: boolean }> {
-    await db.transaction("rw", [db.boards, db.board_cards, db.board_groups, db.board_notes], async () => {
-      await db.boards.delete(id);
-      await db.board_cards.where("board_id").equals(id).delete();
-      await db.board_groups.where("board_id").equals(id).delete();
-      await db.board_notes.where("board_id").equals(id).delete();
-    });
+    await db.transaction(
+      "rw",
+      [db.boards, db.board_cards, db.board_groups, db.board_notes, db.mind_nodes, db.sync_tombstones],
+      async () => {
+        const childCount = await db.boards.filter((b) => b.question?.parent_board_id === id).count();
+        if (childCount > 0) {
+          throw new ApiError(
+            "IN_USE",
+            `這塊白板底下還有 ${childCount} 個子問題白板，請改於電腦端刪除或封存，避免產生孤兒白板`,
+            409,
+            { board_id: id, child_count: childCount },
+          );
+        }
+        const board = await db.boards.get(id);
+        if (board) {
+          await db.mind_nodes
+            .where("ref_id")
+            .equals(id)
+            .modify((n) => {
+              if (n.type === "board") n.ref_title_snapshot = board.name;
+            });
+        }
+        await db.boards.delete(id);
+        await db.board_cards.where("board_id").equals(id).delete();
+        await db.board_groups.where("board_id").equals(id).delete();
+        await db.board_notes.where("board_id").equals(id).delete();
+        await db.mind_nodes.where("board_id").equals(id).delete();
+        await recordTombstone("board", id, board?.name ?? "");
+      },
+    );
     return { deleted: true };
   }
 
@@ -839,6 +1077,7 @@ export class IndexedDbDriver implements StorageDriver {
     return {
       id: b.id,
       name: b.name,
+      mindmap_title: b.mindmap_title ?? "",
       cards,
       links,
       groups,
@@ -858,7 +1097,11 @@ export class IndexedDbDriver implements StorageDriver {
     }
 
     const row: DbBoardCard = { board_id, card_id, x, y, w: 280, h: null, z: 0 };
-    await db.board_cards.add(row);
+    await db.transaction("rw", [db.board_cards, db.cards, db.sync_tombstones], async () => {
+      await db.board_cards.add(row);
+      await db.cards.update(card_id, { updated_at: utcNow() });
+      await clearTombstone("board_card", `${board_id}|${card_id}`);
+    });
     return { card_id, x, y, w: 280, h: null, z: 0 };
   }
 
@@ -880,7 +1123,15 @@ export class IndexedDbDriver implements StorageDriver {
   }
 
   async removeFromBoard(board_id: string, card_id: string): Promise<{ removed: boolean }> {
-    await db.board_cards.where({ board_id, card_id }).delete();
+    await db.transaction("rw", [db.boards, db.cards, db.board_cards, db.sync_tombstones], async () => {
+      const cnt = await db.board_cards.where({ board_id, card_id }).delete();
+      if (cnt > 0) {
+        const [b, c] = await Promise.all([db.boards.get(board_id), db.cards.get(card_id)]);
+        const label = `${b?.name || board_id.slice(0, 8)} / ${c?.title || card_id.slice(0, 8)}`;
+        await recordTombstone("board_card", `${board_id}|${card_id}`, label);
+        await db.cards.update(card_id, { updated_at: utcNow() });
+      }
+    });
     return { removed: true };
   }
 
@@ -995,7 +1246,7 @@ export class IndexedDbDriver implements StorageDriver {
     });
 
     const rawBoards = await db.boards.toArray();
-    const boards = rawBoards.map((b) => ({ id: b.id, name: b.name }));
+    const boards = rawBoards.map((b) => ({ id: b.id, name: b.name, mindmap_title: b.mindmap_title ?? "" }));
 
     const rawBcs = await db.board_cards.toArray();
     const board_cards = rawBcs.map((bc) => ({
@@ -1009,6 +1260,23 @@ export class IndexedDbDriver implements StorageDriver {
 
     const board_groups = await db.board_groups.toArray();
     const board_notes = await db.board_notes.toArray();
+    const daily_streams: DailyStreamSyncItem[] = (await db.daily_streams.toArray()).sort(
+      (a, b) => a.day.localeCompare(b.day) || a.position - b.position,
+    );
+    const daily_stream_cards: DailyStreamCardSyncItem[] = (await db.daily_stream_cards.toArray()).map((b) => ({
+      stream_id: b.stream_id,
+      card_id: b.card_id,
+      created_at: b.created_at,
+    }));
+    const mind_nodes: MindNodeSyncItem[] = (await db.mind_nodes.toArray()).sort(
+      (a, b) => a.board_id.localeCompare(b.board_id) || a.sort_order - b.sort_order || a.created_at.localeCompare(b.created_at),
+    );
+    const tombstones: SyncTombstoneItem[] = (await db.sync_tombstones.orderBy("deleted_at").toArray()).map((t) => ({
+      entity_type: t.entity_type,
+      entity_key: t.entity_key,
+      deleted_at: t.deleted_at,
+      label_snapshot: t.label_snapshot,
+    }));
 
     return {
       version: 1,
@@ -1022,6 +1290,11 @@ export class IndexedDbDriver implements StorageDriver {
       board_cards,
       board_groups,
       board_notes,
+      daily_streams,
+      daily_stream_cards,
+      mind_nodes,
+      mindmap_board_ids: rawBoards.map((b) => b.id),
+      tombstones,
     };
   }
 
@@ -1047,13 +1320,46 @@ export class IndexedDbDriver implements StorageDriver {
         422,
       );
     }
+    if ((pkg.daily_streams === undefined) !== (pkg.daily_stream_cards === undefined)) {
+      throw new ApiError("VALIDATION_ERROR", "daily_streams 與 daily_stream_cards 必須同時提供或同時省略", 422);
+    }
+    for (const s of pkg.daily_streams ?? []) {
+      validateDailyStreamInvariants(s);
+    }
+    if (Array.isArray(pkg.mind_nodes)) {
+      assertMindNodesAcyclic(pkg.mind_nodes);
+    }
 
     await db.transaction(
       "rw",
-      [db.cards, db.tags, db.tag_aliases, db.card_tags, db.links, db.boards, db.board_cards, db.board_groups, db.board_notes, db.media],
+      [
+        db.cards,
+        db.tags,
+        db.tag_aliases,
+        db.card_tags,
+        db.links,
+        db.boards,
+        db.board_cards,
+        db.board_groups,
+        db.board_notes,
+        db.daily_streams,
+        db.daily_stream_cards,
+        db.mind_nodes,
+        db.sync_tombstones,
+        db.media,
+      ],
       async () => {
         // 便利貼：封包沒帶 board_notes（舊版匯出）時，清空前先留下本機的，避免覆蓋同步悄悄刪光便利貼
         const keptNotes = Array.isArray(pkg.board_notes) ? null : await db.board_notes.toArray();
+        const keptMindNodes = Array.isArray(pkg.mind_nodes) ? null : await db.mind_nodes.toArray();
+        const keptTombstones = Array.isArray(pkg.tombstones) ? null : await db.sync_tombstones.toArray();
+        const keptMindmapTitle = new Map<string, string>(
+          (await db.boards.toArray()).map((b) => [b.id, b.mindmap_title ?? ""] as [string, string]),
+        );
+        // 日誌：封包沒帶 daily_streams（舊版匯出）時，清空前先留下本機的，覆蓋後對仍存在的卡片補回綁定與已轉卡片標記
+        const hasIncomingDaily = Array.isArray(pkg.daily_streams);
+        const keptStreams = hasIncomingDaily ? [] : await db.daily_streams.toArray();
+        const keptStreamCards = hasIncomingDaily ? [] : await db.daily_stream_cards.toArray();
         // 白板卡片的疊放順序：封包沒帶 z（iPad 封包、舊備份）時沿用本機的；必須在 board_cards.clear() 之前留下
         const keptZ = new Map<string, number>(
           (await db.board_cards.toArray()).map((bc) => [`${bc.board_id}:${bc.card_id}`, bc.z] as [string, number]),
@@ -1079,6 +1385,10 @@ export class IndexedDbDriver implements StorageDriver {
         await db.board_cards.clear();
         await db.board_groups.clear();
         await db.board_notes.clear();
+        await db.daily_streams.clear();
+        await db.daily_stream_cards.clear();
+        await db.mind_nodes.clear();
+        await db.sync_tombstones.clear();
 
         // 2. 依拓撲順序重灌標籤與別名（同時正規化舊版 domain -> location）
         const pendingTags = [...(pkg.tags ?? [])];
@@ -1154,15 +1464,56 @@ export class IndexedDbDriver implements StorageDriver {
         const importedBoardIds = new Set<string>();
         for (const b of pkg.boards ?? []) {
           // SyncPackage["boards"] 契約僅保證 id 與 name，透過可選擴充型別安全讀取執行期可能附帶的時間戳並補齊預設值，消除 TS2339 錯誤。
-          const boardMeta = b as { id: string; name: string; created_at?: string; updated_at?: string };
+          const boardMeta = b as {
+            id: string;
+            name: string;
+            mindmap_title?: string;
+            created_at?: string;
+            updated_at?: string;
+          };
           await db.boards.put({
             id: boardMeta.id,
             name: boardMeta.name,
+            mindmap_title:
+              boardMeta.mindmap_title !== undefined
+                ? boardMeta.mindmap_title
+                : (keptMindmapTitle.get(boardMeta.id) ?? ""),
             created_at: boardMeta.created_at || utcNow(),
             updated_at: boardMeta.updated_at || utcNow(),
             question: questionByBoard.get(boardMeta.id) ?? null,
           });
           importedBoardIds.add(boardMeta.id);
+        }
+
+        // 6.5 寫入心智圖節點（舊封包缺席時保留本機既有心智圖並修剪已消失白板的孤兒節點）
+        const rawMindNodes = (pkg.mind_nodes ?? keptMindNodes ?? []).filter((mn) => importedBoardIds.has(mn.board_id));
+        const validMnByBoard = new Map<string, Set<string>>();
+        for (const mn of rawMindNodes) {
+          let set = validMnByBoard.get(mn.board_id);
+          if (!set) {
+            set = new Set<string>();
+            validMnByBoard.set(mn.board_id, set);
+          }
+          set.add(mn.id);
+        }
+        for (const mn of rawMindNodes) {
+          const validIds = validMnByBoard.get(mn.board_id)!;
+          const safeParent =
+            mn.parent_id && mn.parent_id !== mn.id && validIds.has(mn.parent_id) ? mn.parent_id : null;
+          await db.mind_nodes.put({
+            id: mn.id,
+            board_id: mn.board_id,
+            parent_id: safeParent,
+            sort_order: Math.max(0, Math.floor(mn.sort_order ?? 0)),
+            type: mn.type ?? "text",
+            text: mn.text ?? "",
+            edge_label: mn.edge_label ?? "",
+            ref_id: mn.type === "text" ? null : (mn.ref_id ?? null),
+            ref_title_snapshot: mn.ref_title_snapshot ?? "",
+            collapsed: mn.collapsed === 1 ? 1 : 0,
+            created_at: mn.created_at || utcNow(),
+            updated_at: mn.updated_at || utcNow(),
+          });
         }
         const seenBc = new Set<string>();
         for (const bc of pkg.board_cards ?? []) {
@@ -1215,6 +1566,59 @@ export class IndexedDbDriver implements StorageDriver {
           }
         }
 
+        // 8.5 日誌：封包有帶就整批寫入；沒帶就沿用本機資料並修剪已不存在的卡片參照
+        const importedStreamIds = new Set<string>();
+        const sourceStreams = hasIncomingDaily ? (pkg.daily_streams ?? []) : keptStreams;
+        for (const s of sourceStreams) {
+          const convCid = s.converted_card_id && importedCardIds.has(s.converted_card_id) ? s.converted_card_id : null;
+          await db.daily_streams.put({
+            id: s.id,
+            day: s.day,
+            position: s.position,
+            kind: s.kind,
+            title: s.title ?? "",
+            status: s.status,
+            recall_text: s.recall_text ?? "",
+            review_text: s.review_text ?? "",
+            peeked_at: s.peeked_at ?? null,
+            unlocked_at: s.unlocked_at ?? null,
+            converted_card_id: convCid,
+            created_at: s.created_at,
+            updated_at: s.updated_at,
+          });
+          importedStreamIds.add(s.id);
+        }
+        const seenDsc = new Set<string>();
+        const sourceStreamCards = hasIncomingDaily ? (pkg.daily_stream_cards ?? []) : keptStreamCards;
+        for (const b of sourceStreamCards) {
+          const key = `${b.stream_id}:${b.card_id}`;
+          if (importedStreamIds.has(b.stream_id) && importedCardIds.has(b.card_id) && !seenDsc.has(key)) {
+            seenDsc.add(key);
+            await db.daily_stream_cards.add({
+              stream_id: b.stream_id,
+              card_id: b.card_id,
+              created_at: b.created_at || utcNow(),
+            });
+          }
+        }
+
+        // 8.8 重灌刪除墓碑（舊封包缺席時保留本機墓碑，並濾除與還原實體衝突的過時墓碑）
+        const liveKeys = new Set<string>([
+          ...Array.from(importedCardIds).map((id) => tombstoneKey("card", id)),
+          ...Array.from(insertedTagIds).map((id) => tombstoneKey("tag", id)),
+          ...Array.from(seenCt).map((k) => tombstoneKey("card_tag", k.replace(":", "|"))),
+          ...Array.from(seenLinks).map((k) => tombstoneKey("link", k.replace(/:/g, "|"))),
+          ...Array.from(importedBoardIds).map((id) => tombstoneKey("board", id)),
+          ...Array.from(seenBc).map((k) => tombstoneKey("board_card", k.replace(":", "|"))),
+          ...Array.from(importedStreamIds).map((id) => tombstoneKey("daily_stream", id)),
+          ...Array.from(seenDsc).map((k) => tombstoneKey("daily_stream_card", k.replace(":", "|"))),
+        ]);
+        for (const tb of pkg.tombstones ?? keptTombstones ?? []) {
+          const k = tombstoneKey(tb.entity_type, tb.entity_key);
+          if (liveKeys.has(k)) continue;
+          await recordTombstone(tb.entity_type, tb.entity_key, tb.label_snapshot, tb.deleted_at);
+        }
+
         // 9. 清理 db.media 中已不被任何覆蓋後卡片引用的孤兒媒體檔，避免 iPad 舊本機貼圖永久殘留佔用儲存空間
         const referencedMedia = new Set<string>();
         const mediaRe = /!\[[^\]]*\]\(media:([0-9a-fA-F-]{36})\)/g;
@@ -1242,6 +1646,18 @@ export class IndexedDbDriver implements StorageDriver {
     return local.filter((c) => !keep.has(c.id)).map((c) => ({ id: c.id, title: c.title }));
   }
 
+  // 覆蓋同步前檢查：本地有、備份沒有的日誌（僅在封包明確攜帶 daily_streams 時才會覆蓋清空）
+  async findLocalOnlyDailyStreams(
+    pkg: SyncPackage,
+  ): Promise<{ id: string; day: string; kind: DailyStreamKind; title: string }[]> {
+    if (!Array.isArray(pkg.daily_streams)) return [];
+    const keep = new Set(pkg.daily_streams.map((s) => s.id));
+    const local = await db.daily_streams.toArray();
+    return local
+      .filter((s) => !keep.has(s.id))
+      .map((s) => ({ id: s.id, day: s.day, kind: s.kind, title: s.title }));
+  }
+
   // 差量比對
   async syncDiff(pkg: SyncPackage): Promise<SyncDiffReport> {
     const localCards = new Map((await db.cards.toArray()).map((c) => [c.id, c]));
@@ -1253,19 +1669,29 @@ export class IndexedDbDriver implements StorageDriver {
       const local = localCards.get(c.id);
       if (!local) {
         cards_new.push({ id: c.id, title: c.title, body: c.body, updated_at: c.updated_at });
-      } else if (c.updated_at > local.updated_at) {
-        cards_updated.push({
-          id: c.id,
-          title: c.title,
-          old_title: local.title,
-          new_title: c.title,
-          old_body: local.body,
-          new_body: c.body,
-          old_updated_at: local.updated_at,
-          new_updated_at: c.updated_at,
-        });
       } else {
-        cards_unchanged_count++;
+        const diffFields: string[] = [];
+        if (c.title !== local.title) diffFields.push("標題");
+        if (c.body !== local.body) diffFields.push("內容");
+        if ((c.card_type ?? "untyped") !== (local.card_type ?? "untyped")) diffFields.push("型態");
+        if ((c.curation_status ?? "inbox") !== (local.curation_status ?? "inbox")) diffFields.push("整理狀態");
+        if (c.sources !== undefined && JSON.stringify(c.sources) !== JSON.stringify(local.sources ?? [])) {
+          diffFields.push("出處");
+        }
+        if (diffFields.length > 0) {
+          cards_updated.push({
+            id: c.id,
+            title: c.title,
+            old_title: local.title,
+            new_title: c.title,
+            old_body: local.body,
+            new_body: c.body,
+            old_updated_at: local.updated_at,
+            new_updated_at: c.updated_at,
+          });
+        } else {
+          cards_unchanged_count++;
+        }
       }
     }
 
@@ -1275,21 +1701,238 @@ export class IndexedDbDriver implements StorageDriver {
     const localCt = new Set((await db.card_tags.toArray()).map((ct) => `${ct.card_id}:${ct.tag_id}`));
     const card_tags_new = (pkg.card_tags ?? []).filter((ct) => !localCt.has(`${ct.card_id}:${ct.tag_id}`));
 
-    const localLinks = new Set(
-      (await db.links.toArray()).map((l) => {
-        const { relation_type } = this.upgradeRelationType(l.relation_type);
-        const [sId, tId] = this.canonicalEndpoints(relation_type, l.source_id, l.target_id);
-        return `${sId}:${tId}:${relation_type}`;
-      }),
-    );
-    const links_new = (pkg.links ?? []).filter((l) => {
-      const { relation_type } = this.upgradeRelationType(l.relation_type as string);
+    const localLinksMap = new Map<string, { status: LinkStatus; reason: string }>();
+    for (const l of await db.links.toArray()) {
+      const { relation_type, forceHypothesis } = this.upgradeRelationType(l.relation_type);
       const [sId, tId] = this.canonicalEndpoints(relation_type, l.source_id, l.target_id);
-      return !localLinks.has(`${sId}:${tId}:${relation_type}`);
-    });
+      localLinksMap.set(`${sId}:${tId}:${relation_type}`, {
+        status: forceHypothesis ? "hypothesis" : (l.status as LinkStatus),
+        reason: l.reason ?? "",
+      });
+    }
+    const links_new: BoardLink[] = [];
+    const links_updated: SyncLinkUpdateDiff[] = [];
+    for (const l of pkg.links ?? []) {
+      const { relation_type, forceHypothesis } = this.upgradeRelationType(l.relation_type as string);
+      const [sId, tId] = this.canonicalEndpoints(relation_type, l.source_id, l.target_id);
+      const normStatus: LinkStatus = forceHypothesis ? "hypothesis" : (l.status || "confirmed");
+      const normReason = (l.reason ?? "").trim();
+      const key = `${sId}:${tId}:${relation_type}`;
+      const cur = localLinksMap.get(key);
+      if (!cur) {
+        links_new.push({ ...l, source_id: sId, target_id: tId, relation_type, status: normStatus, reason: normReason });
+      } else if (normStatus !== cur.status || normReason !== cur.reason) {
+        links_updated.push({
+          ...l,
+          source_id: sId,
+          target_id: tId,
+          relation_type,
+          status: normStatus,
+          reason: normReason,
+          old_status: cur.status,
+          old_reason: cur.reason,
+        });
+      }
+    }
 
     const localBc = new Set((await db.board_cards.toArray()).map((bc) => `${bc.board_id}:${bc.card_id}`));
     const board_cards_new = (pkg.board_cards ?? []).filter((bc) => !localBc.has(`${bc.board_id}:${bc.card_id}`));
+
+    const localStreams = new Map((await db.daily_streams.toArray()).map((s) => [s.id, s]));
+    const daily_streams_new: DailyStreamSyncItem[] = [];
+    const daily_streams_updated: SyncDailyStreamDiff[] = [];
+    let daily_streams_unchanged_count = 0;
+
+    for (const s of pkg.daily_streams ?? []) {
+      const local = localStreams.get(s.id);
+      if (!local) {
+        daily_streams_new.push(s);
+      } else {
+        const diff_fields: string[] = [];
+        if (s.title !== local.title) diff_fields.push("標題");
+        if (s.status !== local.status) diff_fields.push("狀態");
+        if (s.recall_text !== local.recall_text) diff_fields.push("回憶提取");
+        if (s.review_text !== local.review_text) diff_fields.push("對照／內文");
+        if (s.converted_card_id !== local.converted_card_id) diff_fields.push("轉卡片狀態");
+        if (s.peeked_at !== local.peeked_at || s.unlocked_at !== local.unlocked_at) {
+          diff_fields.push("提示／解鎖紀錄");
+        }
+        if (diff_fields.length > 0) {
+          daily_streams_updated.push({
+            id: s.id,
+            day: s.day,
+            kind: s.kind,
+            title: s.title,
+            old_title: local.title,
+            new_title: s.title,
+            old_status: local.status,
+            new_status: s.status,
+            old_recall_text: local.recall_text,
+            new_recall_text: s.recall_text,
+            old_review_text: local.review_text,
+            new_review_text: s.review_text,
+            old_converted_card_id: local.converted_card_id,
+            new_converted_card_id: s.converted_card_id,
+            diff_fields,
+            old_updated_at: local.updated_at,
+            new_updated_at: s.updated_at,
+          });
+        } else {
+          daily_streams_unchanged_count++;
+        }
+      }
+    }
+
+    const localDsc = new Set(
+      (await db.daily_stream_cards.toArray()).map((b) => `${b.stream_id}:${b.card_id}`),
+    );
+    const daily_stream_cards_new = (pkg.daily_stream_cards ?? []).filter(
+      (b) => !localDsc.has(`${b.stream_id}:${b.card_id}`),
+    );
+
+    const localBoardsMap = new Map((await db.boards.toArray()).map((b) => [b.id, b]));
+    const pkgBoardsMap = new Map((pkg.boards ?? []).map((b) => [b.id, b]));
+    const localMnByBoard = new Map<string, Map<string, DbMindNode>>();
+    for (const mn of await db.mind_nodes.toArray()) {
+      let m = localMnByBoard.get(mn.board_id);
+      if (!m) {
+        m = new Map<string, DbMindNode>();
+        localMnByBoard.set(mn.board_id, m);
+      }
+      m.set(mn.id, mn);
+    }
+    const pkgMnByBoard = new Map<string, Map<string, MindNodeSyncItem>>();
+    for (const mn of pkg.mind_nodes ?? []) {
+      let m = pkgMnByBoard.get(mn.board_id);
+      if (!m) {
+        m = new Map<string, MindNodeSyncItem>();
+        pkgMnByBoard.set(mn.board_id, m);
+      }
+      m.set(mn.id, mn);
+    }
+
+    const targetMmBoards =
+      pkg.mindmap_board_ids !== undefined
+        ? Array.from(new Set(pkg.mindmap_board_ids))
+        : Array.from(pkgMnByBoard.keys());
+    const mindmaps_updated: SyncMindMapDiff[] = [];
+    for (const bid of targetMmBoards) {
+      const localB = localBoardsMap.get(bid);
+      const pkgB = pkgBoardsMap.get(bid);
+      const oldTitle = localB?.mindmap_title ?? "";
+      const newTitle = pkgB?.mindmap_title !== undefined ? pkgB.mindmap_title : oldTitle;
+      const titleChanged = oldTitle !== newTitle;
+      const oldNodes = localMnByBoard.get(bid) ?? new Map<string, DbMindNode>();
+      const newNodes = pkgMnByBoard.get(bid) ?? new Map<string, MindNodeSyncItem>();
+      let addedCount = 0;
+      let updatedCount = 0;
+      let removedCount = 0;
+      for (const [nid, nn] of newNodes.entries()) {
+        const on = oldNodes.get(nid);
+        if (!on) {
+          addedCount++;
+        } else if (
+          nn.parent_id !== on.parent_id ||
+          nn.sort_order !== on.sort_order ||
+          nn.type !== on.type ||
+          nn.text !== on.text ||
+          nn.edge_label !== on.edge_label ||
+          nn.ref_id !== on.ref_id ||
+          nn.collapsed !== on.collapsed
+        ) {
+          updatedCount++;
+        }
+      }
+      for (const nid of oldNodes.keys()) {
+        if (!newNodes.has(nid)) removedCount++;
+      }
+      if (titleChanged || addedCount || updatedCount || removedCount) {
+        let oldTs = "";
+        for (const n of oldNodes.values()) {
+          if (!oldTs || isoGt(n.updated_at, oldTs)) oldTs = n.updated_at;
+        }
+        if (!oldTs && localB && titleChanged) oldTs = localB.updated_at ?? "";
+        let newTs = "";
+        for (const n of newNodes.values()) {
+          if (!newTs || isoGt(n.updated_at, newTs)) newTs = n.updated_at;
+        }
+        if (!newTs) newTs = pkg.exported_at;
+        mindmaps_updated.push({
+          board_id: bid,
+          board_name: localB?.name ?? pkgB?.name ?? bid,
+          old_mindmap_title: oldTitle,
+          new_mindmap_title: newTitle,
+          title_changed: titleChanged,
+          added_count: addedCount,
+          updated_count: updatedCount,
+          removed_count: removedCount,
+          old_node_count: oldNodes.size,
+          new_node_count: newNodes.size,
+          old_updated_at: oldTs,
+          new_updated_at: newTs,
+          is_newer: !oldTs || isoGe(newTs, oldTs),
+        });
+      }
+    }
+
+    const tombstones_pending: SyncTombstonePending[] = [];
+    for (const tb of pkg.tombstones ?? []) {
+      let localExists = false;
+      let localUpdatedAt: string | null = null;
+      let label = tb.label_snapshot;
+      if (tb.entity_type === "card") {
+        const c = localCards.get(tb.entity_key);
+        if (c) {
+          localExists = true;
+          localUpdatedAt = c.updated_at;
+          label = c.title || label || tb.entity_key.slice(0, 8);
+        }
+      } else if (tb.entity_type === "tag") {
+        const t = await db.tags.get(tb.entity_key);
+        if (t) {
+          localExists = true;
+          label = t.name;
+        }
+      } else if (tb.entity_type === "card_tag") {
+        const [cid, tid] = tb.entity_key.split("|");
+        if (cid && tid && localCt.has(`${cid}:${tid}`)) localExists = true;
+      } else if (tb.entity_type === "link") {
+        const [s, t, r] = tb.entity_key.split("|");
+        if (s && t && r) {
+          const normRel = this.upgradeRelationType(r).relation_type;
+          const [cs, ct] = this.canonicalEndpoints(normRel, s, t);
+          if (localLinksMap.has(`${cs}:${ct}:${normRel}`)) localExists = true;
+        }
+      } else if (tb.entity_type === "board") {
+        const b = localBoardsMap.get(tb.entity_key);
+        if (b) {
+          localExists = true;
+          localUpdatedAt = b.updated_at ?? null;
+          label = b.name;
+        }
+      } else if (tb.entity_type === "board_card") {
+        const [bid, cid] = tb.entity_key.split("|");
+        if (bid && cid && localBc.has(`${bid}:${cid}`)) localExists = true;
+      } else if (tb.entity_type === "daily_stream") {
+        const s = localStreams.get(tb.entity_key);
+        if (s) {
+          localExists = true;
+          localUpdatedAt = s.updated_at;
+          label = `${s.day} ${s.title}`.trim();
+        }
+      } else if (tb.entity_type === "daily_stream_card") {
+        const [sid, cid] = tb.entity_key.split("|");
+        if (sid && cid && localDsc.has(`${sid}:${cid}`)) localExists = true;
+      }
+      if (localExists) {
+        tombstones_pending.push({
+          ...tb,
+          label_snapshot: label,
+          local_updated_at: localUpdatedAt,
+          has_conflict: Boolean(localUpdatedAt && isoGt(localUpdatedAt, tb.deleted_at)),
+        });
+      }
+    }
 
     return {
       source_device: pkg.source_device,
@@ -1301,7 +1944,14 @@ export class IndexedDbDriver implements StorageDriver {
       tags_updated: [],
       card_tags_new,
       links_new,
+      links_updated,
       board_cards_new,
+      daily_streams_new,
+      daily_streams_updated,
+      daily_streams_unchanged_count,
+      daily_stream_cards_new,
+      mindmaps_updated,
+      tombstones_pending,
     };
   }
 
@@ -1311,6 +1961,7 @@ export class IndexedDbDriver implements StorageDriver {
     const cardMap = new Map((pkg.cards ?? []).map((c) => [c.id, c]));
     const tagMap = new Map((pkg.tags ?? []).map((t) => [t.id, t]));
     const boardMap = new Map((pkg.boards ?? []).map((b) => [b.id, b]));
+    const streamMap = new Map((pkg.daily_streams ?? []).map((s) => [s.id, s]));
 
     const applied = {
       cards_added: 0,
@@ -1323,11 +1974,29 @@ export class IndexedDbDriver implements StorageDriver {
       tags_merged: 0,
       board_cards_skipped: 0,
       boards_created: 0,
+      daily_streams_added: 0,
+      daily_streams_updated: 0,
+      daily_stream_cards_added: 0,
+      links_updated: 0,
+      mindmaps_applied: 0,
+      tombstones_applied: 0,
     };
 
     await db.transaction(
       "rw",
-      [db.cards, db.tags, db.tag_aliases, db.card_tags, db.links, db.boards, db.board_cards],
+      [
+        db.cards,
+        db.tags,
+        db.tag_aliases,
+        db.card_tags,
+        db.links,
+        db.boards,
+        db.board_cards,
+        db.daily_streams,
+        db.daily_stream_cards,
+        db.mind_nodes,
+        db.sync_tombstones,
+      ],
       async () => {
         // 1. 依拓撲順序新增標籤並處理同層同名合併
         const tagRemap = new Map<string, string>();
@@ -1403,23 +2072,34 @@ export class IndexedDbDriver implements StorageDriver {
           }
         }
 
-        // 3. 更新卡片（若封包無 sources 欄位，保留本機既有 sources，絕不抹除）
+        // 3. 更新卡片（強制驗證比對當下的樂觀鎖時間戳；若封包無 sources 欄位，保留本機既有 sources，絕不抹除）
         for (const cid of payload.card_ids_to_update ?? []) {
           const c = cardMap.get(cid);
-          const existing = await db.cards.get(cid);
-          if (c && existing) {
-            await db.cards.put({
-              id: c.id,
-              title: c.title,
-              body: c.body,
-              card_type: c.card_type ?? existing.card_type ?? "untyped",
-              curation_status: c.curation_status ?? existing.curation_status ?? "inbox",
-              sources: Array.isArray(c.sources) ? c.sources : (existing.sources ?? []),
-              created_at: existing.created_at || c.created_at || utcNow(),
-              updated_at: c.updated_at || utcNow(),
-            });
-            applied.cards_updated++;
+          if (!c) continue;
+          const seen = payload.card_expected_updated_at?.[cid];
+          if (seen === undefined) {
+            throw new ApiError("VALIDATION_ERROR", "套用卡片更新時缺少比對當下的時間戳", 422, { card_id: cid });
           }
+          const existing = await db.cards.get(cid);
+          if (!existing) {
+            throw new ApiError("NOT_FOUND", "要更新的卡片在本地已不存在", 404, { card_id: cid });
+          }
+          if (existing.updated_at !== seen) {
+            throw new ApiError("STALE_VERSION", `卡片「${existing.title || cid}」在比對差異後又被修改過`, 409, {
+              card_id: cid,
+            });
+          }
+          await db.cards.put({
+            id: c.id,
+            title: c.title,
+            body: c.body,
+            card_type: c.card_type ?? existing.card_type ?? "untyped",
+            curation_status: c.curation_status ?? existing.curation_status ?? "inbox",
+            sources: Array.isArray(c.sources) ? c.sources : (existing.sources ?? []),
+            created_at: existing.created_at || c.created_at || utcNow(),
+            updated_at: c.updated_at || utcNow(),
+          });
+          applied.cards_updated++;
         }
 
         // 4. 追加卡片標籤關聯（僅在卡片與標籤皆存在時寫入）
@@ -1429,12 +2109,13 @@ export class IndexedDbDriver implements StorageDriver {
             const exists = await db.card_tags.where({ card_id: ct.card_id, tag_id: tagId }).first();
             if (!exists) {
               await db.card_tags.add({ card_id: ct.card_id, tag_id: tagId });
+              await clearTombstone("card_tag", `${ct.card_id}|${tagId}`);
               applied.card_tags_added++;
             }
           }
         }
 
-        // 5. 追加語意連結（僅在雙端卡片皆存在時寫入）
+        // 5. 追加與更新語意連結（僅在雙端卡片皆存在時寫入）
         for (const l of payload.links_to_add ?? []) {
           const { relation_type, forceHypothesis } = this.upgradeRelationType(l.relation_type as string);
           const [sId, tId] = this.canonicalEndpoints(relation_type, l.source_id, l.target_id);
@@ -1450,8 +2131,24 @@ export class IndexedDbDriver implements StorageDriver {
                 status: forceHypothesis ? "hypothesis" : l.status || "confirmed",
                 reason: l.reason ?? "",
               });
+              await clearTombstone("link", `${sId}|${tId}|${relation_type}`);
               applied.links_added++;
             }
+          }
+        }
+        for (const l of payload.links_to_update ?? []) {
+          const { relation_type, forceHypothesis } = this.upgradeRelationType(l.relation_type as string);
+          const [sId, tId] = this.canonicalEndpoints(relation_type, l.source_id, l.target_id);
+          const existing = await db.links
+            .filter((row) => row.source_id === sId && row.target_id === tId && row.relation_type === relation_type)
+            .first();
+          if (existing && existing.id !== undefined) {
+            await db.links.update(existing.id, {
+              status: forceHypothesis ? "hypothesis" : l.status || "confirmed",
+              reason: (l.reason ?? "").trim(),
+            });
+            await clearTombstone("link", `${sId}|${tId}|${relation_type}`);
+            applied.links_updated++;
           }
         }
 
@@ -1495,7 +2192,282 @@ export class IndexedDbDriver implements StorageDriver {
             h: pos?.h ?? null,
             z: 0,
           });
+          await clearTombstone("board_card", `${bc.board_id}|${bc.card_id}`);
           applied.board_cards_added++;
+        }
+
+        // 7. 追加與更新日誌主題串與卡片綁定
+        for (const sid of payload.daily_stream_ids_to_add ?? []) {
+          const s = streamMap.get(sid);
+          if (!s || (await db.daily_streams.get(s.id))) continue;
+          validateDailyStreamInvariants(s);
+          const sameDay = await db.daily_streams.where("day").equals(s.day).toArray();
+          const posConflict = sameDay.some((row) => row.position === s.position);
+          const pos = posConflict
+            ? sameDay.reduce((m, row) => Math.max(m, row.position), -1) + 1
+            : s.position;
+          const convCid =
+            s.converted_card_id && (await db.cards.get(s.converted_card_id)) ? s.converted_card_id : null;
+          await db.daily_streams.add({
+            id: s.id,
+            day: s.day,
+            position: pos,
+            kind: s.kind,
+            title: s.title,
+            status: s.status,
+            recall_text: s.recall_text,
+            review_text: s.review_text,
+            peeked_at: s.peeked_at,
+            unlocked_at: s.unlocked_at,
+            converted_card_id: convCid,
+            created_at: s.created_at,
+            updated_at: s.updated_at,
+          });
+          applied.daily_streams_added++;
+        }
+
+        for (const sid of payload.daily_stream_ids_to_update ?? []) {
+          const s = streamMap.get(sid);
+          if (!s) continue;
+          validateDailyStreamInvariants(s);
+          const seen = payload.daily_stream_expected_updated_at?.[s.id];
+          if (seen === undefined) {
+            throw new ApiError("VALIDATION_ERROR", "套用日誌更新時缺少比對當下的時間戳", 422, { stream_id: s.id });
+          }
+          const existing = await db.daily_streams.get(s.id);
+          if (!existing) {
+            throw new ApiError("NOT_FOUND", "要更新的日誌在本地已不存在", 404, { stream_id: s.id });
+          }
+          if (existing.updated_at !== seen) {
+            throw new ApiError("STALE_VERSION", "這則日誌在比對差異後又被修改過", 409, { stream_id: s.id });
+          }
+          const convCid =
+            s.converted_card_id && (await db.cards.get(s.converted_card_id))
+              ? s.converted_card_id
+              : existing.converted_card_id;
+          await db.daily_streams.put({
+            ...existing,
+            title: s.title,
+            status: s.status,
+            recall_text: s.recall_text,
+            review_text: s.review_text,
+            peeked_at: s.peeked_at,
+            unlocked_at: s.unlocked_at,
+            converted_card_id: convCid,
+            updated_at: s.updated_at,
+          });
+          applied.daily_streams_updated++;
+        }
+
+        for (const b of payload.daily_stream_cards_to_add ?? []) {
+          if ((await db.daily_streams.get(b.stream_id)) && (await db.cards.get(b.card_id))) {
+            const exists = await db.daily_stream_cards
+              .where({ stream_id: b.stream_id, card_id: b.card_id })
+              .first();
+            if (!exists) {
+              await db.daily_stream_cards.add({
+                stream_id: b.stream_id,
+                card_id: b.card_id,
+                created_at: b.created_at || utcNow(),
+              });
+              await clearTombstone("daily_stream_card", `${b.stream_id}|${b.card_id}`);
+              applied.daily_stream_cards_added++;
+            }
+          }
+        }
+
+        // 8. 整張白板心智圖原子合併
+        const pkgMnByBoard = new Map<string, MindNodeSyncItem[]>();
+        for (const mn of pkg.mind_nodes ?? []) {
+          const list = pkgMnByBoard.get(mn.board_id) ?? [];
+          list.push(mn);
+          pkgMnByBoard.set(mn.board_id, list);
+        }
+        for (const bid of Array.from(new Set(payload.mindmap_board_ids_to_apply ?? []))) {
+          const incomingNodes = pkgMnByBoard.get(bid) ?? [];
+          assertMindNodesAcyclic(incomingNodes);
+          const seenTs = payload.mindmap_expected_updated_at?.[bid];
+          if (seenTs === undefined) {
+            throw new ApiError("VALIDATION_ERROR", "套用心智圖更新時缺少比對當下的時間戳", 422, { board_id: bid });
+          }
+          const boardRow = await db.boards.get(bid);
+          const curNodes = await db.mind_nodes.where("board_id").equals(bid).toArray();
+          let curTs = "";
+          for (const n of curNodes) {
+            if (!curTs || isoGt(n.updated_at, curTs)) curTs = n.updated_at;
+          }
+          if (!curTs && boardRow && seenTs !== "") curTs = boardRow.updated_at ?? "";
+          if (curTs !== seenTs) {
+            throw new ApiError("STALE_VERSION", `白板「${boardRow?.name ?? bid}」的心智圖在比對差異後又被修改過`, 409, {
+              board_id: bid,
+            });
+          }
+
+          const srcB = boardMap.get(bid);
+          if (!boardRow) {
+            if (!srcB) {
+              throw new ApiError("NOT_FOUND", "封包中找不到該心智圖所屬的白板資訊", 404, { board_id: bid });
+            }
+            const now = utcNow();
+            await db.boards.add({
+              id: bid,
+              name: srcB.name,
+              mindmap_title: srcB.mindmap_title ?? "",
+              created_at: now,
+              updated_at: now,
+              question: null,
+            });
+            applied.boards_created++;
+          } else if (srcB && srcB.mindmap_title !== undefined) {
+            await db.boards.update(bid, { mindmap_title: srcB.mindmap_title, updated_at: utcNow() });
+          }
+
+          const existingSnaps = new Map(curNodes.map((n) => [n.id, n.ref_title_snapshot]));
+          await db.mind_nodes.where("board_id").equals(bid).delete();
+          for (const mn of incomingNodes) {
+            let snap = mn.ref_title_snapshot;
+            if (mn.type === "card" && mn.ref_id) {
+              const liveCard = await db.cards.get(mn.ref_id);
+              if (liveCard) snap = liveCard.title;
+              else if (existingSnaps.get(mn.id)) snap = existingSnaps.get(mn.id)!;
+            } else if (mn.type === "board" && mn.ref_id) {
+              const liveBoard = await db.boards.get(mn.ref_id);
+              if (liveBoard) snap = liveBoard.name;
+              else if (existingSnaps.get(mn.id)) snap = existingSnaps.get(mn.id)!;
+            }
+            await db.mind_nodes.add({
+              id: mn.id,
+              board_id: bid,
+              parent_id: mn.parent_id,
+              sort_order: mn.sort_order,
+              type: mn.type,
+              text: mn.text,
+              edge_label: mn.edge_label,
+              ref_id: mn.type === "text" ? null : mn.ref_id,
+              ref_title_snapshot: snap,
+              collapsed: mn.collapsed,
+              created_at: mn.created_at,
+              updated_at: mn.updated_at,
+            });
+          }
+          const parentKeys = new Set<string | null>(incomingNodes.map((n) => n.parent_id));
+          for (const pId of parentKeys) {
+            await this.normalizeDexieMindSiblings(bid, pId);
+          }
+          applied.mindmaps_applied++;
+        }
+
+        // 9. 刪除紀錄（B2）依子到父順序套用
+        const tbOrder: Record<TombstoneEntityType, number> = {
+          daily_stream_card: 0,
+          daily_stream: 1,
+          board_card: 2,
+          card_tag: 3,
+          link: 4,
+          card: 5,
+          tag: 6,
+          board: 7,
+        };
+        const sortedTbs = [...(payload.tombstones_to_apply ?? [])].sort(
+          (a, b) => tbOrder[a.entity_type] - tbOrder[b.entity_type],
+        );
+        for (const tb of sortedTbs) {
+          let removed = false;
+          if (tb.entity_type === "daily_stream_card") {
+            const [sid, cid] = tb.entity_key.split("|");
+            if (sid && cid) {
+              removed = (await db.daily_stream_cards.where({ stream_id: sid, card_id: cid }).delete()) > 0;
+            }
+          } else if (tb.entity_type === "daily_stream") {
+            if (await db.daily_streams.get(tb.entity_key)) {
+              await db.daily_streams.delete(tb.entity_key);
+              await db.daily_stream_cards.where("stream_id").equals(tb.entity_key).delete();
+              removed = true;
+            }
+          } else if (tb.entity_type === "board_card") {
+            const [bid, cid] = tb.entity_key.split("|");
+            if (bid && cid) {
+              removed = (await db.board_cards.where({ board_id: bid, card_id: cid }).delete()) > 0;
+            }
+          } else if (tb.entity_type === "card_tag") {
+            const [cid, tid] = tb.entity_key.split("|");
+            if (cid && tid) {
+              removed = (await db.card_tags.where({ card_id: cid, tag_id: tid }).delete()) > 0;
+            }
+          } else if (tb.entity_type === "link") {
+            const [s, t, r] = tb.entity_key.split("|");
+            if (s && t && r) {
+              const normRel = this.upgradeRelationType(r).relation_type;
+              const [cs, ct] = this.canonicalEndpoints(normRel, s, t);
+              removed =
+                (await db.links
+                  .filter((row) => {
+                    const rr = this.upgradeRelationType(row.relation_type).relation_type;
+                    const [rs, rt] = this.canonicalEndpoints(rr, row.source_id, row.target_id);
+                    return rr === normRel && rs === cs && rt === ct;
+                  })
+                  .delete()) > 0;
+            }
+          } else if (tb.entity_type === "card") {
+            const c = await db.cards.get(tb.entity_key);
+            if (c) {
+              await db.mind_nodes
+                .where("ref_id")
+                .equals(tb.entity_key)
+                .modify((n) => {
+                  if (n.type === "card") n.ref_title_snapshot = c.title;
+                });
+              await db.cards.delete(tb.entity_key);
+              await db.card_tags.where("card_id").equals(tb.entity_key).delete();
+              await db.links.filter((l) => l.source_id === tb.entity_key || l.target_id === tb.entity_key).delete();
+              await db.board_cards.where("card_id").equals(tb.entity_key).delete();
+              await db.daily_stream_cards.where("card_id").equals(tb.entity_key).delete();
+              await db.daily_streams
+                .filter((s) => s.converted_card_id === tb.entity_key)
+                .modify({ converted_card_id: null });
+              removed = true;
+            }
+          } else if (tb.entity_type === "tag") {
+            const t = await db.tags.get(tb.entity_key);
+            if (t) {
+              await db.tags.where("parent_id").equals(tb.entity_key).modify({ parent_id: t.parent_id });
+              if (t.parent_id) {
+                const cts = await db.card_tags.where("tag_id").equals(tb.entity_key).toArray();
+                for (const ct of cts) {
+                  const hasParent = await db.card_tags.where({ card_id: ct.card_id, tag_id: t.parent_id }).first();
+                  if (!hasParent) await db.card_tags.add({ card_id: ct.card_id, tag_id: t.parent_id });
+                }
+              }
+              await db.card_tags.where("tag_id").equals(tb.entity_key).delete();
+              await db.tag_aliases.where("tag_id").equals(tb.entity_key).delete();
+              await db.tags.delete(tb.entity_key);
+              removed = true;
+            }
+          } else if (tb.entity_type === "board") {
+            const b = await db.boards.get(tb.entity_key);
+            if (b) {
+              const childQ = await db.boards.filter((row) => row.question?.parent_board_id === tb.entity_key).count();
+              if (childQ > 0) {
+                throw new ApiError("IN_USE", `白板「${b.name}」底下仍有子問題白板，無法同步刪除`, 409, {
+                  board_id: tb.entity_key,
+                });
+              }
+              await db.mind_nodes
+                .where("ref_id")
+                .equals(tb.entity_key)
+                .modify((n) => {
+                  if (n.type === "board") n.ref_title_snapshot = b.name;
+                });
+              await db.boards.delete(tb.entity_key);
+              await db.board_cards.where("board_id").equals(tb.entity_key).delete();
+              await db.board_groups.where("board_id").equals(tb.entity_key).delete();
+              await db.board_notes.where("board_id").equals(tb.entity_key).delete();
+              await db.mind_nodes.where("board_id").equals(tb.entity_key).delete();
+              removed = true;
+            }
+          }
+          await recordTombstone(tb.entity_type, tb.entity_key, tb.label_snapshot, tb.deleted_at);
+          if (removed) applied.tombstones_applied++;
         }
       },
     );
@@ -1731,6 +2703,763 @@ export class IndexedDbDriver implements StorageDriver {
   }
   async deleteBoardImageLink(): Promise<never> {
     return this.imagesUnsupported();
+  }
+
+  // ---- 今日總結與靈感日記（嚴格複製 backend daily.py 狀態機與不變量）----
+  // @depends-on ./driver.ts::StorageDriver
+  // @depends-on backend daily.py
+  private async buildDailyStreamDetail(streamId: string): Promise<DailyStream> {
+    const row = await db.daily_streams.get(streamId);
+    if (!row) {
+      throw new ApiError("NOT_FOUND", "主題串不存在", 404, { stream_id: streamId });
+    }
+    const bindings = await db.daily_stream_cards.where("stream_id").equals(streamId).toArray();
+    bindings.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.card_id.localeCompare(b.card_id));
+    const cards: { id: string; title: string }[] = [];
+    for (const b of bindings) {
+      const c = await db.cards.get(b.card_id);
+      if (c) cards.push({ id: c.id, title: c.title });
+    }
+    return { ...row, cards };
+  }
+
+  private async loadDailyStream(streamId: string, expectedUpdatedAt?: string): Promise<DailyStream> {
+    const cur = await this.buildDailyStreamDetail(streamId);
+    if (expectedUpdatedAt !== undefined && cur.updated_at !== expectedUpdatedAt) {
+      throw new ApiError("STALE_VERSION", "這個主題串已在別處被修改，請重新載入後再儲存", 409, { current: cur });
+    }
+    return cur;
+  }
+
+  private ensureDailyStreamState(row: DailyStream, allowed: readonly DailyStatus[], action: string): void {
+    if (row.converted_card_id !== null) {
+      throw new ApiError("INVALID_STATE", `此主題串已轉為卡片，內容唯讀，無法${action}`, 409, { stream_id: row.id });
+    }
+    if (!allowed.includes(row.status)) {
+      throw new ApiError("INVALID_STATE", `目前狀態為 ${row.status}，無法${action}`, 409, {
+        stream_id: row.id,
+        status: row.status,
+      });
+    }
+  }
+
+  private ensureDailyCardKind(row: DailyStream, action: string): void {
+    if (row.kind !== "card") {
+      throw new ApiError("INVALID_STATE", `靈感日記不適用${action}`, 409, { stream_id: row.id });
+    }
+  }
+
+  async listDailyStreams(day: string): Promise<{ items: DailyStream[] }> {
+    const validDay = parseDay(day);
+    return db.transaction("r", [db.daily_streams, db.daily_stream_cards, db.cards], async () => {
+      const rows = await db.daily_streams.where("day").equals(validDay).sortBy("position");
+      const items: DailyStream[] = [];
+      for (const r of rows) {
+        items.push(await this.buildDailyStreamDetail(r.id));
+      }
+      return { items };
+    });
+  }
+
+  async listDailyStreamsRange(p: {
+    from_day?: string;
+    to_day?: string;
+    kind?: DailyStreamKind;
+    q?: string;
+    limit?: number;
+  }): Promise<DailyStreamsRangeResponse> {
+    const parsedFrom = p.from_day ? parseDay(p.from_day) : undefined;
+    const parsedTo = p.to_day ? parseDay(p.to_day) : undefined;
+    if (parsedFrom && parsedTo && parsedFrom > parsedTo) {
+      throw new ApiError("VALIDATION_ERROR", "from_day 不可晚於 to_day", 422);
+    }
+    const limit = Math.min(MAX_DAILY_ARCHIVE, Math.max(1, p.limit ?? MAX_DAILY_ARCHIVE));
+    const kw = (p.q ?? "").trim().toLowerCase();
+
+    return db.transaction("r", [db.daily_streams, db.daily_stream_cards, db.cards], async () => {
+      let rows = await db.daily_streams.toArray();
+      if (parsedFrom) rows = rows.filter((r) => r.day >= parsedFrom);
+      if (parsedTo) rows = rows.filter((r) => r.day <= parsedTo);
+      if (p.kind !== undefined) rows = rows.filter((r) => r.kind === p.kind);
+      if (kw) {
+        rows = rows.filter(
+          (r) =>
+            r.title.toLowerCase().includes(kw) ||
+            r.recall_text.toLowerCase().includes(kw) ||
+            r.review_text.toLowerCase().includes(kw),
+        );
+      }
+      rows.sort((a, b) => b.day.localeCompare(a.day) || a.position - b.position);
+      const truncated = rows.length > limit;
+      const items: DailyStream[] = [];
+      for (const r of rows.slice(0, limit)) {
+        items.push(await this.buildDailyStreamDetail(r.id));
+      }
+      return { items, truncated };
+    });
+  }
+
+  async createDailyStream(
+    day: string,
+    opts?: { kind?: DailyStreamKind; title?: string; review_text?: string },
+  ): Promise<DailyStream> {
+    const validDay = parseDay(day);
+    const kind: DailyStreamKind = opts?.kind ?? "card";
+    const title = opts?.title ?? "";
+    const review_text = opts?.review_text ?? "";
+    if (title.length > 500 || review_text.length > DAILY_TEXT_MAX) {
+      throw new ApiError("VALIDATION_ERROR", "輸入文字超過長度上限", 422);
+    }
+    if (kind === "card" && review_text) {
+      throw new ApiError("VALIDATION_ERROR", "卡片總結建立時不可直接填入對照內容", 422);
+    }
+    const status: DailyStatus = kind === "journal" ? "done" : "recalling";
+
+    return db.transaction("rw", [db.daily_streams, db.daily_stream_cards, db.cards], async () => {
+      const sid = newId();
+      const now = utcNow();
+      const existing = await db.daily_streams.where("day").equals(validDay).toArray();
+      const pos = existing.reduce((m, r) => Math.max(m, r.position), -1) + 1;
+      const row: DbDailyStream = {
+        id: sid,
+        day: validDay,
+        position: pos,
+        kind,
+        title,
+        status,
+        recall_text: "",
+        review_text,
+        peeked_at: null,
+        unlocked_at: null,
+        converted_card_id: null,
+        created_at: now,
+        updated_at: now,
+      };
+      await db.daily_streams.add(row);
+      return this.buildDailyStreamDetail(sid);
+    });
+  }
+
+  async patchDailyStream(
+    id: string,
+    patch: { title?: string; recall_text?: string; review_text?: string },
+    expected_updated_at: string,
+  ): Promise<DailyStream> {
+    if (patch.title === undefined && patch.recall_text === undefined && patch.review_text === undefined) {
+      throw new ApiError("VALIDATION_ERROR", "至少要提供一個更新欄位", 422);
+    }
+    if (
+      (patch.title !== undefined && patch.title.length > 500) ||
+      (patch.recall_text !== undefined && patch.recall_text.length > DAILY_TEXT_MAX) ||
+      (patch.review_text !== undefined && patch.review_text.length > DAILY_TEXT_MAX)
+    ) {
+      throw new ApiError("VALIDATION_ERROR", "輸入文字超過長度上限", 422);
+    }
+
+    return db.transaction("rw", [db.daily_streams, db.daily_stream_cards, db.cards], async () => {
+      const row = await this.loadDailyStream(id, expected_updated_at);
+      this.ensureDailyStreamState(row, ["recalling", "comparing", "done"], "修改");
+      if (row.kind === "journal") {
+        if (patch.recall_text !== undefined) {
+          throw new ApiError("INVALID_STATE", "靈感日記不包含盲寫欄位", 409, { stream_id: id });
+        }
+      } else {
+        if (patch.recall_text !== undefined && row.status !== "recalling") {
+          throw new ApiError("INVALID_STATE", "解鎖後盲寫內容已凍結，無法修改", 409, { stream_id: id });
+        }
+        if (patch.review_text !== undefined && row.status !== "comparing") {
+          throw new ApiError("INVALID_STATE", "只有在對照階段可以修改對照內容", 409, { stream_id: id });
+        }
+      }
+      await db.daily_streams.update(id, {
+        title: patch.title !== undefined ? patch.title : row.title,
+        recall_text: patch.recall_text !== undefined ? patch.recall_text : row.recall_text,
+        review_text: patch.review_text !== undefined ? patch.review_text : row.review_text,
+        updated_at: utcNow(),
+      });
+      return this.buildDailyStreamDetail(id);
+    });
+  }
+
+  async unlockDailyStream(id: string, recall_text: string, expected_updated_at: string): Promise<DailyStream> {
+    if (recall_text.length > DAILY_TEXT_MAX) {
+      throw new ApiError("VALIDATION_ERROR", "盲寫內容超過長度上限", 422);
+    }
+    return db.transaction("rw", [db.daily_streams, db.daily_stream_cards, db.cards], async () => {
+      const row = await this.loadDailyStream(id, expected_updated_at);
+      this.ensureDailyCardKind(row, "解鎖");
+      this.ensureDailyStreamState(row, ["recalling"], "解鎖");
+      const now = utcNow();
+      await db.daily_streams.update(id, {
+        status: "comparing",
+        recall_text,
+        unlocked_at: now,
+        updated_at: now,
+      });
+      return this.buildDailyStreamDetail(id);
+    });
+  }
+
+  async finishDailyStream(id: string, review_text: string, expected_updated_at: string): Promise<DailyStream> {
+    if (review_text.length > DAILY_TEXT_MAX) {
+      throw new ApiError("VALIDATION_ERROR", "對照內容超過長度上限", 422);
+    }
+    return db.transaction("rw", [db.daily_streams, db.daily_stream_cards, db.cards], async () => {
+      const row = await this.loadDailyStream(id, expected_updated_at);
+      this.ensureDailyCardKind(row, "完成");
+      this.ensureDailyStreamState(row, ["comparing"], "完成");
+      await db.daily_streams.update(id, {
+        status: "done",
+        review_text,
+        updated_at: utcNow(),
+      });
+      return this.buildDailyStreamDetail(id);
+    });
+  }
+
+  async reopenDailyStream(id: string, expected_updated_at: string): Promise<DailyStream> {
+    return db.transaction("rw", [db.daily_streams, db.daily_stream_cards, db.cards], async () => {
+      const row = await this.loadDailyStream(id, expected_updated_at);
+      this.ensureDailyCardKind(row, "重新開啟");
+      this.ensureDailyStreamState(row, ["done"], "重新開啟");
+      await db.daily_streams.update(id, {
+        status: "comparing",
+        updated_at: utcNow(),
+      });
+      return this.buildDailyStreamDetail(id);
+    });
+  }
+
+  async peekDailyStream(id: string): Promise<DailyStream> {
+    return db.transaction("rw", [db.daily_streams, db.daily_stream_cards, db.cards], async () => {
+      const row = await this.loadDailyStream(id);
+      this.ensureDailyCardKind(row, "標記提示");
+      this.ensureDailyStreamState(row, ["recalling"], "標記提示");
+      if (row.peeked_at === null) {
+        await db.daily_streams.update(id, { peeked_at: utcNow() });
+      }
+      return this.buildDailyStreamDetail(id);
+    });
+  }
+
+  async bindDailyCard(stream_id: string, card_id: string): Promise<DailyStream> {
+    return db.transaction("rw", [db.daily_streams, db.daily_stream_cards, db.cards, db.sync_tombstones], async () => {
+      const row = await this.loadDailyStream(stream_id);
+      this.ensureDailyStreamState(row, ["comparing", "done"], "綁定卡片");
+      const card = await db.cards.get(card_id);
+      if (!card) {
+        throw new ApiError("NOT_FOUND", "卡片不存在", 404, { card_id });
+      }
+      const existing = await db.daily_stream_cards.where({ stream_id, card_id }).first();
+      if (!existing) {
+        await db.daily_stream_cards.add({ stream_id, card_id, created_at: utcNow() });
+      }
+      await clearTombstone("daily_stream_card", `${stream_id}|${card_id}`);
+      return this.buildDailyStreamDetail(stream_id);
+    });
+  }
+
+  async unbindDailyCard(stream_id: string, card_id: string): Promise<DailyStream> {
+    return db.transaction("rw", [db.daily_streams, db.daily_stream_cards, db.cards, db.sync_tombstones], async () => {
+      const row = await this.loadDailyStream(stream_id);
+      this.ensureDailyStreamState(row, ["comparing", "done"], "解除綁定");
+      const cnt = await db.daily_stream_cards.where({ stream_id, card_id }).delete();
+      if (cnt > 0) {
+        await recordTombstone("daily_stream_card", `${stream_id}|${card_id}`, `${row.day} ${row.title}`.trim());
+      }
+      return this.buildDailyStreamDetail(stream_id);
+    });
+  }
+
+  async convertDailyStream(id: string, expected_updated_at: string): Promise<DailyStream> {
+    return db.transaction("rw", [db.daily_streams, db.daily_stream_cards, db.cards], async () => {
+      const row = await this.loadDailyStream(id);
+      if (row.converted_card_id !== null) {
+        return row;
+      }
+      if (row.updated_at !== expected_updated_at) {
+        throw new ApiError("STALE_VERSION", "這個主題串已在別處被修改，請重新載入後再儲存", 409, { current: row });
+      }
+      this.ensureDailyStreamState(row, ["done"], "轉成卡片");
+      const title = row.title.trim();
+      if (!title) {
+        throw new ApiError("VALIDATION_ERROR", "請先為主題串命名，卡片標題會沿用它", 422, { stream_id: id });
+      }
+
+      let bodyText = "";
+      let sourceLabel = "";
+      if (row.kind === "journal") {
+        bodyText = row.review_text.trim();
+        if (!bodyText) {
+          throw new ApiError("VALIDATION_ERROR", "靈感日記沒有任何內容，無法轉成卡片", 422, { stream_id: id });
+        }
+        sourceLabel = `靈感日記 ${row.day}｜${title}`;
+      } else {
+        const sections: string[] = [];
+        if (row.recall_text.trim()) {
+          sections.push("## 憑記憶提取\n\n" + row.recall_text.trim());
+        }
+        if (row.review_text.trim()) {
+          sections.push("## 對照後補充\n\n" + row.review_text.trim());
+        }
+        if (sections.length === 0) {
+          throw new ApiError("VALIDATION_ERROR", "主題串沒有任何內容，無法轉成卡片", 422, { stream_id: id });
+        }
+        bodyText = sections.join("\n\n");
+        sourceLabel = `今日總結 ${row.day}｜${title}`;
+      }
+
+      const cid = newId();
+      const now = utcNow();
+      await db.cards.add({
+        id: cid,
+        title,
+        body: bodyText,
+        card_type: "untyped",
+        curation_status: "inbox",
+        sources: [sourceLabel],
+        created_at: now,
+        updated_at: now,
+      });
+      await db.daily_streams.update(id, { converted_card_id: cid, updated_at: now });
+      return this.buildDailyStreamDetail(id);
+    });
+  }
+
+  async deleteDailyStream(id: string): Promise<{ deleted: boolean }> {
+    return db.transaction("rw", [db.daily_streams, db.daily_stream_cards, db.sync_tombstones], async () => {
+      const row = await db.daily_streams.get(id);
+      if (!row) {
+        throw new ApiError("NOT_FOUND", "主題串不存在", 404, { stream_id: id });
+      }
+      await db.daily_streams.delete(id);
+      await db.daily_stream_cards.where("stream_id").equals(id).delete();
+      await recordTombstone("daily_stream", id, `${row.day} ${row.title}`.trim());
+      return { deleted: true };
+    });
+  }
+
+  async listDailyChanges(from: string, to: string): Promise<DailyChangesResponse> {
+    const lo = parseUtcBound(from, "from");
+    const hi = parseUtcBound(to, "to");
+    if (lo >= hi) {
+      throw new ApiError("VALIDATION_ERROR", "from 必須早於 to", 422);
+    }
+    const allCards = await db.cards.toArray();
+    const matched: { card: DbCard; createdMs: number; updatedMs: number }[] = [];
+    for (const c of allCards) {
+      const createdMs = Date.parse(c.created_at);
+      const updatedMs = Date.parse(c.updated_at);
+      if ((createdMs >= lo && createdMs < hi) || (updatedMs >= lo && updatedMs < hi)) {
+        matched.push({ card: c, createdMs, updatedMs });
+      }
+    }
+    matched.sort((a, b) => b.updatedMs - a.updatedMs || b.card.updated_at.localeCompare(a.card.updated_at));
+    const truncated = matched.length > MAX_DAILY_CHANGES;
+    const items: DailyChange[] = matched.slice(0, MAX_DAILY_CHANGES).map(({ card, createdMs }) => ({
+      id: card.id,
+      title: card.title,
+      body: card.body,
+      card_type: card.card_type ?? "untyped",
+      created_at: card.created_at,
+      updated_at: card.updated_at,
+      kind: createdMs >= lo && createdMs < hi ? "new" : "updated",
+    }));
+    return { items, truncated };
+  }
+
+  // ---- 心智圖（雙端支援：IndexedDB 本地交易實作） ----
+  private async normalizeDexieMindSiblings(board_id: string, parent_id: string | null): Promise<void> {
+    const all = await db.mind_nodes.where("board_id").equals(board_id).toArray();
+    const sibs = all
+      .filter((n) => n.parent_id === parent_id)
+      .sort((a, b) => a.sort_order - b.sort_order || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+    for (let i = 0; i < sibs.length; i++) {
+      if (sibs[i].sort_order !== i) {
+        await db.mind_nodes.update(sibs[i].id, { sort_order: i });
+      }
+    }
+  }
+
+  private async buildDexieMindMap(board_id: string): Promise<MindMapData> {
+    const board = await db.boards.get(board_id);
+    if (!board) throw new ApiError("NOT_FOUND", "白板不存在", 404, { board_id });
+    const rawNodes = await db.mind_nodes.where("board_id").equals(board_id).toArray();
+    rawNodes.sort(
+      (a, b) => a.sort_order - b.sort_order || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
+    );
+
+    const nodes: MindNode[] = [];
+    for (const n of rawNodes) {
+      let ref_status: MindNodeRefStatus | null = null;
+      let ref_title: string | null = null;
+      if (n.type === "card" && n.ref_id) {
+        const card = await db.cards.get(n.ref_id);
+        if (card) {
+          ref_status = "ok";
+          ref_title = card.title;
+        } else {
+          ref_status = "missing";
+          ref_title = n.ref_title_snapshot;
+        }
+      } else if (n.type === "board" && n.ref_id) {
+        const refBoard = await db.boards.get(n.ref_id);
+        if (!refBoard) {
+          ref_status = "missing";
+          ref_title = n.ref_title_snapshot;
+        } else if (refBoard.question?.archived_at) {
+          ref_status = "archived";
+          ref_title = refBoard.name;
+        } else {
+          ref_status = "ok";
+          ref_title = refBoard.name;
+        }
+      }
+      nodes.push({
+        ...n,
+        ref_status,
+        ref_title,
+      });
+    }
+
+    const mindmap_title = board.mindmap_title ?? "";
+    return {
+      board_id: board.id,
+      board_name: board.name,
+      mindmap_title,
+      display_title: mindmap_title.trim() || board.name,
+      nodes,
+    };
+  }
+
+  private getDexieMindNodeDescendants(allNodes: DbMindNode[], nodeId: string): { id: string; parent_id: string | null; depth: number }[] {
+    const childrenByParent = new Map<string, DbMindNode[]>();
+    for (const n of allNodes) {
+      if (n.parent_id !== null) {
+        const list = childrenByParent.get(n.parent_id) ?? [];
+        list.push(n);
+        childrenByParent.set(n.parent_id, list);
+      }
+    }
+    const result: { id: string; parent_id: string | null; depth: number }[] = [];
+    const seen = new Set<string>([nodeId]);
+    const queue: { id: string; depth: number }[] = [{ id: nodeId, depth: 0 }];
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      for (const child of childrenByParent.get(cur.id) ?? []) {
+        if (seen.has(child.id)) {
+          throw new ApiError("CYCLE_DETECTED", "心智圖節點父子關係出現循環", 409, { node_id: nodeId });
+        }
+        seen.add(child.id);
+        const nextDepth = cur.depth + 1;
+        result.push({ id: child.id, parent_id: child.parent_id, depth: nextDepth });
+        queue.push({ id: child.id, depth: nextDepth });
+      }
+    }
+    return result;
+  }
+
+  async getMindMap(board_id: string): Promise<MindMapData> {
+    return db.transaction("r", [db.boards, db.mind_nodes, db.cards], async () => {
+      return this.buildDexieMindMap(board_id);
+    });
+  }
+
+  async patchMindMapTitle(board_id: string, mindmap_title: string): Promise<MindMapData> {
+    if (mindmap_title.length > 200) {
+      throw new ApiError("VALIDATION_ERROR", "心智圖名稱不可超過 200 字元", 422);
+    }
+    return db.transaction("rw", [db.boards, db.mind_nodes, db.cards], async () => {
+      const board = await db.boards.get(board_id);
+      if (!board) throw new ApiError("NOT_FOUND", "白板不存在", 404, { board_id });
+      if (board.question?.archived_at) {
+        throw new ApiError("INVALID_STATE", "這塊問題已封存，只能查看", 409, { board_id });
+      }
+      await db.boards.update(board_id, { mindmap_title: mindmap_title.trim(), updated_at: utcNow() });
+      return this.buildDexieMindMap(board_id);
+    });
+  }
+
+  async createMindNode(
+    board_id: string,
+    body: {
+      parent_id?: string | null;
+      type?: MindNodeType;
+      text?: string;
+      edge_label?: string;
+      ref_id?: string | null;
+      position?: number;
+    },
+  ): Promise<MindMapData> {
+    const type: MindNodeType = body.type ?? "text";
+    const text = body.text ?? "";
+    const edgeLabel = (body.edge_label ?? "").trim();
+    const parentId = body.parent_id ?? null;
+    const refId = body.ref_id ?? null;
+    if (text.length > 2000 || edgeLabel.length > 40) {
+      throw new ApiError("VALIDATION_ERROR", "節點文字或連線標籤超過長度上限", 422);
+    }
+    if (type === "text" && refId !== null) {
+      throw new ApiError("VALIDATION_ERROR", "純文字節點不可指定 ref_id", 422);
+    }
+    if ((type === "card" || type === "board") && (!refId || !refId.trim())) {
+      throw new ApiError("VALIDATION_ERROR", "卡片或白板參照節點必須指定 ref_id", 422);
+    }
+
+    return db.transaction("rw", [db.boards, db.mind_nodes, db.cards], async () => {
+      const board = await db.boards.get(board_id);
+      if (!board) throw new ApiError("NOT_FOUND", "白板不存在", 404, { board_id });
+      if (board.question?.archived_at) {
+        throw new ApiError("INVALID_STATE", "這塊問題已封存，只能查看", 409, { board_id });
+      }
+      if (parentId !== null) {
+        const parent = await db.mind_nodes.get(parentId);
+        if (!parent || parent.board_id !== board_id) {
+          throw new ApiError("NOT_FOUND", "父節點不存在於此白板的心智圖", 404, { parent_id: parentId });
+        }
+      }
+
+      let snapshot = "";
+      if (type === "card" && refId) {
+        const card = await db.cards.get(refId);
+        if (!card) throw new ApiError("NOT_FOUND", "參照的卡片不存在", 404, { card_id: refId });
+        snapshot = card.title;
+      } else if (type === "board" && refId) {
+        const refBoard = await db.boards.get(refId);
+        if (!refBoard) throw new ApiError("NOT_FOUND", "參照的白板不存在", 404, { board_id: refId });
+        snapshot = refBoard.name;
+      }
+
+      const allNodes = await db.mind_nodes.where("board_id").equals(board_id).toArray();
+      const siblings = allNodes
+        .filter((n) => n.parent_id === parentId)
+        .sort((a, b) => a.sort_order - b.sort_order || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+      const insertPos =
+        body.position === undefined ? siblings.length : Math.max(0, Math.min(body.position, siblings.length));
+      const nid = newId();
+      const now = utcNow();
+
+      await db.mind_nodes.add({
+        id: nid,
+        board_id,
+        parent_id: parentId,
+        sort_order: insertPos,
+        type,
+        text,
+        edge_label: edgeLabel,
+        ref_id: type === "text" ? null : refId,
+        ref_title_snapshot: snapshot,
+        collapsed: 0,
+        created_at: now,
+        updated_at: now,
+      });
+
+      const orderedIds = siblings.map((s) => s.id);
+      orderedIds.splice(insertPos, 0, nid);
+      for (let i = 0; i < orderedIds.length; i++) {
+        await db.mind_nodes.update(orderedIds[i], { sort_order: i });
+      }
+      await db.boards.update(board_id, { updated_at: now });
+      return this.buildDexieMindMap(board_id);
+    });
+  }
+
+  async patchMindNode(
+    board_id: string,
+    node_id: string,
+    patch: { text?: string; edge_label?: string; collapsed?: 0 | 1 },
+  ): Promise<MindMapData> {
+    if (patch.text === undefined && patch.edge_label === undefined && patch.collapsed === undefined) {
+      throw new ApiError("VALIDATION_ERROR", "至少要提供一個更新欄位", 422);
+    }
+    if (
+      (patch.text !== undefined && patch.text.length > 2000) ||
+      (patch.edge_label !== undefined && patch.edge_label.trim().length > 40)
+    ) {
+      throw new ApiError("VALIDATION_ERROR", "節點文字或連線標籤超過長度上限", 422);
+    }
+
+    return db.transaction("rw", [db.boards, db.mind_nodes, db.cards], async () => {
+      const board = await db.boards.get(board_id);
+      if (!board) throw new ApiError("NOT_FOUND", "白板不存在", 404, { board_id });
+      if (board.question?.archived_at) {
+        throw new ApiError("INVALID_STATE", "這塊問題已封存，只能查看", 409, { board_id });
+      }
+      const cur = await db.mind_nodes.get(node_id);
+      if (!cur || cur.board_id !== board_id) {
+        throw new ApiError("NOT_FOUND", "心智圖節點不存在", 404, { node_id });
+      }
+      const now = utcNow();
+      // 原因：折疊／展開只是畫面狀態，不動 updated_at，避免同步比對把節點判成「已更新」（與後端 mindmap.py 一致）
+      await db.mind_nodes.update(node_id, {
+        text: patch.text !== undefined ? patch.text : cur.text,
+        edge_label: patch.edge_label !== undefined ? patch.edge_label.trim() : cur.edge_label,
+        collapsed: patch.collapsed !== undefined ? patch.collapsed : cur.collapsed,
+        ...(patch.text !== undefined || patch.edge_label !== undefined ? { updated_at: now } : {}),
+      });
+      await db.boards.update(board_id, { updated_at: now });
+      return this.buildDexieMindMap(board_id);
+    });
+  }
+
+  async patchMindNodesCollapsed(
+    board_id: string,
+    items: { id: string; collapsed: 0 | 1 }[],
+  ): Promise<MindMapData> {
+    if (items.length === 0) {
+      throw new ApiError("VALIDATION_ERROR", "至少要提供一個要更新的節點", 422);
+    }
+    for (const item of items) {
+      if (item.collapsed !== 0 && item.collapsed !== 1) {
+        throw new ApiError("VALIDATION_ERROR", "collapsed 必須為 0 或 1", 422, { node_id: item.id });
+      }
+    }
+
+    return db.transaction("rw", [db.boards, db.mind_nodes, db.cards], async () => {
+      const board = await db.boards.get(board_id);
+      if (!board) throw new ApiError("NOT_FOUND", "白板不存在", 404, { board_id });
+      if (board.question?.archived_at) {
+        throw new ApiError("INVALID_STATE", "這塊問題已封存，只能查看", 409, { board_id });
+      }
+      const now = utcNow();
+      for (const item of items) {
+        const cur = await db.mind_nodes.get(item.id);
+        if (!cur || cur.board_id !== board_id) {
+          throw new ApiError("NOT_FOUND", "心智圖節點不存在", 404, { node_id: item.id });
+        }
+        // 原因：同上，批次折疊不動節點的 updated_at
+        await db.mind_nodes.update(item.id, {
+          collapsed: item.collapsed,
+        });
+      }
+      await db.boards.update(board_id, { updated_at: now });
+      return this.buildDexieMindMap(board_id);
+    });
+  }
+
+  async moveMindNode(
+    board_id: string,
+    node_id: string,
+    body: { parent_id: string | null; position: number },
+  ): Promise<MindMapData> {
+    return db.transaction("rw", [db.boards, db.mind_nodes, db.cards], async () => {
+      const board = await db.boards.get(board_id);
+      if (!board) throw new ApiError("NOT_FOUND", "白板不存在", 404, { board_id });
+      if (board.question?.archived_at) {
+        throw new ApiError("INVALID_STATE", "這塊問題已封存，只能查看", 409, { board_id });
+      }
+      const allNodes = await db.mind_nodes.where("board_id").equals(board_id).toArray();
+      const cur = allNodes.find((n) => n.id === node_id);
+      if (!cur) {
+        throw new ApiError("NOT_FOUND", "心智圖節點不存在", 404, { node_id });
+      }
+
+      const newParentId = body.parent_id;
+      if (newParentId !== null) {
+        if (newParentId === node_id) {
+          throw new ApiError("CYCLE_DETECTED", "不能將節點移到自己底下", 409, { node_id });
+        }
+        const targetParent = allNodes.find((n) => n.id === newParentId);
+        if (!targetParent) {
+          throw new ApiError("NOT_FOUND", "目標父節點不存在於此白板的心智圖", 404, { parent_id: newParentId });
+        }
+        const descIds = new Set(this.getDexieMindNodeDescendants(allNodes, node_id).map((d) => d.id));
+        if (descIds.has(newParentId)) {
+          throw new ApiError("CYCLE_DETECTED", "不能將節點移到自己的後代底下", 409, {
+            node_id,
+            parent_id: newParentId,
+          });
+        }
+      }
+
+      const oldParentId = cur.parent_id;
+      const now = utcNow();
+      await db.mind_nodes.update(node_id, { parent_id: newParentId, updated_at: now });
+      if (oldParentId !== newParentId) {
+        await this.normalizeDexieMindSiblings(board_id, oldParentId);
+      }
+
+      const refreshed = await db.mind_nodes.where("board_id").equals(board_id).toArray();
+      const targetSibs = refreshed
+        .filter((n) => n.parent_id === newParentId && n.id !== node_id)
+        .sort((a, b) => a.sort_order - b.sort_order || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+      const orderedIds = targetSibs.map((s) => s.id);
+      const insertPos = Math.max(0, Math.min(body.position, orderedIds.length));
+      orderedIds.splice(insertPos, 0, node_id);
+      for (let i = 0; i < orderedIds.length; i++) {
+        await db.mind_nodes.update(orderedIds[i], { sort_order: i });
+      }
+
+      await db.boards.update(board_id, { updated_at: now });
+      return this.buildDexieMindMap(board_id);
+    });
+  }
+
+  async deleteMindNode(
+    board_id: string,
+    node_id: string,
+    children: MindNodeChildrenMode = "block",
+  ): Promise<MindMapData> {
+    return db.transaction("rw", [db.boards, db.mind_nodes, db.cards], async () => {
+      const board = await db.boards.get(board_id);
+      if (!board) throw new ApiError("NOT_FOUND", "白板不存在", 404, { board_id });
+      if (board.question?.archived_at) {
+        throw new ApiError("INVALID_STATE", "這塊問題已封存，只能查看", 409, { board_id });
+      }
+      const allNodes = await db.mind_nodes.where("board_id").equals(board_id).toArray();
+      const cur = allNodes.find((n) => n.id === node_id);
+      if (!cur) {
+        throw new ApiError("NOT_FOUND", "心智圖節點不存在", 404, { node_id });
+      }
+
+      const desc = this.getDexieMindNodeDescendants(allNodes, node_id);
+      const direct = desc.filter((d) => d.depth === 1);
+      if (desc.length > 0 && children === "block") {
+        throw new ApiError(
+          "IN_USE",
+          `此節點底下還有 ${desc.length} 個子節點，請選擇連同子樹刪除或將子節點上提一級`,
+          409,
+          { child_count: desc.length, direct_child_count: direct.length },
+        );
+      }
+
+      const parentId = cur.parent_id;
+      const now = utcNow();
+
+      if (desc.length > 0 && children === "promote") {
+        const siblings = allNodes
+          .filter((n) => n.parent_id === parentId)
+          .sort((a, b) => a.sort_order - b.sort_order || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+        const directNodes = allNodes
+          .filter((n) => n.parent_id === node_id)
+          .sort((a, b) => a.sort_order - b.sort_order || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+        const directIds = directNodes.map((n) => n.id);
+
+        for (const dId of directIds) {
+          await db.mind_nodes.update(dId, { parent_id: parentId, updated_at: now });
+        }
+        await db.mind_nodes.delete(node_id);
+
+        const mergedIds: string[] = [];
+        for (const s of siblings) {
+          if (s.id === node_id) {
+            mergedIds.push(...directIds);
+          } else {
+            mergedIds.push(s.id);
+          }
+        }
+        for (let i = 0; i < mergedIds.length; i++) {
+          await db.mind_nodes.update(mergedIds[i], { sort_order: i });
+        }
+      } else {
+        const toDelete = [node_id, ...desc.map((d) => d.id)];
+        await db.mind_nodes.bulkDelete(toDelete);
+        await this.normalizeDexieMindSiblings(board_id, parentId);
+      }
+
+      await db.boards.update(board_id, { updated_at: now });
+      return this.buildDexieMindMap(board_id);
+    });
   }
 }
 

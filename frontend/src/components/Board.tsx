@@ -9,6 +9,7 @@
 // @depends-on ../styles.css (.react-flow__node-boardGroup.drop-target：拖曳卡片時「放開後會歸入」的亮框樣式，class 由 setDropTargets 掛在節點上)
 // @depends-on ../App.tsx (toolsSlot：右上工具列的 .tools-slide 容器，null 時不渲染「定位／自動對齊」)
 // @depends-on ../styles.css (.tools-slide button / .on：這兩顆按鈕的外觀由容器樣式決定，此處不寫 inline style)
+// @depends-on ./Editor.tsx (CodeReplaceModal, parseAiPatchPairs, findUniqueRange, alignIndent, extractCodeBlocks, applyCodePatches, stripOuterFence, BoardReplaceFileItem：白板純代碼比對多檔案定位直接開啟取代視窗並批次寫入卡片與綁定檔案，不開編輯器)
 // @depends-on ../App.tsx (selectedCardId 有兩條寫入路徑：onNodeClick→onOpenCard，與 onSelectionChange→onSelectCard；Board 以 nodes 的 selected 為準去重；onOpenCard 支援 options.smartPasteText)
 // @depends-on ../api.ts (addLiteratureToBoard / patchBoardLiterature / removeLiteratureFromBoard) 與 backend boards.py::BOARD_LITERATURE_SELECT、db.py::BOARD_LITERATURE_DDL、types.ts::BoardLiterature：白板文獻節點是「參照」，只存 literature_id＋座標＋大小；節點 id 一律是 "lit:<literature_id>"，所有以 "group:"／"note:" 排除非卡片節點的判斷都要一併排除 "lit:"
 // @depends-on ./RightPanel.tsx (NoteEditorPane 儲存後經 App.onNoteChanged 呼叫 BoardHandle.updateNote；便利貼節點 data 的 text／color 必須與它寫入資料庫的值一致)
@@ -83,6 +84,16 @@ import {
 } from "../types";
 import { isSymmetricRelation } from "../lib/relations";
 import { CardNode, type CardFlowNode } from "./CardNode";
+import {
+  alignIndent,
+  applyCodePatches,
+  CodeReplaceModal,
+  extractCodeBlocks,
+  findUniqueRange,
+  parseAiPatchPairs,
+  stripOuterFence,
+  type BoardReplaceFileItem,
+} from "./Editor";
 import { FloatingEdge } from "./FloatingEdge";
 import { Markdown, notifyCardTitleUpdated } from "./Markdown";
 import { QuestionNode, useBoardQuestions, type QuestionFlowNode } from "./QuestionNode";
@@ -150,6 +161,125 @@ const CODE_EXT_MAP: Record<string, string> = {
   go: "go",
 };
 
+function BoardStrokeIcon({ size = 14, children }: { size?: number; children: React.ReactNode }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{ flexShrink: 0 }}
+    >
+      {children}
+    </svg>
+  );
+}
+
+function PaletteIcon({ size = 12 }: { size?: number }) {
+  return (
+    <BoardStrokeIcon size={size}>
+      <path d="M8 2a6 6 0 1 0 0 12h1a1.5 1.5 0 0 0 1.4-2c-.3-.8.3-1.5 1.1-1.5H12a2 2 0 0 0 2-2A6 6 0 0 0 8 2Z" />
+      <circle cx="5.5" cy="6.5" r="0.7" fill="currentColor" stroke="none" />
+      <circle cx="8" cy="5" r="0.7" fill="currentColor" stroke="none" />
+      <circle cx="10.5" cy="6.5" r="0.7" fill="currentColor" stroke="none" />
+    </BoardStrokeIcon>
+  );
+}
+
+function EditStrokeIcon({ size = 12 }: { size?: number }) {
+  return (
+    <BoardStrokeIcon size={size}>
+      <path d="M11.2 2.3a1.5 1.5 0 0 1 2.1 2.1L5.2 12.5 2 13.5l1-3.2 8.2-8Z" />
+    </BoardStrokeIcon>
+  );
+}
+
+function CloseStrokeIcon({ size = 12 }: { size?: number }) {
+  return (
+    <BoardStrokeIcon size={size}>
+      <line x1="4" y1="4" x2="12" y2="12" />
+      <line x1="12" y1="4" x2="4" y2="12" />
+    </BoardStrokeIcon>
+  );
+}
+
+function ExpandStrokeIcon({ size = 12 }: { size?: number }) {
+  return (
+    <BoardStrokeIcon size={size}>
+      <polyline points="9.5 2.5 13.5 2.5 13.5 6.5" />
+      <line x1="13.5" y1="2.5" x2="9" y2="7" />
+      <polyline points="6.5 13.5 2.5 13.5 2.5 9.5" />
+      <line x1="2.5" y1="13.5" x2="7" y2="9" />
+    </BoardStrokeIcon>
+  );
+}
+
+function AlertTriangleStrokeIcon({ size = 15 }: { size?: number }) {
+  return (
+    <BoardStrokeIcon size={size}>
+      <path d="M8 2.2 14.2 13a.8.8 0 0 1-.7 1.2H2.5a.8.8 0 0 1-.7-1.2L8 2.2Z" />
+      <line x1="8" y1="6.2" x2="8" y2="9.5" />
+      <circle cx="8" cy="11.8" r="0.6" fill="currentColor" stroke="none" />
+    </BoardStrokeIcon>
+  );
+}
+
+function TransferStrokeIcon({ size = 13 }: { size?: number }) {
+  return (
+    <BoardStrokeIcon size={size}>
+      <polyline points="10.5 3 13.5 6 10.5 9" />
+      <line x1="2.5" y1="6" x2="13.5" y2="6" />
+      <polyline points="5.5 13 2.5 10 5.5 7" />
+      <line x1="13.5" y1="10" x2="2.5" y2="10" />
+    </BoardStrokeIcon>
+  );
+}
+
+function CopyStrokeIcon({ size = 13 }: { size?: number }) {
+  return (
+    <BoardStrokeIcon size={size}>
+      <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+      <path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5" />
+    </BoardStrokeIcon>
+  );
+}
+
+function LayoutGridStrokeIcon({ size = 13 }: { size?: number }) {
+  return (
+    <BoardStrokeIcon size={size}>
+      <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" />
+      <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" />
+      <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />
+      <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
+    </BoardStrokeIcon>
+  );
+}
+
+function UndoStrokeIcon({ size = 13 }: { size?: number }) {
+  return (
+    <BoardStrokeIcon size={size}>
+      <polyline points="5.5 3.5 2.5 6.5 5.5 9.5" />
+      <path d="M2.5 6.5H10a3.5 3.5 0 1 1 0 7H7" />
+    </BoardStrokeIcon>
+  );
+}
+
+function SlidersStrokeIcon({ size = 13 }: { size?: number }) {
+  return (
+    <BoardStrokeIcon size={size}>
+      <line x1="2.5" y1="5" x2="13.5" y2="5" />
+      <circle cx="6" cy="5" r="1.5" fill="var(--panel)" />
+      <line x1="2.5" y1="11" x2="13.5" y2="11" />
+      <circle cx="10" cy="11" r="1.5" fill="var(--panel)" />
+    </BoardStrokeIcon>
+  );
+}
+
 function GroupNode({ data, selected }: NodeProps<GroupFlowNode>) {
   return (
     <div className={`group-node color-${data.color || "slate"}${selected ? " selected" : ""}`}>
@@ -172,22 +302,25 @@ function GroupNode({ data, selected }: NodeProps<GroupFlowNode>) {
             onClick={(e) => (e.stopPropagation(), data.onCycleColor(data.groupId, data.color))}
             title="切換分組框顏色"
             aria-label="切換分組框顏色"
+            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center" }}
           >
-            🎨
+            <PaletteIcon />
           </button>
           <button
             onClick={(e) => (e.stopPropagation(), data.onRename(data.groupId, data.label))}
             title="重新命名分組"
             aria-label="重新命名分組"
+            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center" }}
           >
-            ✎
+            <EditStrokeIcon />
           </button>
           <button
             onClick={(e) => (e.stopPropagation(), data.onRemoveGroup(data.groupId))}
             title="刪除此視覺分組框（不影響卡片）"
             aria-label="刪除分組框"
+            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center" }}
           >
-            ✕
+            <CloseStrokeIcon />
           </button>
         </span>
       </div>
@@ -276,8 +409,9 @@ function NoteNode({ data, selected }: NodeProps<NoteFlowNode>) {
             onClick={(e) => (e.stopPropagation(), data.onOpen(data.noteId))}
             title="在中央編輯視窗開啟"
             aria-label="中央編輯"
+            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center" }}
           >
-            ⤢
+            <ExpandStrokeIcon />
           </button>
           <button
             onMouseDown={keepFocus}
@@ -292,8 +426,9 @@ function NoteNode({ data, selected }: NodeProps<NoteFlowNode>) {
             onClick={(e) => (e.stopPropagation(), data.onRemove(data.noteId))}
             title="刪除此便利貼"
             aria-label="刪除便利貼"
+            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center" }}
           >
-            ✕
+            <CloseStrokeIcon />
           </button>
         </span>
       </div>
@@ -625,173 +760,282 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   // 自動排版單次復原快照
     const [undoSnapshot, setUndoSnapshot] = useState<{ card_id: string; x: number; y: number }[] | null>(null);
 
-  // 貼上內容並定位卡片狀態
+  // 貼上內容並定位卡片狀態（僅電腦端 SQLite 支援；網頁／Dexie 版不支援）
+  const locateAvailable = getPreferredDriverType() !== "dexie";
   const [showLocateModal, setShowLocateModal] = useState(false);
   const [locateText, setLocateText] = useState("");
+  const [locatingBusy, setLocatingBusy] = useState(false);
+  const [boardReplaceFiles, setBoardReplaceFiles] = useState<BoardReplaceFileItem[] | null>(null);
 
-      const handleLocateCard = () => {
-        const raw = locateText.trim();
-        if (!raw) {
-          report(new Error("請先貼上代碼段落或 AI 回覆內容"), "定位失敗");
-          return;
+  const handleLocateCard = async () => {
+    if (!locateAvailable || locatingBusy) return;
+    const raw = locateText.trim();
+    if (!raw) {
+      report(new Error("請先貼上代碼段落或 AI 回覆內容"), "定位失敗");
+      return;
+    }
+    const allCards = nodesRef.current.filter((n): n is CardFlowNode => n.type === "card");
+    if (allCards.length === 0) {
+      report(new Error("目前白板內尚無任何卡片可供定位"), "定位失敗");
+      return;
+    }
+
+    // 純代碼比對路由：完全不依賴自然語言標題或檔名，直接以定位代碼精準匹配白板所有卡片的代碼塊
+    let pairs = parseAiPatchPairs(raw);
+    if (pairs.length === 0) {
+      const cleanRaw = stripOuterFence(raw);
+      if (!cleanRaw.trim()) {
+        report(new Error("請先貼上有效的代碼段落或修改指令"), "定位失敗");
+        return;
+      }
+      pairs = [{ findText: cleanRaw, replaceText: "" }];
+    }
+
+    const candidates = allCards.flatMap((card) =>
+      extractCodeBlocks(card.data.body || "").map((b) => ({
+        card,
+        blockIndex: b.index,
+        blockLabel: b.label,
+        workingCode: b.content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\u00A0/g, " "),
+      })),
+    );
+    if (candidates.length === 0) {
+      report(new Error("目前白板內的卡片中沒有任何代碼塊可供比對"), "定位失敗");
+      return;
+    }
+
+    const targetMap = new Map<
+      string,
+      {
+        card: CardFlowNode;
+        blockIndex: number;
+        blockLabel: string;
+        pairs: { findText: string; replaceText: string }[];
+      }
+    >();
+    const batchErrors: string[] = [];
+
+    for (let i = 0; i < pairs.length; i++) {
+      const p = pairs[i];
+      const cleanFind = stripOuterFence(p.findText);
+      const cleanReplace = stripOuterFence(p.replaceText);
+      const firstLinePreview = cleanFind.split("\n")[0]?.trim().slice(0, 60) || "（空白）";
+      if (!cleanFind.trim()) {
+        batchErrors.push(`• 第 ${i + 1} 組定位代碼為空白`);
+        continue;
+      }
+
+      const okHits: typeof candidates = [];
+      const ambiguousHits: typeof candidates = [];
+      for (const cand of candidates) {
+        const loc = findUniqueRange(cand.workingCode, cleanFind);
+        if (loc.status === "ok") okHits.push(cand);
+        else if (loc.status === "ambiguous") ambiguousHits.push(cand);
+      }
+
+      if (ambiguousHits.length > 0) {
+        const names = ambiguousHits.map((h) => `「${h.card.data.title || "（無標題）"}」`).join("、");
+        batchErrors.push(`• 第 ${i + 1} 組定位代碼在卡片 ${names} 內出現多處重複匹配，無法唯一鎖定，請補充前後 1～2 行上下文`);
+      } else if (okHits.length === 0) {
+        batchErrors.push(`• 第 ${i + 1} 組定位代碼在目前白板找不到任何匹配的卡片（首行：${firstLinePreview}）`);
+      } else if (okHits.length > 1) {
+        const names = okHits
+          .map((h) => `「${h.card.data.title || "（無標題）"}」${h.blockLabel ? `（${h.blockLabel}）` : ""}`)
+          .join("、");
+        batchErrors.push(`• 第 ${i + 1} 組定位代碼同時符合多張卡片／代碼塊（${names}），無法唯一判定，請補充前後 1～2 行上下文`);
+      } else {
+        const hit = okHits[0];
+        const loc = findUniqueRange(hit.workingCode, cleanFind);
+        if (loc.status === "ok") {
+          const matchedSource = hit.workingCode.slice(loc.start, loc.end);
+          hit.workingCode =
+            hit.workingCode.slice(0, loc.start) + alignIndent(matchedSource, cleanReplace) + hit.workingCode.slice(loc.end);
         }
-        const allCards = nodesRef.current.filter((n): n is CardFlowNode => n.type === "card");
-        if (allCards.length === 0) {
-          report(new Error("目前白板內尚無任何卡片可供定位"), "定位失敗");
-          return;
+        const key = `${hit.card.id}::${hit.blockIndex}`;
+        let grp = targetMap.get(key);
+        if (!grp) {
+          grp = {
+            card: hit.card,
+            blockIndex: hit.blockIndex,
+            blockLabel: hit.blockLabel,
+            pairs: [],
+          };
+          targetMap.set(key, grp);
         }
+        grp.pairs.push(p);
+      }
+    }
 
-        const normRaw = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-        const rawLines = normRaw
-          .split("\n")
-          .map((l) => l.trim())
-          .filter((l) => l.length >= 6 && !/^[{}\]();,]+$/.test(l));
+    const resolvedTargets = Array.from(targetMap.values());
+    if (batchErrors.length > 0 || resolvedTargets.length === 0) {
+      report(
+        new Error(`以下項目不符合定位條件，已拒絕整批定位：\n${batchErrors.join("\n")}`),
+        "拒絕定位",
+      );
+      return;
+    }
 
-        // 1. 抽取可能的檔名/標題候選
-        const titleRegex = /(?:```[a-zA-Z0-9_-]*:|^#+\s+|^[a-zA-Z0-9_./-]+\/)?([a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)/gm;
-        const extractedNames = new Set<string>();
-        let match: RegExpExecArray | null;
-        while ((match = titleRegex.exec(raw)) !== null) {
-          const fn = match[1].split("/").pop();
-          if (fn) extractedNames.add(fn.trim().toLowerCase());
+    setLocatingBusy(true);
+    try {
+      // 針對已由代碼命中的卡片取得最新 CardDetail，驗證每張卡片都必須已連動本機檔案（file_path）
+      const uniqueCardIds = Array.from(new Set(resolvedTargets.map((t) => t.card.id)));
+      const detailEntries = await Promise.all(
+        uniqueCardIds.map(async (cid) => [cid, await api.getCard(cid)] as const),
+      );
+      const detailMap = new Map(detailEntries);
+
+      const fileItems: BoardReplaceFileItem[] = [];
+      for (const t of resolvedTargets) {
+        const detail = detailMap.get(t.card.id);
+        if (!detail) continue;
+        const cardTitle = (detail.title || t.card.data.title || "（無標題）").trim();
+        if (!detail.file_path || !detail.file_path.trim()) {
+          batchErrors.push(`• 卡片「${cardTitle}」尚未連動本機檔案`);
+          continue;
         }
+        const boundBaseName = (detail.file_path.split(/[\\/]/).pop() ?? detail.file_path).trim();
+        const blocks = extractCodeBlocks(detail.body);
+        const matchedBlock = blocks.find((b) => b.index === t.blockIndex) ?? null;
+        const blockBaseLabel = matchedBlock
+          ? (matchedBlock.label.split(/[\\/]/).pop() ?? matchedBlock.label).trim()
+          : "";
 
-        // 2. 抽取【尋找這段代碼】標記區塊（若有）
-        const findMarker = "【尋找這段代碼】";
-        const replaceMarker = "【替換為以下代碼】";
-        const FENCE = "`".repeat(3);
-        const langHeaderRe =
-          /^(typescript|javascript|ts|tsx|js|jsx|python|py|sql|sqlite|json|html|css|scss|bash|sh|shell|yaml|yml|toml|markdown|md|diff|plaintext|text|c|cpp|csharp|java|go|rust|ruby|php|swift|kotlin)(\s+(copy(\s+code)?|複製(\s*代碼|\s*程式碼)?))?$/i;
-        const fileInLineRe = /([a-zA-Z0-9_.-]+\.(?:tsx|ts|jsx|js|py|sql|css|html|json|md|yaml|yml|toml|rs|go))/i;
-        const primaryNames = new Set<string>();
-        const findSnippets: string[][] = [];
-        const lines = normRaw.replace(/\u00A0/g, " ").split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          const lineTrim = lines[i].trim();
-          if (lineTrim.includes(findMarker) && !/^(const|let|var)\s+/.test(lineTrim)) {
-            for (let k = i - 1; k >= Math.max(0, i - 12); k--) {
-              if (lines[k].includes(replaceMarker)) break;
-              const m = fileInLineRe.exec(lines[k]);
-              if (m) {
-                primaryNames.add(m[1].toLowerCase());
-                break;
-              }
-            }
-            const nextLines: string[] = [];
-            for (let j = i + 1; j < lines.length; j++) {
-              if (lines[j].includes(replaceMarker) || lines[j].includes(findMarker)) break;
-              const t = lines[j].trim();
-              if (!t || t.startsWith(FENCE)) continue;
-              if (nextLines.length === 0 && langHeaderRe.test(t)) continue;
-              nextLines.push(t);
-            }
-            if (nextLines.length > 0) {
-              findSnippets.push(nextLines);
-            }
-          }
-        }
-        const matchesFullSnippet = (src: string, snipLines: string[]): boolean => {
-          const normSrcLines = src.replace(/\u00A0/g, " ").split("\n");
-          const nonEmptySrc = normSrcLines.map((l) => l.trim()).filter((l) => l.length > 0);
-          if (snipLines.length === 0 || snipLines.length > nonEmptySrc.length) return false;
-          for (let i = 0; i <= nonEmptySrc.length - snipLines.length; i++) {
-            let ok = true;
-            for (let j = 0; j < snipLines.length; j++) {
-              if (nonEmptySrc[i + j] !== snipLines[j]) {
-                ok = false;
-                break;
-              }
-            }
-            if (ok) return true;
-          }
-          return false;
-        };
-
-        // 3. 多層級計分比對白板所有卡片
-        let bestCard: CardFlowNode | null = null;
-        let maxScore = 0;
-
-        for (const card of allCards) {
-          let score = 0;
-          const title = (card.data.title || "").trim();
-          const titleLower = title.toLowerCase();
-          const body = (card.data.body || "").replace(/\r\n/g, "\n");
-
-          // 層級 A: 卡片內文全文直接精確包含貼上的內容（最高權重）
-          if (body.includes(normRaw)) {
-            score += 1000;
-          }
-
-          // 層級 B: 代碼實質特徵行命中統計（支援純代碼段落檢索）
-          if (rawLines.length > 0) {
-            let hitCount = 0;
-            let continuousHit = 0;
-            let maxContinuous = 0;
-            for (const line of rawLines) {
-              if (body.includes(line)) {
-                hitCount++;
-                continuousHit++;
-                if (continuousHit > maxContinuous) maxContinuous = continuousHit;
-              } else {
-                continuousHit = 0;
-              }
-            }
-            const hitRate = hitCount / rawLines.length;
-            if (hitRate >= 0.4) {
-              score += Math.round(hitRate * 400);
-              score += maxContinuous * 25;
-            }
-          }
-
-          // 層級 C: 標題或檔名吻合
-          if (title && extractedNames.has(titleLower)) {
-            score += 250;
-          }
-          if (title && normRaw.includes(title)) {
-            score += 100;
-          }
-
-          // 層級 D: 命中【尋找這段代碼】區塊
-          if (findSnippets.length > 0) {
-            let matchedSnippets = 0;
-            for (const snip of findSnippets) {
-              if (matchesFullSnippet(body, snip)) {
-                matchedSnippets++;
-              }
-            }
-            if (matchedSnippets === 0) {
-              score = 0;
-            } else {
-              score += matchedSnippets * 2000;
-              if (title && primaryNames.has(titleLower)) {
-                score += 500;
-              }
-            }
-          }
-
-          if (score > maxScore) {
-            maxScore = score;
-            bestCard = card;
-          }
-        }
-
-        if (!bestCard || maxScore < 30) {
-          report(
-            new Error(
-              findSnippets.length > 0
-                ? "當前白板內沒有任何卡片完整包含所貼上的定位代碼段落，請確認目標卡片是否已放入此白板"
-                : "在當前白板的卡片中找不到吻合的內容或代碼，請確認貼上的段落是否屬於此白板內的卡片",
-            ),
-            "找不到目標卡片",
+        if (blocks.length > 1 && blockBaseLabel.toLowerCase() !== boundBaseName.toLowerCase()) {
+          batchErrors.push(
+            `• 卡片「${cardTitle}」內命中的代碼塊標籤（${matchedBlock?.info || "未標記"}）與連動檔案「${boundBaseName}」不一致，寫入檔案時無法對應`,
           );
-          return;
+          continue;
         }
 
-        setShowLocateModal(false);
-        setLocateText("");
-        info(`已成功定位至卡片「${bestCard.data.title || "（無標題）"}」`);
-        onOpenCard?.(bestCard.id, { smartPasteText: raw });
-      };
+        fileItems.push({
+          cardId: detail.id,
+          cardTitle,
+          fileName: boundBaseName,
+          filePath: detail.file_path,
+          cardBody: detail.body,
+          updatedAt: detail.updated_at,
+          targetBlockIndex: matchedBlock ? matchedBlock.index : null,
+          manualSource: "",
+          pairs: t.pairs,
+          activePairIndex: 0,
+        });
+      }
+
+      if (batchErrors.length > 0 || fileItems.length === 0) {
+        report(
+          new Error(`以下項目不符合定位條件，已拒絕整批定位：\n${batchErrors.join("\n")}`),
+          "拒絕定位",
+        );
+        return;
+      }
+
+      setShowLocateModal(false);
+      setBoardReplaceFiles(fileItems);
+    } catch (e) {
+      report(e, "檢查目標卡片連動狀態失敗");
+    } finally {
+      setLocatingBusy(false);
+    }
+  };
+
+  const handleApplyBoardFiles = async (
+    items: BoardReplaceFileItem[],
+    onProgress: (updatedFiles: BoardReplaceFileItem[]) => void,
+  ): Promise<{ ok: boolean; error?: string; details?: string[] }> => {
+    const working = items.map((it) => ({ ...it }));
+    let totalAppliedPairs = 0;
+
+    for (let i = 0; i < working.length; i++) {
+      const item = working[i];
+      if (item.completed) continue;
+
+      const blocks = extractCodeBlocks(item.cardBody);
+      const targetBlock =
+        item.targetBlockIndex !== null
+          ? blocks.find((b) => b.index === item.targetBlockIndex) ?? null
+          : null;
+      const src = targetBlock ? targetBlock.content : item.manualSource;
+      const validPairs = item.pairs.filter((p) => p.findText.trim().length > 0);
+      const res = applyCodePatches(src, validPairs);
+      if (!res.ok) {
+        return { ok: false, error: `[${item.fileName}] ${res.error}` };
+      }
+
+      let nextBody = item.cardBody;
+      if (targetBlock) {
+        nextBody =
+          item.cardBody.slice(0, targetBlock.contentStart) +
+          res.resultCode +
+          item.cardBody.slice(targetBlock.contentEnd);
+      } else {
+        const cleanName = item.fileName.trim().replace(/\s+/g, "_");
+        const extIdx = cleanName.lastIndexOf(".");
+        const ext = extIdx >= 0 ? cleanName.slice(extIdx + 1).toLowerCase() : "tsx";
+        const header = cleanName ? "```" + (ext || "tsx") + ":" + cleanName : "```tsx";
+        const prefix =
+          item.cardBody.length > 0 && !item.cardBody.endsWith("\n")
+            ? "\n\n"
+            : item.cardBody.length > 0
+              ? "\n"
+              : "";
+        nextBody = item.cardBody + prefix + header + "\n" + res.resultCode + "\n```\n";
+      }
+
+      try {
+        const updatedCard = await api.patchCard(item.cardId, { body: nextBody }, item.updatedAt);
+        item.cardBody = updatedCard.body;
+        item.updatedAt = updatedCard.updated_at;
+        notifyCardTitleUpdated(item.cardId, updatedCard.title);
+        setNodes((ns) =>
+          ns.map((n) =>
+            n.id === item.cardId && n.type === "card"
+              ? { ...n, data: { ...n.data, title: updatedCard.title, body: updatedCard.body } }
+              : n,
+          ),
+        );
+        onProgress(working.map((w) => ({ ...w })));
+
+        try {
+          await api.writeCardFile(item.cardId, {
+            expected_updated_at: updatedCard.updated_at,
+            force: false,
+          });
+        } catch (writeErr: any) {
+          if (writeErr?.code === "FILE_CONFLICT") {
+            const okForce = window.confirm(
+              `檔案「${item.fileName}」（卡片：${item.cardTitle}）存在寫入衝突：\n${writeErr.message}\n\n是否仍要強制覆寫？`,
+            );
+            if (!okForce) {
+              return {
+                ok: false,
+                error: `已更新卡片「${item.cardTitle}」，但已取消寫入實體檔案「${item.fileName}」；確認後可再次點擊「套用取代並寫入檔案」繼續完成。`,
+              };
+            }
+            await api.writeCardFile(item.cardId, {
+              expected_updated_at: updatedCard.updated_at,
+              force: true,
+            });
+          } else {
+            throw writeErr;
+          }
+        }
+
+        item.completed = true;
+        totalAppliedPairs += res.appliedCount;
+        onProgress(working.map((w) => ({ ...w })));
+      } catch (err: any) {
+        return {
+          ok: false,
+          error: `處理檔案「${item.fileName}」（卡片：${item.cardTitle}）時失敗：${err?.message || String(err)}`,
+        };
+      }
+    }
+
+    setBoardReplaceFiles(null);
+    setLocateText("");
+    info(`已成功套用 ${working.length} 個檔案（共 ${totalAppliedPairs} 處修改）並寫入本機檔案，已回到白板`);
+    return { ok: true };
+  };
 
   // 拖入同名檔案衝突佇列與對話框狀態
   interface DropConflictItem {
@@ -3713,14 +3957,16 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         props.toolsSlot &&
         createPortal(
           <>
-            <button
-              type="button"
-              onClick={() => setShowLocateModal(true)}
-              title="貼上代碼片段或 AI 回覆，自動搜尋白板卡片並跳轉中央定位取代"
-            >
-              <CrosshairIcon />
-              定位
-            </button>
+            {locateAvailable && (
+              <button
+                type="button"
+                onClick={() => setShowLocateModal(true)}
+                title="貼上單檔或多檔 AI 修改指令（僅限已連動本機檔案的卡片），直接執行定位取代並寫入檔案"
+              >
+                <CrosshairIcon />
+                定位
+              </button>
+            )}
             <button
               type="button"
               className={snapToGrid ? "on" : ""}
@@ -3739,22 +3985,23 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           props.toolsSlot,
         )}
 
-      {showLocateModal && (
-        <div className="modal" role="dialog" aria-label="貼上 AI 回覆並定位卡片">
+      {locateAvailable && showLocateModal && (
+        <div className="modal" role="dialog" aria-label="貼上 AI 回覆並定位檔案">
           <div className="modal-card" style={{ maxWidth: 520 }}>
             <h4 style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <CrosshairIcon size={16} />
-              貼上 AI 回覆並自動定位卡片
+              貼上 AI 回覆並自動定位檔案
             </h4>
             <div className="muted" style={{ fontSize: 12, margin: "6px 0 10px" }}>
-              貼上 AI 輸出的修改指令或代碼段落，系統將自動比對當前白板內的所有卡片，找到後立即進入中央編輯並啟動定位取代。
+              貼上 AI 輸出的單檔或多檔修改指令（目標卡片均須已連動本機檔案），系統將直接依定位代碼比對白板卡片，通過後開啟取代視窗並寫入檔案。
             </div>
             <textarea
               rows={8}
               value={locateText}
               onChange={(e) => setLocateText(e.target.value)}
-              placeholder="在此貼上 AI 回覆全文（包含【尋找這段代碼】或檔名）..."
+              placeholder="在此貼上單檔或多檔修改指令（不限標題寫法，直接依定位代碼匹配卡片）..."
               autoFocus
+              disabled={locatingBusy}
               style={{
                 width: "100%",
                 boxSizing: "border-box",
@@ -3767,6 +4014,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
             <div className="modal-actions" style={{ marginTop: 12, justifyContent: "flex-end", gap: 8 }}>
               <button
                 type="button"
+                disabled={locatingBusy}
                 onClick={() => {
                   setShowLocateModal(false);
                   setLocateText("");
@@ -3777,15 +4025,30 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
               <button
                 type="button"
                 className="primary"
-                onClick={handleLocateCard}
-                disabled={!locateText.trim()}
+                onClick={() => void handleLocateCard()}
+                disabled={locatingBusy || !locateText.trim()}
               >
-                搜尋定位並開啟取代
+                {locatingBusy ? "比對代碼與連動中…" : "比對定位並開啟取代"}
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {locateAvailable &&
+        boardReplaceFiles &&
+        createPortal(
+          <CodeReplaceModal
+            boardFiles={boardReplaceFiles}
+            cardBody=""
+            cursorPos={0}
+            initialSmartPaste={locateText}
+            onApplyBoardFiles={handleApplyBoardFiles}
+            onClose={() => setBoardReplaceFiles(null)}
+            onApplyPatch={() => {}}
+          />,
+          document.body,
+        )}
 
       {/* active=false（中央編輯、其他視圖）時 Board 仍掛載且保留選取，面板必須跟著隱藏，否則會浮在編輯器上擋住畫面 */}
       {active && boardId && selectedTransferCount >= 2 && (
@@ -3805,15 +4068,19 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
             type="button"
             onClick={() => setShowTransferModal(true)}
             title="將選取的卡片、文獻或圖片批量複製或轉移（移動）到指定的其他白板"
+            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
           >
-             轉移／複製到白板…
+            <TransferStrokeIcon/>
+            轉移／複製到白板…
           </button>
 
           {selectedCards.length >= 2 && (
             <button
               onClick={() => void copySelectedCards()}
               title="複製已選卡片的標題與內容（不含圖片，保留代碼）"
+              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
             >
+              <CopyStrokeIcon/>
               複製內容
             </button>
           )}
@@ -4004,8 +4271,10 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
                       onClick={() => setShowSplitConfig((v) => !v)}
                       className={showSplitConfig ? "on" : ""}
                       title="設定各關係類型要放左邊或右邊（預設：反駁放左、其餘放右）"
+                      style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
                     >
-                      ⚙ 左右設定
+                      <SlidersStrokeIcon/>
+                      左右設定
                     </button>
                   )}
                   {splitMode === "type" && showSplitConfig && (
@@ -4045,15 +4314,25 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
                 </div>
               )}
 
-              <button className="primary" onClick={() => void runAutoLayout()}>
+              <button
+                className="primary"
+                onClick={() => void runAutoLayout()}
+                style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+              >
+                <LayoutGridStrokeIcon/>
                 自動排版
               </button>
             </>
           )}
 
           {undoSnapshot && (
-            <button onClick={() => void undoAutoLayout()} title="還原上一次自動排版前的位置">
-              ↶ 復原排版
+            <button
+              onClick={() => void undoAutoLayout()}
+              title="還原上一次自動排版前的位置"
+              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+            >
+              <UndoStrokeIcon/>
+              復原排版
             </button>
           )}
         </div>
@@ -4197,11 +4476,13 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
           boardId={boardId}
           boards={navBoards!}
           onSelectBoard={navSelectBoard!}
+          onSelectCard={onSelectCard}
           onBoardsChanged={async () => {
             await navBoardsChanged!();
             await questions.reload(); // 導航器改了問題結構（移動、新增）：目前畫布上的問題節點與子問題數要跟上
           }}
           report={report}
+          info={info}
         />
       )}
       {!boardId && <div className="board-hint">請先在左側建立或選擇一塊白板</div>}
@@ -4551,7 +4832,10 @@ function DropConflictModal(props: {
   return (
     <div className="modal" role="dialog" aria-label="同名卡片覆蓋確認">
       <div className="modal-card" style={{ maxWidth: showPreview ? 680 : 460 }}>
-        <h4>⚠️ 發現同名卡片</h4>
+        <h4 style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <AlertTriangleStrokeIcon/>
+          發現同名卡片
+        </h4>
         <div style={{ fontSize: 13, lineHeight: 1.6, margin: "10px 0" }}>
           在<strong>【{item.scopeLabel}】</strong>已存在一張名為<strong>「{item.file.name}」</strong>的卡片。
           <br />

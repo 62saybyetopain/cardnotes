@@ -44,6 +44,99 @@ import { BoardRecommend } from "./BoardRecommend";
 // api 在呼叫時才解析 driver（不在模組載入時），所以 HTTP／Dexie 切換後仍走對的那一邊。
 const loadAllCardTitles = () => api.listAllCardTitles().then((r) => r.items);
 
+function PanelStrokeIcon({ size = 13, children }: { size?: number; children: React.ReactNode }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{ flexShrink: 0 }}
+    >
+      {children}
+    </svg>
+  );
+}
+
+function FileCodePanelIcon({ size = 13 }: { size?: number }) {
+  return (
+    <PanelStrokeIcon size={size}>
+      <path d="M3.5 2h6l3 3v9h-9V2Z" />
+      <polyline points="9.5 2 9.5 5 12.5 5" />
+      <polyline points="6.5 8.5 5 10 6.5 11.5" />
+      <polyline points="9.5 8.5 11 10 9.5 11.5" />
+    </PanelStrokeIcon>
+  );
+}
+
+function FolderPanelIcon({ size = 12 }: { size?: number }) {
+  return (
+    <PanelStrokeIcon size={size}>
+      <path d="M2 4.5a1 1 0 0 1 1-1h3.2l1.4 1.5H13a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-8Z" />
+    </PanelStrokeIcon>
+  );
+}
+
+function UnlinkPanelIcon({ size = 12 }: { size?: number }) {
+  return (
+    <PanelStrokeIcon size={size}>
+      <line x1="4" y1="4" x2="12" y2="12" />
+      <line x1="12" y1="4" x2="4" y2="12" />
+    </PanelStrokeIcon>
+  );
+}
+
+function ZapPanelIcon({ size = 12 }: { size?: number }) {
+  return (
+    <PanelStrokeIcon size={size}>
+      <polygon points="9 1.5 3 9 8 9 7 14.5 13 7 8 7 9 1.5" />
+    </PanelStrokeIcon>
+  );
+}
+
+function RefreshPanelIcon({ size = 12 }: { size?: number }) {
+  return (
+    <PanelStrokeIcon size={size}>
+      <polyline points="13 3.5 13 7 9.5 7" />
+      <path d="M12.6 9.5A5 5 0 1 1 11.5 4.5L13 6" />
+    </PanelStrokeIcon>
+  );
+}
+
+function HistoryPanelIcon({ size = 12 }: { size?: number }) {
+  return (
+    <PanelStrokeIcon size={size}>
+      <polyline points="3 4.5 3 7.5 6 7.5" />
+      <path d="M3.2 7.5A5 5 0 1 1 4.5 11.5" />
+      <polyline points="8 5.5 8 8 9.8 9.2" />
+    </PanelStrokeIcon>
+  );
+}
+
+function InboxPanelIcon({ size = 12 }: { size?: number }) {
+  return (
+    <PanelStrokeIcon size={size}>
+      <path d="M2.5 9.5 4 3.5h8l1.5 6v3.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V9.5Z" />
+      <path d="M2.5 9.5h3.2l1 1.5h2.6l1-1.5h3.2" />
+    </PanelStrokeIcon>
+  );
+}
+
+function TrashPanelIcon({ size = 12 }: { size?: number }) {
+  return (
+    <PanelStrokeIcon size={size}>
+      <polyline points="3 4.5 13 4.5" />
+      <path d="M6 4.5V3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.5" />
+      <path d="M4.2 4.5 4.8 13a1 1 0 0 0 1 .9h4.4a1 1 0 0 0 1-.9l.6-8.5" />
+    </PanelStrokeIcon>
+  );
+}
+
 // 靈感筆記（"note:<id>"）與文獻（"lit:<id>"）借用 selectedCardId 傳遞，但不是卡片，不能呼叫 api.getCard／cardTitle
 const isVirtualId = (id: string | null | undefined): boolean => !!id && (id.startsWith("note:") || id.startsWith("lit:"));
 type NotePatch = { text?: string; color?: string };
@@ -210,7 +303,7 @@ function FileLinkBox(props: {
     >
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 0 }}>
-          <span style={{ fontSize: 13 }}>📄</span>
+          <FileCodePanelIcon/>
           <span
             style={{
               fontSize: 12,
@@ -228,22 +321,24 @@ function FileLinkBox(props: {
         <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
           <button
             type="button"
-            style={{ fontSize: 11, padding: "2px 8px" }}
+            style={{ fontSize: 11, padding: "2px 8px", display: "inline-flex", alignItems: "center", gap: 4 }}
             disabled={blocked}
             onClick={() => void handleBrowseAndBind()}
             title="開啟系統檔案視窗瀏覽選取要綁定的檔案"
           >
-            {card.file_path ? "📂 變更檔案…" : "📂 瀏覽綁定…"}
+            <FolderPanelIcon/>
+            {card.file_path ? "變更檔案…" : "瀏覽綁定…"}
           </button>
           {card.file_path && (
             <button
               type="button"
-              style={{ fontSize: 11, padding: "2px 6px" }}
+              style={{ fontSize: 11, padding: "2px 6px", display: "inline-flex", alignItems: "center", gap: 4 }}
               disabled={blocked}
               onClick={() => void handleUnbind()}
               title="解除此卡片與本機檔案的綁定"
             >
-              ✕ 解除
+              <UnlinkPanelIcon/>
+              解除
             </button>
           )}
         </div>
@@ -254,31 +349,34 @@ function FileLinkBox(props: {
           <button
             type="button"
             className="primary"
-            style={{ fontSize: 11, padding: "3px 8px" }}
+            style={{ fontSize: 11, padding: "3px 8px", display: "inline-flex", alignItems: "center", gap: 4 }}
             disabled={blocked}
             onClick={() => void handleWrite(false)}
             title="將選定的代碼塊寫入實體檔案"
           >
-            ⚡ 寫入檔案
+            <ZapPanelIcon/>
+            寫入檔案
           </button>
           <button
             type="button"
-            style={{ fontSize: 11, padding: "3px 8px" }}
+            style={{ fontSize: 11, padding: "3px 8px", display: "inline-flex", alignItems: "center", gap: 4 }}
             disabled={blocked}
             onClick={() => void handleRead()}
             title="從本機檔案載入並更新對應代碼塊"
           >
-            🔄 從檔案載入
+            <RefreshPanelIcon/>
+            從檔案載入
           </button>
           <button
             type="button"
             className={showBackupList ? "on" : ""}
-            style={{ fontSize: 11, padding: "3px 8px" }}
+            style={{ fontSize: 11, padding: "3px 8px", display: "inline-flex", alignItems: "center", gap: 4 }}
             disabled={blocked || loadingBackups}
             onClick={() => void handleOpenRestoreMenu()}
             title="檢視最近 3 份備份並選擇還原"
           >
-            {loadingBackups ? "載入中…" : showBackupList ? "▴ 收合備份" : "↩ 還原備份…"}
+            <HistoryPanelIcon/>
+            {loadingBackups ? "載入中…" : showBackupList ? "收合備份" : "還原備份…"}
           </button>
         </div>
       )}
@@ -899,8 +997,16 @@ function ContentTab(props: {
                 })
               }
               title="區分「尚未整理（收件夾）」與「已審視整理完成（即使目前不需額外標籤或連結）」"
+              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
             >
-              {card.curation_status === "curated" ? "✓ 已整理" : "📥 待整理（點擊完成整理）"}
+              {card.curation_status === "curated" ? (
+                "✓ 已整理"
+              ) : (
+                <>
+                  <InboxPanelIcon/>
+                  待整理（點擊完成整理）
+                </>
+              )}
             </button>
           </div>
 
@@ -910,7 +1016,8 @@ function ContentTab(props: {
               {locationTags.length === 0 && <span className="muted">未歸檔</span>}
               {locationTags.map((t) => (
                 <span key={t.id} className="chip location">
-                  📁 {tagPath(tags, t.id) || t.name}
+                  <FolderPanelIcon/>
+                  {tagPath(tags, t.id) || t.name}
                   <button aria-label={`移除位置 ${t.name}`} onClick={() => void unassign(t.id)}>
                     ✕
                   </button>
@@ -1057,11 +1164,12 @@ function ContentTab(props: {
           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
             <button
               className="danger"
-              style={{ fontSize: 12, padding: "3px 10px", marginTop: 0 }}
+              style={{ fontSize: 12, padding: "3px 10px", marginTop: 0, display: "inline-flex", alignItems: "center", gap: 4 }}
               onClick={() => void remove()}
               title="永久刪除此卡片本體"
             >
-              🗑️ 刪除卡片…
+              <TrashPanelIcon/>
+              刪除卡片…
             </button>
           </div>
         </div>

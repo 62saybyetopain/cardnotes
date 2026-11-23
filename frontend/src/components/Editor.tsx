@@ -2,6 +2,7 @@
 // @depends-on ./MentionPopup.tsx (MentionPopup)
 // @depends-on ./LiteratureLibrary.tsx, ./RightPanel.tsx::LiteratureEditorPane (save／allowMention／pasteTransform：文獻編輯用的選填 prop；未傳時行為與卡片完全相同。plainPaste 目前沒有呼叫端使用，確認沒有其他呼叫端後可刪。文獻以 asEditorCard 轉接成 CardDetail，Editor 只用到 id／title／body／updated_at／warnings)
 // @depends-on ./Markdown.tsx (Markdown；parseCollapsibleDoc 重寫了 fencedRanges／splitBodySegments 的章節切分規則，改這兩個函式要同步改那邊)
+// @depends-on ./Board.tsx (匯出 CodeReplaceModal、parseAiPatchPairs、findUniqueRange、alignIndent、extractCodeBlocks、applyCodePatches、stripOuterFence、BoardReplaceFileItem 供白板純代碼比對多檔案定位取代共用)
 // @depends-on ./LiveSegmentEditor.tsx (LiveSegmentEditor, SegmentHandle；內文編輯改用 CodeMirror，位移一律是 body 的全域字元位移)
 // @depends-on ../lib/liveMarkdown.ts (編輯中的即時渲染；語法規則與 Markdown.tsx 重複一份)
 // @depends-on ../api.ts::writeCardFile／backend cards.py::write_card_file／RightPanel.tsx::FileLinkBox.handleWrite（後端寫入的是資料庫裡的內文，且要求 expected_updated_at 等於資料庫版本；所以取代後必須等 status 為 saved 才能寫檔，否則會悄悄把舊代碼寫進檔案並回報成功。FILE_CONFLICT 的確認流程與 FileLinkBox 相同，改其一要同步另一邊）
@@ -377,6 +378,173 @@ function NumberedListIcon() {
       <rect x="6" y="7.25" width="8.5" height="1.5" rx="0.75" />
       <rect x="6" y="11.75" width="8.5" height="1.5" rx="0.75" />
     </svg>
+  );
+}
+
+function StrokeIcon({
+  size = 14,
+  children,
+}: {
+  size?: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{ flexShrink: 0 }}
+    >
+      {children}
+    </svg>
+  );
+}
+
+function ZapStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <polygon points="9 1.5 3 9 8 9 7 14.5 13 7 8 7 9 1.5" />
+    </StrokeIcon>
+  );
+}
+
+function SearchCheckStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <circle cx="7" cy="7" r="4.5" />
+      <line x1="10.5" y1="10.5" x2="14" y2="14" />
+      <polyline points="5 7 6.5 8.5 9.2 5.8" />
+    </StrokeIcon>
+  );
+}
+
+function SearchStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <circle cx="7" cy="7" r="4.5" />
+      <line x1="10.5" y1="10.5" x2="14" y2="14" />
+    </StrokeIcon>
+  );
+}
+
+function EraserStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M2.5 13.5h11" />
+      <path d="M5.2 13.5 2.5 10.8a1.2 1.2 0 0 1 0-1.7l6.2-6.2a1.2 1.2 0 0 1 1.7 0l3.1 3.1a1.2 1.2 0 0 1 0 1.7l-5.8 5.8H5.2Z" />
+      <line x1="6.5" y1="5.2" x2="10.8" y2="9.5" />
+    </StrokeIcon>
+  );
+}
+
+function ChevronLeftStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <polyline points="10 3.5 5.5 8 10 12.5" />
+    </StrokeIcon>
+  );
+}
+
+function ChevronRightStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <polyline points="6 3.5 10.5 8 6 12.5" />
+    </StrokeIcon>
+  );
+}
+
+function FileCodeStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M3.5 2h6l3 3v9h-9V2Z" />
+      <polyline points="9.5 2 9.5 5 12.5 5" />
+      <polyline points="6.5 8.5 5 10 6.5 11.5" />
+      <polyline points="9.5 8.5 11 10 9.5 11.5" />
+    </StrokeIcon>
+  );
+}
+
+function CloseStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <line x1="4" y1="4" x2="12" y2="12" />
+      <line x1="12" y1="4" x2="4" y2="12" />
+    </StrokeIcon>
+  );
+}
+
+function CrosshairStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <circle cx="8" cy="8" r="3.5" />
+      <line x1="8" y1="1.5" x2="8" y2="4" />
+      <line x1="8" y1="12" x2="8" y2="14.5" />
+      <line x1="1.5" y1="8" x2="4" y2="8" />
+      <line x1="12" y1="8" x2="14.5" y2="8" />
+    </StrokeIcon>
+  );
+}
+
+function FolderStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M2 4.5a1 1 0 0 1 1-1h3.2l1.4 1.5H13a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-8Z" />
+    </StrokeIcon>
+  );
+}
+
+function TableStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <rect x="2" y="2.5" width="12" height="11" rx="1.5" />
+      <line x1="2" y1="6.5" x2="14" y2="6.5" />
+      <line x1="2" y1="10" x2="14" y2="10" />
+      <line x1="6.5" y1="2.5" x2="6.5" y2="13.5" />
+      <line x1="10.5" y1="2.5" x2="10.5" y2="13.5" />
+    </StrokeIcon>
+  );
+}
+
+function CodePlusStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <polyline points="5.5 5 2.5 8 5.5 11" />
+      <polyline points="10.5 5 13.5 8 10.5 11" />
+      <line x1="8" y1="3.5" x2="8" y2="12.5" />
+    </StrokeIcon>
+  );
+}
+
+function EyeStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8Z" />
+      <circle cx="8" cy="8" r="1.8" />
+    </StrokeIcon>
+  );
+}
+
+function EditStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M11.2 2.3a1.5 1.5 0 0 1 2.1 2.1L5.2 12.5 2 13.5l1-3.2 8.2-8Z" />
+    </StrokeIcon>
+  );
+}
+
+function AlertTriangleStrokeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M8 2.2 14.2 13a.8.8 0 0 1-.7 1.2H2.5a.8.8 0 0 1-.7-1.2L8 2.2Z" />
+      <line x1="8" y1="6.2" x2="8" y2="9.5" />
+      <circle cx="8" cy="11.8" r="0.6" fill="currentColor" stroke="none" />
+    </StrokeIcon>
   );
 }
 
@@ -1301,8 +1469,14 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
             @ 引用
           </button>
         )}
-        <button type="button" onClick={insertCodeBlock} title="在卡片中插入可命名的代碼區塊">
-          ＋ 代碼塊
+        <button
+          type="button"
+          onClick={insertCodeBlock}
+          title="在卡片中插入可命名的代碼區塊"
+          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+        >
+          <CodePlusStrokeIcon size={13} />
+          代碼塊
         </button>
         <span style={{ position: "relative", display: "inline-flex" }}>
           <button
@@ -1311,8 +1485,10 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
             className={detectTableAtCursor(latest.current.body, cursorPos) ? "on" : ""}
             onClick={() => setTablePickerOpen((o) => !o)}
             title="建立或管理表格（Word 式選取欄列）"
+            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
           >
-            ⊞ 表格 ▾
+            <TableStrokeIcon size={13} />
+            表格 ▾
           </button>
           <TableGridPicker
             open={tablePickerOpen}
@@ -1362,14 +1538,18 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
           type="button"
           onClick={handleToolbarFoldSection}
           title="將選取內容設定為可收摺章節"
+          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
         >
-          📁 收摺章節
+          <FolderStrokeIcon size={13} />
+          收摺章節
         </button>
         <button
           type="button"
           onClick={() => setCodePatchOpen(true)}
           title="對卡片內的代碼塊或外部代碼執行精確定位與自動取代"
+          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
         >
+          <CrosshairStrokeIcon size={13} />
           定位取代
         </button>
       </span>
@@ -1551,7 +1731,7 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
         <button
           type="button"
           className={`preview-toggle-btn${previewing ? " on" : ""}`}
-          style={{ fontSize: 11, padding: "2px 8px", marginLeft: 6 }}
+          style={{ fontSize: 11, padding: "2px 8px", marginLeft: 6, display: "inline-flex", alignItems: "center", gap: 4 }}
           onClick={() => {
             setPreviewing((p) => {
               const next = !p;
@@ -1563,17 +1743,28 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
             });
           }}
         >
-          {previewing ? "✎ 返回編輯" : "👁 預覽"}
+          {previewing ? (
+            <>
+              <EditStrokeIcon size={12} />
+              返回編輯
+            </>
+          ) : (
+            <>
+              <EyeStrokeIcon size={12} />
+              預覽
+            </>
+          )}
         </button>
         {!previewing && (
           <button
             type="button"
             className={findOpen ? "on" : ""}
-            style={{ fontSize: 11, padding: "2px 8px", marginLeft: 6 }}
+            style={{ fontSize: 11, padding: "2px 8px", marginLeft: 6, display: "inline-flex", alignItems: "center", gap: 4 }}
             onClick={() => (findOpen ? closeFind() : openFind())}
             title="在全文中尋找（Ctrl+F）"
           >
-            🔍 尋找
+            <SearchStrokeIcon size={12} />
+            尋找
           </button>
         )}
       </div>
@@ -1716,8 +1907,16 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
                     className="primary"
                     disabled={!saveReady || filePrompt.writing}
                     onClick={() => void writeBoundFile()}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
                   >
-                    {filePrompt.writing ? "寫入中…" : "⚡ 寫入檔案"}
+                    {filePrompt.writing ? (
+                      "寫入中…"
+                    ) : (
+                      <>
+                        <ZapStrokeIcon size={13} />
+                        寫入檔案
+                      </>
+                    )}
                   </button>
                 )}
                 {filePrompt.result && onReturnToBoard && (
@@ -1884,10 +2083,11 @@ export function Editor({ card, save, allowMention = true, plainPaste = false, pa
                         type="button"
                         aria-label="收摺章節"
                         title="將選取內容轉為收摺章節"
-                        style={{ ...bubbleBtnStyle, fontSize: 12, width: "auto", padding: "0 5px" }}
+                        style={{ ...bubbleBtnStyle, fontSize: 12, width: "auto", padding: "0 6px", gap: 4 }}
                         onClick={handleToolbarFoldSection}
                       >
-                        📁 收摺
+                        <FolderStrokeIcon size={13} />
+                        收摺
                       </button>
                       <span
                         aria-hidden="true"
@@ -2763,7 +2963,7 @@ interface ParsedCodeBlock {
 
 // 與 fencedRanges 同一套逐行規則：開頭行以 3 個以上反引號起頭（可縮排、可帶說明），
 // 結尾行只能是不少於開頭長度的反引號；沒有結尾的圍欄不算代碼塊（不把後面整份內文當代碼）
-function extractCodeBlocks(markdown: string): ParsedCodeBlock[] {
+export function extractCodeBlocks(markdown: string): ParsedCodeBlock[] {
   const blocks: ParsedCodeBlock[] = [];
   let open: { len: number; info: string; contentStart: number } | null = null;
   let pos = 0;
@@ -2805,9 +3005,23 @@ function normalizeCodeText(s: string): string {
   return s.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\u00A0/g, " ");
 }
 
-interface PatchPair {
+export interface PatchPair {
   findText: string;
   replaceText: string;
+}
+
+export interface BoardReplaceFileItem {
+  cardId: string;
+  cardTitle: string;
+  fileName: string;
+  filePath: string;
+  cardBody: string;
+  updatedAt: string;
+  targetBlockIndex: number | null;
+  manualSource: string;
+  pairs: PatchPair[];
+  activePairIndex: number;
+  completed?: boolean;
 }
 
 // 識別網頁複製 AI 代碼塊時常見的頂部單行語言標籤（例如 "TypeScript", "tsx", "python", "Copy code" 等）
@@ -2818,19 +3032,17 @@ const AI_LANG_HEADER_RE =
 function isAiTrailingProseLine(line: string): boolean {
   const t = line.trim();
   if (!t) return false;
-  // 1. 明確的中文說明前綴、章節標籤或檢查點標題
   if (
-    /^(原因|問題原因|說明|注意|備註|為什麼|驗證方式|下一步|修改說明)\s*[：:]/.test(t) ||
+    /^(原因|問題原因|說明|注意|備註|為什麼|驗證方式|下一步|修改說明|目標檔案)\s*[：:]/.test(t) ||
     /^#{1,6}\s+(檢查點|步驟|檔案|修改|\d+\.)/.test(t) ||
     /^(檢查點\s*\d+|【[A-Z0-9一二三四五六七八九十]+】)/.test(t) ||
     /^[-*]{3,}\s*$/.test(t)
   ) {
     return true;
   }
-  // 2. 下一處的檔案標題行，例如：`lib/storage/httpDriver.ts（一處）` 或 `#### api.ts（兩處）`
   const cleanTitle = t.replace(/^#{1,6}\s*/, "").replace(/`/g, "").trim();
   if (
-    /^[a-zA-Z0-9_./-]+\.(ts|tsx|js|jsx|py|sql|json|css|md|html)\s*([（(][^）)]*[）)])?$/.test(cleanTitle)
+    /^(?:[a-zA-Z0-9_.-]+[\\/])*[a-zA-Z0-9_.-]+\.(ts|tsx|js|jsx|py|sql|json|css|scss|md|html|yaml|yml|toml|rs|go)\s*([（(][^）)]*[）)])?$/.test(cleanTitle)
   ) {
     return true;
   }
@@ -2838,7 +3050,8 @@ function isAiTrailingProseLine(line: string): boolean {
 }
 
 // 統一淨化器：同時支援「有 ``` 圍欄」與「無圍欄」，並剝除前後提示贅詞與保留開頭縮排
-function stripOuterFence(raw: string): string {
+// 加 export 只是讓其他模組可重用，行為不變；沒有其他檔案要 import 就可以跳過這一組。
+export function stripOuterFence(raw: string): string {
   const FENCE = "`".repeat(3);
   const trimBlank = (arr: string[]): string[] => {
     let a = arr;
@@ -2896,63 +3109,83 @@ function stripOuterFence(raw: string): string {
   return lines.join("\n");
 }
 
-// 智慧貼上預處理器：在【前、】後與語言標記後自動補換行，且絕不吃掉代碼第一行的前導縮排空格
-// 智慧貼上預處理器：在【前、】後自動換行，並自動剝除黏著在第一行的語言標記（如 CSS.app -> .app）
-function normalizeSmartPasteInput(rawInput: string): string {
-  let text = normalizeCodeText(rawInput);
-
+// 原因：舊版用全文正規表示式補換行，會在代碼內含標記字串（常數、註解）處誤切，也不認 -01 編號。
+// 改為逐行比對「獨立標記行」，圍欄內一律略過，所以代碼裡的標記字樣不會再被當成指令。
+export function normalizeSmartPasteInput(rawInput: string): string {
+  const text = normalizeCodeText(rawInput);
+  const FENCE = "`".repeat(3);
   const LANGS =
     "typescript|javascript|ts|tsx|js|jsx|python|py|sql|sqlite|json|html|css|scss|bash|sh|shell|yaml|yml|toml|markdown|md|diff|plaintext|text|c|cpp|csharp|java|go|rust|ruby|php|swift|kotlin";
 
-  // 1. 自動匹配：【尋找這段代碼】或【替換為以下代碼】，後方可接語言標籤（如 CSS、Python）
-  // 語言標籤與代碼可能是點號相連（如 CSS.app）、空格相連（如 Python   return）、或直接換行
-  const markerRegex = new RegExp(
-    `([^\n\r])?[ \\t]*` +
-      `([#*>\`\\-\\t 0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
-      `(?:[ \\t]*(?:` +
-      LANGS +
-      `)(?:[ \\t]*(?:copy(?:[ \\t]*code)?|複製(?:[ \\t]*代碼|[ \\t]*程式碼)?))?)?` +
-      `[ \\t.:：]*(?=[\\r\\n]|$)`,
-    "gi",
+  // (?![A-Za-z0-9])：避免 ts 先吃掉 tsx、js 先吃掉 jsx／json 而把代碼第一個字母切掉
+  const markerLineRe = new RegExp(
+    `^[ \\t]*[#*>\`\\-\\t 0-9.:：]*` +
+      `(【(?:尋找這段代碼|替換為以下代碼)】)` +
+      `\\*{0,2}` +
+      `(?:[ \\t]*(?:[-–—#:：_][ \\t]*\\d+|[（(]\\d+[）)]))?` +
+      `\\*{0,2}` +
+      `(?:[ \\t]*(${LANGS})(?![A-Za-z0-9])(?:[ \\t]*(?:copy(?:[ \\t]*code)?|複製(?:[ \\t]*代碼|[ \\t]*程式碼)?))?)?` +
+      `[ \\t:：]*` +
+      `(.*)$`,
+    "i",
   );
 
-  text = text.replace(markerRegex, (_match, beforeChar, marker) => {
-    const prefix = beforeChar ? `${beforeChar}\n\n` : "\n";
-    const cleanMarker = marker.replace(/^[#*>\`\\-\\s0-9.:：]+/, "").replace(/\*+$/g, "");
-    return `${prefix}${cleanMarker}\n`;
-  });
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let fenceLen = 0;
 
-  // 2. 針對未在行尾的標記（例如標記與代碼連在同一行：【尋找這段代碼】 CSS.app...）
-  // 在標記前補換行、標記後補換行，並將緊鄰的語言標記剝除，把純代碼保留到下一行
-  const inlineMarkerRegex = new RegExp(
-    `([^\n\r])?[ \\t]*` +
-      `([#*>\`\\-\\t 0-9.:：]*【(?:尋找這段代碼|替換為以下代碼)】\\*{0,2})` +
-      `(?:[ \\t]*(?:` +
-      LANGS +
-      `)(?:[ \\t]*(?:copy(?:[ \\t]*code)?|複製(?:[ \\t]*代碼|[ \\t]*程式碼)?))?)?` +
-      `[ \\t.:：]*` +
-      `(?=[^\\r\\n\\s])`,
-    "gi",
-  );
+  for (const line of lines) {
+    const t = line.trim();
+    if (fenceLen > 0) {
+      out.push(line);
+      if (t.length >= fenceLen && t.replace(/`/g, "") === "") fenceLen = 0;
+      continue;
+    }
+    if (t.startsWith(FENCE)) {
+      let n = 0;
+      while (t[n] === "`") n++;
+      fenceLen = n;
+      out.push(line);
+      continue;
+    }
 
-  text = text.replace(inlineMarkerRegex, (_match, beforeChar, marker) => {
-    const prefix = beforeChar ? `${beforeChar}\n\n` : "\n";
-    const cleanMarker = marker.replace(/^[#*>\`\\-\\s0-9.:：]+/, "").replace(/\*+$/g, "");
-    return `${prefix}${cleanMarker}\n`;
-  });
+    let cur = line;
+    const at = line.search(/【(?:尋找這段代碼|替換為以下代碼)】/);
+    if (at > 0 && line.slice(0, at).replace(/[#*>`\-\t 0-9.:：]/g, "") !== "") {
+      out.push(line.slice(0, at).trimEnd());
+      cur = line.slice(at);
+    }
 
-  return text;
+    const m = markerLineRe.exec(cur);
+    if (m) {
+      const marker = m[1];
+      const hasLang = Boolean(m[2]);
+      const rest = m[3] ?? "";
+      if (rest.trim() === "") {
+        out.push(marker);
+        continue;
+      }
+      if (hasLang) {
+        out.push(marker);
+        out.push(rest);
+        continue;
+      }
+    }
+    out.push(cur);
+  }
+
+  return out.join("\n");
 }
 
-function parseAiPatchPairs(rawInput: string): PatchPair[] {
+export function parseAiPatchPairs(rawInput: string): PatchPair[] {
   const text = normalizeSmartPasteInput(rawInput);
   const findMarker = "【尋找這段代碼】";
   const replaceMarker = "【替換為以下代碼】";
   const FENCE = "`".repeat(3);
   const lines = text.split("\n");
 
-  // 逐行掃描：圍欄內或引號賦值內的任何文字一律不當標記；
-  // 標記只在圍欄外、且去除標題／粗體／編號裝飾後以標記開頭、且不含賦值語法時才成立
+  const isMarkerLine = (t: string, marker: string): boolean =>
+    t === marker || (t.startsWith(marker) && /^[（(].*[）)]$/.test(t.slice(marker.length).trim()));
   const marks: { kind: "find" | "replace"; line: number }[] = [];
   let fenceLen = 0;
   for (let i = 0; i < lines.length; i++) {
@@ -2967,16 +3200,10 @@ function parseAiPatchPairs(rawInput: string): PatchPair[] {
       fenceLen = n;
       continue;
     }
-    // 嚴格判定：若該行包含引號賦值（例如 const x = "【尋找這段代碼】"），視為代碼而非章節標記
-    if (/^(const|let|var|val|string|[a-zA-Z0-9_$]+)\s*=/.test(t) || /["'`]/.test(t.slice(0, t.indexOf("【")))) {
-      continue;
-    }
-    const d = t.replace(/^[#*>`\-\s0-9.:：]+/, "");
-    if (d.startsWith(findMarker)) marks.push({ kind: "find", line: i });
-    else if (d.startsWith(replaceMarker)) marks.push({ kind: "replace", line: i });
+    if (isMarkerLine(t, findMarker)) marks.push({ kind: "find", line: i });
+    else if (isMarkerLine(t, replaceMarker)) marks.push({ kind: "replace", line: i });
   }
 
-  // 取區間內第一個有實質內容的圍欄本文；無圍欄時交由 stripOuterFence 剝除 TypeScript 標籤與下方說明文字
   const takeBody = (from: number, to: number): string => {
     let sawFence = false;
     let k = from;
@@ -3009,6 +3236,7 @@ function parseAiPatchPairs(rawInput: string): PatchPair[] {
     }
     const nextIdx = marks.findIndex((x, k) => k > m + 1 && x.kind === "find");
     const segEnd = nextIdx >= 0 ? marks[nextIdx].line : lines.length;
+
     const findBody = takeBody(marks[m].line + 1, rm.line);
     const replaceBody = takeBody(rm.line + 1, segEnd);
     if (findBody.trim().length > 0) {
@@ -3016,10 +3244,11 @@ function parseAiPatchPairs(rawInput: string): PatchPair[] {
     }
     m = nextIdx >= 0 ? nextIdx : marks.length;
   }
+
   return pairs;
 }
 
-function findUniqueRange(
+export function findUniqueRange(
   source: string,
   target: string,
 ): { status: "ok"; start: number; end: number } | { status: "not_found" } | { status: "ambiguous"; count: number } {
@@ -3109,7 +3338,7 @@ function findUniqueRange(
 }
 
 // 智慧縮排對齊：若原代碼具有前綴縮排，但貼上的取代代碼第一行缺少縮排，自動對齊原版縮排深度
-function alignIndent(originalBlock: string, replacementCode: string): string {
+export function alignIndent(originalBlock: string, replacementCode: string): string {
   const origFirstLine = originalBlock.split("\n")[0] ?? "";
   const repLines = replacementCode.split("\n");
   if (!repLines.length) return replacementCode;
@@ -3124,7 +3353,7 @@ function alignIndent(originalBlock: string, replacementCode: string): string {
   return replacementCode;
 }
 
-function applyCodePatches(
+export function applyCodePatches(
   originalCode: string,
   pairs: PatchPair[],
 ): { ok: true; resultCode: string; appliedCount: number } | { ok: false; error: string } {
@@ -3164,27 +3393,35 @@ function applyCodePatches(
   return { ok: true, resultCode: working, appliedCount: pairs.length };
 }
 
-function CodeReplaceModal(props: {
+export function CodeReplaceModal(props: {
   cardBody: string;
   cursorPos: number;
   initialSmartPaste?: string | null;
+  boardFiles?: BoardReplaceFileItem[];
+  onApplyBoardFiles?(
+    files: BoardReplaceFileItem[],
+    onProgress: (updatedFiles: BoardReplaceFileItem[]) => void,
+  ): Promise<{ ok: boolean; error?: string; details?: string[] }>;
   onClose(): void;
   onApplyPatch(patch: EditPatch): void;
 }) {
-  const { cardBody, cursorPos, initialSmartPaste, onClose, onApplyPatch } = props;
+  const { cardBody, cursorPos, initialSmartPaste, boardFiles, onApplyBoardFiles, onClose, onApplyPatch } = props;
+  const isBoardMode = Boolean(boardFiles && boardFiles.length > 0 && onApplyBoardFiles);
   const blocks = extractCodeBlocks(cardBody);
-  // 找不到任何代碼塊時，列出內文裡實際的圍欄行，讓失敗原因看得見
   const fenceLines =
     blocks.length === 0
       ? cardBody.split("\n").flatMap((l, i) => (l.trim().startsWith("```") ? [`第 ${i + 1} 行：${l.trim().slice(0, 40)}`] : []))
       : [];
 
-  // 預設選中游標所在的代碼塊，否則選第 1 個，若無代碼塊則為 "__new__"
   const initialTarget = () => {
     const hit = blocks.find((b) => cursorPos >= b.contentStart && cursorPos <= b.contentEnd);
     if (hit) return String(hit.index);
     return blocks.length > 0 ? "0" : "__new__";
   };
+
+  const [fileEntries, setFileEntries] = useState<BoardReplaceFileItem[]>(() => boardFiles ?? []);
+  const [activeFileIdx, setActiveFileIdx] = useState(0);
+  const [executing, setExecuting] = useState(false);
 
   const [targetKey, setTargetKey] = useState<string>(initialTarget);
   const [newBlockName, setNewBlockName] = useState("Board.tsx");
@@ -3194,15 +3431,51 @@ function CodeReplaceModal(props: {
   const [activePairIndex, setActivePairIndex] = useState(0);
   const [feedback, setFeedback] = useState<{ kind: "ok" | "err" | "warn"; msg: string; details?: string[] } | null>(null);
 
-  const selectedBlock = targetKey === "__new__" ? null : blocks.find((b) => String(b.index) === targetKey) ?? null;
-  const activeSourceCode = selectedBlock ? selectedBlock.content : manualSource;
+  const safeFileIdx = fileEntries.length > 0 ? Math.min(activeFileIdx, fileEntries.length - 1) : 0;
+  const activeBoardFile = isBoardMode ? fileEntries[safeFileIdx] ?? null : null;
 
-  const currentPair = pairs[activePairIndex] || { findText: "", replaceText: "" };
+  const selectedBlock = isBoardMode
+    ? activeBoardFile && activeBoardFile.targetBlockIndex !== null
+      ? extractCodeBlocks(activeBoardFile.cardBody).find((b) => b.index === activeBoardFile.targetBlockIndex) ?? null
+      : null
+    : targetKey === "__new__"
+      ? null
+      : blocks.find((b) => String(b.index) === targetKey) ?? null;
+
+  const activeSourceCode = isBoardMode
+    ? selectedBlock
+      ? selectedBlock.content
+      : activeBoardFile?.manualSource ?? ""
+    : selectedBlock
+      ? selectedBlock.content
+      : manualSource;
+
+  const activePairs = isBoardMode ? activeBoardFile?.pairs ?? [{ findText: "", replaceText: "" }] : pairs;
+  const currentPairIdx = isBoardMode ? activeBoardFile?.activePairIndex ?? 0 : activePairIndex;
+  const currentPair = activePairs[currentPairIdx] || { findText: "", replaceText: "" };
+
+  const setActivePairs = (updater: (prev: PatchPair[]) => PatchPair[]) => {
+    if (isBoardMode) {
+      setFileEntries((prev) =>
+        prev.map((f, idx) => (idx === safeFileIdx ? { ...f, pairs: updater(f.pairs), completed: false } : f)),
+      );
+    } else {
+      setPairs(updater);
+    }
+  };
+
+  const setCurrentPairIndex = (nextIdx: number) => {
+    if (isBoardMode) {
+      setFileEntries((prev) => prev.map((f, idx) => (idx === safeFileIdx ? { ...f, activePairIndex: nextIdx } : f)));
+    } else {
+      setActivePairIndex(nextIdx);
+    }
+  };
 
   const updateCurrentPair = (nextFind: string, nextReplace: string) => {
-    setPairs((prev) => {
+    setActivePairs((prev) => {
       const next = [...prev];
-      next[activePairIndex] = { findText: nextFind, replaceText: nextReplace };
+      next[currentPairIdx] = { findText: nextFind, replaceText: nextReplace };
       return next;
     });
   };
@@ -3211,31 +3484,37 @@ function CodeReplaceModal(props: {
     if (!initialSmartPaste) return;
     const formatted = normalizeSmartPasteInput(initialSmartPaste);
     setSmartInput(formatted);
+    if (isBoardMode) {
+      const totalPairs = (boardFiles ?? []).reduce((sum, f) => sum + f.pairs.length, 0);
+      setFeedback({
+        kind: "ok",
+        msg: `已由白板定位載入 ${(boardFiles ?? []).length} 個已連動檔案（共 ${totalPairs} 組修改），可直接套用取代並寫入檔案。`,
+      });
+      return;
+    }
     const parsed = parseAiPatchPairs(formatted);
     const hasDoubleArrow = initialSmartPaste.includes(">>");
     const arrowNote = hasDoubleArrow
-      ? "⚠️ 提示：貼上內容偵測到「>>」，請確認是否誤含引用標記或未清理字元。\n"
+      ? "提示：貼上內容偵測到「>>」，請確認是否誤含引用標記或未清理字元。\n"
       : "";
     if (parsed.length > 0) {
       setPairs(parsed);
       setActivePairIndex(0);
       setFeedback({
         kind: hasDoubleArrow ? "warn" : "ok",
-        msg: `${arrowNote}✅ 已由白板定位自動載入並解析 ${parsed.length} 組【尋找／替換】指令！`,
+        msg: `${arrowNote}已自動載入並解析 ${parsed.length} 組【尋找／替換】指令！`,
       });
     } else {
-      // 若貼上的內容為純代碼/文字片段而非標準【尋找/替換】指令，自動將其載入至第 1 組定位代碼中
       const cleanRaw = stripOuterFence(initialSmartPaste);
       if (cleanRaw.trim()) {
         setPairs([{ findText: cleanRaw, replaceText: "" }]);
         setActivePairIndex(0);
         setFeedback({
           kind: hasDoubleArrow ? "warn" : "ok",
-          msg: `${arrowNote}✅ 已將貼上的代碼段落載入至智慧貼上區與第 1 組【定位代碼】，請在右側輸入欲取代的新代碼。`,
+          msg: `${arrowNote}已將貼上的代碼段落載入至智慧貼上區與第 1 組【定位代碼】，請在右側輸入欲取代的新代碼。`,
         });
       }
     }
-    // 若內容中明確帶有代碼塊名稱，自動選中對應代碼塊
     for (const b of blocks) {
       if (b.label && initialSmartPaste.includes(b.label)) {
         setTargetKey(String(b.index));
@@ -3250,20 +3529,109 @@ function CodeReplaceModal(props: {
     setFeedback(null);
     const hasDoubleArrow = val.includes(">>");
     const arrowNote = hasDoubleArrow
-      ? "⚠️ 提示：貼上內容偵測到「>>」，請確認是否誤含引用標記或標籤。\n"
+      ? "提示：貼上內容偵測到「>>」，請確認是否誤含引用標記或標籤。\n"
       : "";
+
+    if (isBoardMode) {
+      const parsedPairs = parseAiPatchPairs(formatted);
+      if (parsedPairs.length > 0) {
+        const workingSources = fileEntries.map((f) => {
+          const fBlocks = extractCodeBlocks(f.cardBody);
+          const fBlock =
+            f.targetBlockIndex !== null
+              ? fBlocks.find((b) => b.index === f.targetBlockIndex) ?? null
+              : null;
+          return normalizeCodeText(fBlock ? fBlock.content : f.manualSource);
+        });
+        const assignedPairs: PatchPair[][] = fileEntries.map(() => []);
+        const routeErrors: string[] = [];
+        const unassigned: { pair: PatchPair }[] = []; // 對不上的組別：保留下來讓使用者在彈窗內手動修改
+
+        for (let i = 0; i < parsedPairs.length; i++) {
+          const p = parsedPairs[i];
+          const cleanFind = stripOuterFence(p.findText);
+          const cleanReplace = stripOuterFence(p.replaceText);
+          if (!cleanFind.trim()) continue;
+
+          const okIndices: number[] = [];
+          const ambIndices: number[] = [];
+          for (let fIdx = 0; fIdx < fileEntries.length; fIdx++) {
+            const loc = findUniqueRange(workingSources[fIdx], cleanFind);
+            if (loc.status === "ok") okIndices.push(fIdx);
+            else if (loc.status === "ambiguous") ambIndices.push(fIdx);
+          }
+
+          if (ambIndices.length > 0) {
+            routeErrors.push(`• 第 ${i + 1} 組在「${fileEntries[ambIndices[0]].fileName}」內出現多處重複匹配，無法唯一鎖定`);
+            unassigned.push({ pair: p });
+          } else if (okIndices.length === 0) {
+            routeErrors.push(`• 第 ${i + 1} 組在已載入的 ${fileEntries.length} 個檔案中找不到任何匹配代碼`);
+            unassigned.push({ pair: p });
+          } else if (okIndices.length > 1) {
+            const names = okIndices.map((idx) => fileEntries[idx].fileName).join("、");
+            routeErrors.push(`• 第 ${i + 1} 組同時符合多個檔案（${names}），無法唯一判定`);
+            unassigned.push({ pair: p });
+          } else {
+            const targetIdx = okIndices[0];
+            const loc = findUniqueRange(workingSources[targetIdx], cleanFind);
+            if (loc.status === "ok") {
+              const matchedSource = workingSources[targetIdx].slice(loc.start, loc.end);
+              workingSources[targetIdx] =
+                workingSources[targetIdx].slice(0, loc.start) +
+                alignIndent(matchedSource, cleanReplace) +
+                workingSources[targetIdx].slice(loc.end);
+            }
+            assignedPairs[targetIdx].push(p);
+          }
+        }
+
+        const totalAssigned = assignedPairs.reduce((s, arr) => s + arr.length, 0);
+        // 原因：對不上的組別原本被直接丟掉，使用者只能回頭改指令再重貼；改為保留並接在目前檢視的檔案後面，
+        // 讓使用者在彈窗內直接修改【尋找】內容。執行時每個檔案仍會整檔驗證，任何一組對不上就整個不寫入
+        const unassignedStart = assignedPairs[safeFileIdx]?.length ?? 0;
+        if (totalAssigned > 0 || unassigned.length > 0) {
+          setFileEntries((prev) =>
+            prev.map((f, idx) => {
+              const mine =
+                idx === safeFileIdx ? [...assignedPairs[idx], ...unassigned.map((u) => u.pair)] : assignedPairs[idx];
+              if (mine.length === 0) return f;
+              const jumpTo = idx === safeFileIdx && unassigned.length > 0 ? unassignedStart : 0;
+              return { ...f, pairs: mine, activePairIndex: jumpTo, completed: false };
+            }),
+          );
+        }
+
+        if (unassigned.length > 0) {
+          setFeedback({
+            kind: "warn",
+            msg:
+              `${arrowNote}已載入 ${totalAssigned} 組到對應檔案；另有 ${unassigned.length} 組無法自動分配，` +
+              `已放進「${activeBoardFile?.fileName ?? "目前檔案"}」的第 ${unassignedStart + 1}～${unassignedStart + unassigned.length} 組，` +
+              `請修改【尋找】內容後再驗證（未全部對上之前不會寫入任何檔案）：`,
+            details: routeErrors,
+          });
+        } else {
+          setFeedback({
+            kind: hasDoubleArrow ? "warn" : "ok",
+            msg: `${arrowNote}已依代碼內容比對重新解析並分配 ${totalAssigned} 組【尋找／替換】指令至對應檔案！`,
+          });
+        }
+      }
+      return;
+    }
+
     const parsed = parseAiPatchPairs(formatted);
     if (parsed.length > 0) {
       setPairs(parsed);
       setActivePairIndex(0);
       setFeedback({
         kind: hasDoubleArrow ? "warn" : "ok",
-        msg: `${arrowNote}✅ 已成功解析 ${parsed.length} 組【尋找／替換】指令並淨化格式！可切換上方組別標籤查看每一組細節。`,
+        msg: `${arrowNote}已成功解析 ${parsed.length} 組【尋找／替換】指令並淨化格式！可切換上方組別標籤查看每一組細節。`,
       });
     } else if (hasDoubleArrow) {
       setFeedback({
         kind: "warn",
-        msg: "⚠️ 提示：貼上內容偵測到「>>」，請確認是否為誤貼入的引用符號或標記。",
+        msg: "提示：貼上內容偵測到「>>」，請確認是否為誤貼入的引用符號或標記。",
       });
     }
   };
@@ -3279,7 +3647,83 @@ function CodeReplaceModal(props: {
     setFeedback(null);
   };
 
-  const handleVerifyOnly = () => {
+  const handleVerifyAllFiles = () => {
+    if (isBoardMode) {
+      const details: string[] = [];
+      let firstErrorFileIdx = -1;
+      let firstErrorPairIdx = 0;
+      let totalPairs = 0;
+
+      for (let fIdx = 0; fIdx < fileEntries.length; fIdx++) {
+        const entry = fileEntries[fIdx];
+        const entryBlocks = extractCodeBlocks(entry.cardBody);
+        const entryBlock =
+          entry.targetBlockIndex !== null
+            ? entryBlocks.find((b) => b.index === entry.targetBlockIndex) ?? null
+            : null;
+        const src = entryBlock ? entryBlock.content : entry.manualSource;
+        const validPairs = entry.pairs.filter((p) => p.findText.trim().length > 0);
+
+        if (!src.trim()) {
+          details.push(`• [${entry.fileName}]：原版代碼為空，無法驗證`);
+          if (firstErrorFileIdx < 0) firstErrorFileIdx = fIdx;
+          continue;
+        }
+        if (validPairs.length === 0) {
+          details.push(`• [${entry.fileName}]：尚未輸入任何定位代碼`);
+          if (firstErrorFileIdx < 0) firstErrorFileIdx = fIdx;
+          continue;
+        }
+
+        let working = normalizeCodeText(src);
+        for (let pIdx = 0; pIdx < validPairs.length; pIdx++) {
+          totalPairs++;
+          const p = validPairs[pIdx];
+          const cleanFind = stripOuterFence(p.findText);
+          const cleanReplace = stripOuterFence(p.replaceText);
+          const loc = findUniqueRange(working, cleanFind);
+
+          if (loc.status === "not_found") {
+            details.push(`• [${entry.fileName}] 第 ${pIdx + 1} 組：找不到指定代碼（匹配 0 處）`);
+            if (firstErrorFileIdx < 0) {
+              firstErrorFileIdx = fIdx;
+              firstErrorPairIdx = pIdx;
+            }
+          } else if (loc.status === "ambiguous") {
+            details.push(`• [${entry.fileName}] 第 ${pIdx + 1} 組：出現 ${loc.count} 處重複匹配，無法唯一鎖定`);
+            if (firstErrorFileIdx < 0) {
+              firstErrorFileIdx = fIdx;
+              firstErrorPairIdx = pIdx;
+            }
+          } else {
+            const lineNum = working.slice(0, loc.start).split("\n").length;
+            details.push(`• [${entry.fileName}] 第 ${pIdx + 1} 組：唯一匹配（約第 ${lineNum} 行，長度 ${cleanFind.length} 字元）`);
+            const matchedSource = working.slice(loc.start, loc.end);
+            working = working.slice(0, loc.start) + alignIndent(matchedSource, cleanReplace) + working.slice(loc.end);
+          }
+        }
+      }
+
+      if (firstErrorFileIdx >= 0) {
+        setActiveFileIdx(firstErrorFileIdx);
+        setFileEntries((prev) =>
+          prev.map((f, idx) => (idx === firstErrorFileIdx ? { ...f, activePairIndex: firstErrorPairIdx } : f)),
+        );
+        setFeedback({
+          kind: "err",
+          msg: `測試未全數通過（共 ${fileEntries.length} 個檔案）：`,
+          details,
+        });
+      } else {
+        setFeedback({
+          kind: "ok",
+          msg: `所有檔案定位驗證全部符合（共 ${fileEntries.length} 個檔案，合計 ${totalPairs} 組修改）！可安心執行取代。`,
+          details,
+        });
+      }
+      return;
+    }
+
     if (!activeSourceCode.trim()) {
       setFeedback({ kind: "err", msg: "原版代碼全文目前為空，請先選擇代碼塊或貼上原版全文。" });
       return;
@@ -3301,34 +3745,81 @@ function CodeReplaceModal(props: {
       const loc = findUniqueRange(working, cleanFind);
 
       if (loc.status === "not_found") {
-        details.push(`• 第 ${i + 1} 組：❌ 找不到指定代碼（匹配 0 處）`);
+        details.push(`• 第 ${i + 1} 組：找不到指定代碼（匹配 0 處）`);
         hasError = true;
       } else if (loc.status === "ambiguous") {
-        details.push(`• 第 ${i + 1} 組：⚠️ 出現 ${loc.count} 處重複匹配，無法唯一鎖定`);
+        details.push(`• 第 ${i + 1} 組：出現 ${loc.count} 處重複匹配，無法唯一鎖定`);
         hasError = true;
       } else {
         const lineNum = working.slice(0, loc.start).split("\n").length;
-        details.push(`• 第 ${i + 1} 組：✅ 唯一匹配（約第 ${lineNum} 行，長度 ${cleanFind.length} 字元）`);
-        working = working.slice(0, loc.start) + cleanReplace + working.slice(loc.end);
+        details.push(`• 第 ${i + 1} 組：唯一匹配（約第 ${lineNum} 行，長度 ${cleanFind.length} 字元）`);
+        const matchedSource = working.slice(loc.start, loc.end);
+        working = working.slice(0, loc.start) + alignIndent(matchedSource, cleanReplace) + working.slice(loc.end);
       }
     }
 
     if (hasError) {
       setFeedback({
         kind: "err",
-        msg: `定位驗證未全數通過（共 ${validPairs.length} 組）：`,
+        msg: `定位驗證未全數符合（共 ${validPairs.length} 組）：`,
         details,
       });
     } else {
       setFeedback({
         kind: "ok",
-        msg: `✅ 所有組別定位驗證全部通過（共 ${validPairs.length} 組）！可安心執行取代。`,
+        msg: `所有檔案定位驗證全部符合（共 ${validPairs.length} 組）！可安心執行取代。`,
         details,
       });
     }
   };
 
   const handleExecute = async () => {
+    if (isBoardMode && onApplyBoardFiles) {
+      if (executing) return;
+      for (let fIdx = 0; fIdx < fileEntries.length; fIdx++) {
+        const entry = fileEntries[fIdx];
+        if (entry.completed) continue;
+        const entryBlocks = extractCodeBlocks(entry.cardBody);
+        const entryBlock =
+          entry.targetBlockIndex !== null
+            ? entryBlocks.find((b) => b.index === entry.targetBlockIndex) ?? null
+            : null;
+        const src = entryBlock ? entryBlock.content : entry.manualSource;
+        if (!src.trim()) {
+          setActiveFileIdx(fIdx);
+          setFeedback({ kind: "err", msg: `檔案「${entry.fileName}」的原版代碼為空，無法執行取代。` });
+          return;
+        }
+        const validPairs = entry.pairs.filter((p) => p.findText.trim().length > 0);
+        const check = applyCodePatches(src, validPairs);
+        if (!check.ok) {
+          setActiveFileIdx(fIdx);
+          setFeedback({ kind: "err", msg: `[${entry.fileName}] ${check.error}` });
+          return;
+        }
+      }
+
+      setExecuting(true);
+      setFeedback(null);
+      try {
+        const result = await onApplyBoardFiles(fileEntries, (updated) => {
+          setFileEntries(updated);
+        });
+        if (!result.ok) {
+          const firstIncomplete = fileEntries.findIndex((f) => !f.completed);
+          if (firstIncomplete >= 0) setActiveFileIdx(firstIncomplete);
+          setFeedback({
+            kind: "err",
+            msg: result.error || "部分檔案寫入未完成",
+            details: result.details,
+          });
+        }
+      } finally {
+        setExecuting(false);
+      }
+      return;
+    }
+
     if (!activeSourceCode.trim()) {
       setFeedback({ kind: "err", msg: "原版代碼全文目前為空，請先選擇代碼塊或貼上原版全文。" });
       return;
@@ -3376,27 +3867,30 @@ function CodeReplaceModal(props: {
         replaceTo: from,
         insertText: insertBlock,
       });
-      // 新增為卡片代碼塊後，自動切換鎖定至該新區塊，方便後續連續取代
       setTargetKey(String(blocks.length));
       setManualSource("");
     }
 
-    // 取代成功後自動清空智慧貼上區與定位／取代組別，無需手動再按一次清空
     setSmartInput("");
     setPairs([{ findText: "", replaceText: "" }]);
     setActivePairIndex(0);
 
     setFeedback({
       kind: "ok",
-      msg: `🎉 已成功套用 ${res.appliedCount} 處代碼取代並更新至卡片！最新全文已複製至剪貼簿，輸入框已自動清空，可直接貼上下一組代碼。`,
+      msg: `已成功套用 ${res.appliedCount} 處代碼取代並更新至卡片！最新全文已複製至剪貼簿，輸入框已自動清空，可直接貼上下一組代碼。`,
     });
   };
 
   const handleClearCurrent = () => {
     updateCurrentPair("", "");
-    setSmartInput("");
     setFeedback(null);
   };
+
+  const currentDisplayFileName = isBoardMode
+    ? activeBoardFile?.fileName ?? "未指定檔案"
+    : selectedBlock
+      ? selectedBlock.label
+      : newBlockName.trim() || "外部原版全文";
 
   return (
     <div className="modal" role="dialog" aria-label="代碼自動定位與取代" style={{ padding: 12 }}>
@@ -3413,68 +3907,191 @@ function CodeReplaceModal(props: {
           boxSizing: "border-box",
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
-          <h4 style={{ margin: 0 }}>⚡ 代碼自動定位與取代</h4>
-          <button type="button" onClick={onClose} style={{ padding: "3px 10px" }} title="關閉彈窗">
-            ✕ 關閉
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0, gap: 12 }}>
+          <h4 style={{ margin: 0, display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <ZapStrokeIcon size={16} />
+            代碼自動定位與取代
+          </h4>
+
+          {isBoardMode && activeBoardFile && (
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "4px 10px",
+                background: "var(--bg)",
+                border: "1px solid var(--line)",
+                borderRadius: 8,
+              }}
+            >
+              <button
+                type="button"
+                disabled={executing || safeFileIdx <= 0}
+                onClick={() => {
+                  setActiveFileIdx((i) => Math.max(0, i - 1));
+                  setFeedback(null);
+                }}
+                title="切換至上一檔（保留各檔案手動修改的定位／取代代碼）"
+                style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", fontSize: 12 }}
+              >
+                <ChevronLeftStrokeIcon size={13} />
+                上一檔
+              </button>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600 }}>
+                <FileCodeStrokeIcon size={14} />
+                <span>{activeBoardFile.fileName}</span>
+                <span className="muted" style={{ fontWeight: 400, fontSize: 12 }}>
+                  （{safeFileIdx + 1} / {fileEntries.length}）
+                </span>
+                {activeBoardFile.completed && (
+                  <span className="facet-badge" style={{ background: "var(--hl-green-bg)", color: "var(--text)" }}>
+                    已寫入
+                  </span>
+                )}
+              </span>
+              <button
+                type="button"
+                disabled={executing || safeFileIdx >= fileEntries.length - 1}
+                onClick={() => {
+                  setActiveFileIdx((i) => Math.min(fileEntries.length - 1, i + 1));
+                  setFeedback(null);
+                }}
+                title="切換至下一檔（保留各檔案手動修改的定位／取代代碼）"
+                style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", fontSize: 12 }}
+              >
+                下一檔
+                <ChevronRightStrokeIcon size={13} />
+              </button>
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={executing}
+            style={{ padding: "3px 10px", display: "inline-flex", alignItems: "center", gap: 4 }}
+            title="關閉彈窗"
+          >
+            <CloseStrokeIcon size={13} />
+            關閉
           </button>
         </div>
 
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflowY: "auto", gap: 10, marginTop: 10 }}>
-          <div className="field-row" style={{ flexShrink: 0 }}>
-            <span className="muted">① 選擇目標代碼塊（原版全文來源）：</span>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <select
-                value={targetKey}
-                onChange={(e) => {
-                  setTargetKey(e.target.value);
-                  setFeedback(null);
-                }}
-                aria-label="選擇目標代碼塊"
-                style={{ flex: 1, minWidth: 240 }}
-              >
-                {blocks.map((b) => (
-                  <option key={b.index} value={String(b.index)}>
-                    {"區塊 #" + String(b.index + 1) + "：" + b.label + "（" + String(b.lineCount) + " 行）"}
-                  </option>
-                ))}
-                <option value="__new__">➕ 手動貼上外部原版全文（取代後存為卡片新代碼塊）</option>
-              </select>
-              {targetKey === "__new__" && (
-                <input
-                  value={newBlockName}
-                  onChange={(e) => setNewBlockName(e.target.value)}
-                  placeholder="新代碼塊檔名（如 Board.tsx）"
-                  style={{ width: 200 }}
-                />
-              )}
+          {isBoardMode && activeBoardFile ? (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+                padding: "6px 10px",
+                borderRadius: 6,
+                background: "var(--bg)",
+                border: "1px solid var(--line)",
+                fontSize: 12,
+                flexShrink: 0,
+              }}
+            >
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <FileCodeStrokeIcon size={14} />
+                <strong>目標檔案：{activeBoardFile.fileName}</strong>
+                <span className="muted">（對應卡片：{activeBoardFile.cardTitle || "（無標題）"}）</span>
+              </span>
+              <span className="muted" style={{ fontFamily: "monospace", fontSize: 11 }}>
+                {activeBoardFile.filePath}
+              </span>
             </div>
-          </div>
+          ) : (
+            <>
+              <div className="field-row" style={{ flexShrink: 0 }}>
+                <span className="muted">① 選擇目標代碼塊（原版全文來源）：</span>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <select
+                    value={targetKey}
+                    onChange={(e) => {
+                      setTargetKey(e.target.value);
+                      setFeedback(null);
+                    }}
+                    aria-label="選擇目標代碼塊"
+                    style={{ flex: 1, minWidth: 240 }}
+                  >
+                    {blocks.map((b) => (
+                      <option key={b.index} value={String(b.index)}>
+                        {"區塊 #" + String(b.index + 1) + "：" + b.label + "（" + String(b.lineCount) + " 行）"}
+                      </option>
+                    ))}
+                    <option value="__new__">手動貼上外部原版全文（取代後存為卡片新代碼塊）</option>
+                  </select>
+                  {targetKey === "__new__" && (
+                    <input
+                      value={newBlockName}
+                      onChange={(e) => setNewBlockName(e.target.value)}
+                      placeholder="新代碼塊檔名（如 Board.tsx）"
+                      style={{ width: 200 }}
+                    />
+                  )}
+                </div>
+              </div>
 
-          {blocks.length === 0 && (
-            <div className="banner warn" role="alert" style={{ flexShrink: 0, flexDirection: "column", alignItems: "flex-start" }}>
-              {fenceLines.length === 0 ? (
-                <div>卡片內文（{cardBody.length} 字）沒有任何以反引號開頭的圍欄行：這張卡片裡沒有代碼塊，或定位取代開在別張卡片上。</div>
-              ) : (
-                <>
-                  <div>內文有 {fenceLines.length} 行圍欄標記，但沒有成功配對成代碼塊（可能缺少結尾圍欄）：</div>
-                  {fenceLines.slice(0, 6).map((l) => (
-                    <div key={l} style={{ fontFamily: "monospace", fontSize: 12 }}>
-                      {l}
-                    </div>
-                  ))}
-                </>
+              {blocks.length === 0 && (
+                <div className="banner warn" role="alert" style={{ flexShrink: 0, flexDirection: "column", alignItems: "flex-start" }}>
+                  {fenceLines.length === 0 ? (
+                    <div>卡片內文（{cardBody.length} 字）沒有任何以反引號開頭的圍欄行：這張卡片裡沒有代碼塊，或定位取代開在別張卡片上。</div>
+                  ) : (
+                    <>
+                      <div>內文有 {fenceLines.length} 行圍欄標記，但沒有成功配對成代碼塊（可能缺少結尾圍欄）：</div>
+                      {fenceLines.slice(0, 6).map((l) => (
+                        <div key={l} style={{ fontFamily: "monospace", fontSize: 12 }}>
+                          {l}
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
               )}
-            </div>
+              {targetKey === "__new__" ? (
+                <label className="field-row" style={{ flexShrink: 0 }}>
+                  <span className="muted">貼上原版（全文代碼）：</span>
+                  <textarea
+                    rows={6}
+                    value={manualSource}
+                    onChange={(e) => {
+                      setManualSource(e.target.value);
+                      setFeedback(null);
+                    }}
+                    placeholder="在此貼上要被修改的完整原始檔案代碼..."
+                    style={{
+                      fontFamily: "monospace",
+                      fontSize: 12,
+                      resize: "vertical",
+                      minHeight: 120,
+                      width: "100%",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                </label>
+              ) : (
+                <div className="muted" style={{ fontSize: 12, flexShrink: 0 }}>
+                  已鎖定卡片內「{selectedBlock?.label}」（共 {String(selectedBlock?.lineCount ?? 0)} 行）。連續取代時將自動在此最新內容上即時更新。
+                </div>
+              )}
+            </>
           )}
-          {targetKey === "__new__" ? (
+
+          {isBoardMode && activeBoardFile && activeBoardFile.targetBlockIndex === null && (
             <label className="field-row" style={{ flexShrink: 0 }}>
-              <span className="muted">貼上原版（全文代碼）：</span>
+              <span className="muted">此卡片內尚無匹配代碼塊，請貼上「{activeBoardFile.fileName}」原版全文代碼：</span>
               <textarea
-                rows={6}
-                value={manualSource}
+                rows={5}
+                value={activeBoardFile.manualSource}
                 onChange={(e) => {
-                  setManualSource(e.target.value);
+                  const val = e.target.value;
+                  setFileEntries((prev) =>
+                    prev.map((f, idx) => (idx === safeFileIdx ? { ...f, manualSource: val, completed: false } : f)),
+                  );
                   setFeedback(null);
                 }}
                 placeholder="在此貼上要被修改的完整原始檔案代碼..."
@@ -3482,16 +4099,12 @@ function CodeReplaceModal(props: {
                   fontFamily: "monospace",
                   fontSize: 12,
                   resize: "vertical",
-                  minHeight: 120,
+                  minHeight: 100,
                   width: "100%",
                   boxSizing: "border-box",
                 }}
               />
             </label>
-          ) : (
-            <div className="muted" style={{ fontSize: 12, flexShrink: 0 }}>
-              已鎖定卡片內「{selectedBlock?.label}」（共 {String(selectedBlock?.lineCount ?? 0)} 行）。連續取代時將自動在此最新內容上即時更新。
-            </div>
           )}
 
           <label className="field-row" style={{ flexShrink: 0 }}>
@@ -3499,7 +4112,7 @@ function CodeReplaceModal(props: {
               ② 智慧貼上區（直接貼上 AI 回覆，自動拆解並剝除空代碼塊、Markdown 標題與圍欄）：
             </span>
             <textarea
-              rows={8}
+              rows={6}
               value={smartInput}
               onChange={(e) => handleSmartPasteChange(e.target.value)}
               placeholder="貼上 AI 回覆段落（自動解析一組或多組【尋找／替換】區塊）..."
@@ -3507,7 +4120,7 @@ function CodeReplaceModal(props: {
                 fontFamily: "monospace",
                 fontSize: 12,
                 resize: "vertical",
-                minHeight: 180,
+                minHeight: 130,
                 width: "100%",
                 boxSizing: "border-box",
                 lineHeight: 1.45,
@@ -3515,19 +4128,19 @@ function CodeReplaceModal(props: {
             />
           </label>
 
-          {pairs.length > 1 && (
+          {activePairs.length > 1 && (
             <div style={{ display: "flex", gap: 6, alignItems: "center", margin: "4px 0", flexWrap: "wrap", flexShrink: 0 }}>
               <span className="muted" style={{ fontSize: 12 }}>
-                組別切換：
+                {currentDisplayFileName} 組別切換：
               </span>
-              {pairs.map((_, idx) => (
+              {activePairs.map((_, idx) => (
                 <button
                   key={idx}
                   type="button"
-                  className={activePairIndex === idx ? "primary" : ""}
+                  className={currentPairIdx === idx ? "primary" : ""}
                   style={{ fontSize: 11, padding: "2px 8px" }}
                   onClick={() => {
-                    setActivePairIndex(idx);
+                    setCurrentPairIndex(idx);
                     setFeedback(null);
                   }}
                 >
@@ -3537,10 +4150,10 @@ function CodeReplaceModal(props: {
             </div>
           )}
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, flex: 1, minHeight: 280 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, flex: 1, minHeight: 260 }}>
             <label className="field-row" style={{ margin: 0, display: "flex", flexDirection: "column", height: "100%" }}>
               <span className="muted">
-                定位代碼（第 {activePairIndex + 1}/{pairs.length} 組）：
+                定位代碼（{currentDisplayFileName} · 第 {currentPairIdx + 1}/{activePairs.length} 組）：
               </span>
               <textarea
                 rows={12}
@@ -3552,7 +4165,7 @@ function CodeReplaceModal(props: {
                   fontSize: 12,
                   resize: "vertical",
                   flex: 1,
-                  minHeight: 220,
+                  minHeight: 200,
                   width: "100%",
                   boxSizing: "border-box",
                   lineHeight: 1.45,
@@ -3561,7 +4174,7 @@ function CodeReplaceModal(props: {
             </label>
             <label className="field-row" style={{ margin: 0, display: "flex", flexDirection: "column", height: "100%" }}>
               <span className="muted">
-                取代代碼（第 {activePairIndex + 1}/{pairs.length} 組）：
+                取代代碼（{currentDisplayFileName} · 第 {currentPairIdx + 1}/{activePairs.length} 組）：
               </span>
               <textarea
                 rows={12}
@@ -3573,7 +4186,7 @@ function CodeReplaceModal(props: {
                   fontSize: 12,
                   resize: "vertical",
                   flex: 1,
-                  minHeight: 220,
+                  minHeight: 200,
                   width: "100%",
                   boxSizing: "border-box",
                   lineHeight: 1.45,
@@ -3587,34 +4200,61 @@ function CodeReplaceModal(props: {
           <div
             className={"banner " + (feedback.kind === "err" ? "danger" : "warn")}
             role="alert"
-            style={{ marginTop: 8 }}
+            style={{ marginTop: 8, alignItems: "flex-start" }}
           >
-            <div>{feedback.msg}</div>
-            {feedback.details && feedback.details.length > 0 && (
-              <div style={{ marginTop: 4, fontSize: 12, fontFamily: "monospace", lineHeight: 1.5 }}>
-                {feedback.details.map((d, i) => (
-                  <div key={i}>{d}</div>
-                ))}
-              </div>
-            )}
+            {feedback.kind === "warn" && <AlertTriangleStrokeIcon size={15} />}
+            <div style={{ flex: 1 }}>
+              <div>{feedback.msg}</div>
+              {feedback.details && feedback.details.length > 0 && (
+                <div style={{ marginTop: 4, fontSize: 12, fontFamily: "monospace", lineHeight: 1.5 }}>
+                  {feedback.details.map((d, i) => (
+                    <div key={i}>{d}</div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
         <div className="modal-actions" style={{ marginTop: 12, justifyContent: "space-between" }}>
           <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={handleVerifyOnly}>
-              🔍 測試所有組別定位
+            <button
+              type="button"
+              onClick={handleVerifyAllFiles}
+              disabled={executing}
+              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+            >
+              <SearchCheckStrokeIcon size={14} />
+              測試所有檔案是否符合
             </button>
-            <button type="button" onClick={handleClearCurrent} title="清空當前組別輸入框以放入下一組">
+            <button
+              type="button"
+              onClick={handleClearCurrent}
+              disabled={executing}
+              title="僅清除當前正在檢視的這一組的定位代碼與取代代碼（保留智慧貼上區與原版代碼）"
+              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+            >
+              <EraserStrokeIcon size={14} />
               清空輸入框
             </button>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={onClose}>
+            <button type="button" onClick={onClose} disabled={executing}>
               關閉
             </button>
-            <button type="button" className="primary" onClick={() => void handleExecute()}>
-              ⚡ 套用取代（更新卡片代碼）
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void handleExecute()}
+              disabled={executing}
+              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+            >
+              <ZapStrokeIcon size={14} />
+              {executing
+                ? "寫入中…"
+                : isBoardMode
+                  ? "套用取代並寫入檔案"
+                  : "套用取代（更新卡片代碼）"}
             </button>
           </div>
         </div>

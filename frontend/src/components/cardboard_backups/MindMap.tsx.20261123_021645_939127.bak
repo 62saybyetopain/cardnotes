@@ -1,0 +1,1824 @@
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { api } from "../api";
+import type {
+  BoardSummary,
+  CardSummary,
+  MindMapData,
+  MindNode,
+  MindNodeChildrenMode,
+  MindNodeType,
+} from "../types";
+
+interface Props {
+  boardId: string | null;
+  isIpad?: boolean;
+  onSelectCard?(cardId: string): void;
+  onJumpBoard?(boardId: string): void;
+  onMutated?(): void | Promise<void>;
+  report(e: unknown, prefix?: string): void;
+  info?(text: string): void;
+}
+
+const ROOT_ID = "__root__";
+const H_GAP = 68;
+const V_GAP = 14;
+const DEFAULT_NODE_H = 38;
+const LEVEL_PAD_TOP_PX = 40; // 層級區塊上緣留給收合鈕的螢幕像素（不隨縮放變動）
+const LEVEL_PAD_BOTTOM_PX = 24;
+const MIN_SCALE = 0.25;
+const MAX_SCALE = 2.2;
+
+type DropSlot = "before" | "inside" | "after";
+
+interface LayoutNode {
+  id: string;
+  depth: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  node: MindNode | null;
+  parentId: string | null;
+  descendantCount: number;
+  hasChildren: boolean;
+}
+
+interface LayoutEdge {
+  id: string;
+  parentId: string;
+  childId: string;
+  childNode: MindNode;
+  d: string;
+  midX: number;
+  midY: number;
+}
+
+function isImeComposing(e: React.KeyboardEvent): boolean {
+  return e.nativeEvent.isComposing || e.keyCode === 229;
+}
+
+function StrokeIcon({ children, size = 16 }: { children: React.ReactNode; size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{ flexShrink: 0 }}
+    >
+      {children}
+    </svg>
+  );
+}
+
+export function MindMap({
+  boardId,
+  isIpad = false,
+  onSelectCard,
+  onJumpBoard,
+  onMutated,
+  report,
+  info,
+}: Props) {
+  const [data, setData] = useState<MindMapData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [hoistedNodeId, setHoistedNodeId] = useState<string | null>(null);
+  const [spotlightOn, setSpotlightOn] = useState(true);
+  const [hoverLevel, setHoverLevel] = useState<number | null>(null); // 游標目前所在的層級（只有滑鼠才會有）
+
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
+  const [editingEdgeNodeId, setEditingEdgeNodeId] = useState<string | null>(null);
+  const [editingEdgeText, setEditingEdgeText] = useState("");
+
+  const [deleteConfirmNode, setDeleteConfirmNode] = useState<{ node: MindNode; childCount: number } | null>(null);
+  const [refPickerOpen, setRefPickerOpen] = useState(false);
+  const [refTab, setRefTab] = useState<"card" | "board">("card");
+  const [refQuery, setRefQuery] = useState("");
+  const [cardCandidates, setCardCandidates] = useState<CardSummary[]>([]);
+  const [boardCandidates, setBoardCandidates] = useState<BoardSummary[]>([]);
+  const [refLoading, setRefLoading] = useState(false);
+
+  const [pan, setPan] = useState({ x: 48, y: 120 });
+  const [scale, setScale] = useState(1);
+  const panRef = useRef(pan);
+  panRef.current = pan;
+  const scaleRef = useRef(scale);
+  scaleRef.current = scale;
+
+  const [heights, setHeights] = useState<Record<string, number>>({});
+  const [widths, setWidths] = useState<Record<string, number>>({});
+  const nodeElsRef = useRef(new Map<string, HTMLElement>());
+  const pendingSizesRef = useRef<{ h: Record<string, number>; w: Record<string, number> } | null>(null);
+  const sizeRafRef = useRef<number | null>(null);
+
+  const stageRef = useRef<HTMLDivElement>(null);
+  const needInitialFitRef = useRef(false);
+  const seqRef = useRef(0);
+  const busyRef = useRef(false);
+
+  // 拖曳重排狀態
+  const [dragState, setDragState] = useState<{
+    draggedId: string;
+    clientX: number;
+    clientY: number;
+    targetId: string | null;
+    slot: DropSlot | null;
+  } | null>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const panGestureRef = useRef<{
+    startX: number;
+    startY: number;
+    origPanX: number;
+    origPanY: number;
+  } | null>(null);
+  const pinchGestureRef = useRef<{
+    startDist: number;
+    startScale: number;
+    midWorldX: number;
+    midWorldY: number;
+  } | null>(null);
+
+  const loadData = useCallback(
+    async (targetBoardId: string, fitAfter = false) => {
+      const my = ++seqRef.current;
+      setLoading(true);
+      try {
+        const res = await api.getMindMap(targetBoardId);
+        if (my !== seqRef.current) return;
+        setData(res);
+        if (fitAfter) needInitialFitRef.current = true;
+      } catch (e) {
+        if (my === seqRef.current) report(e, "載入心智圖失敗");
+      } finally {
+        if (my === seqRef.current) setLoading(false);
+      }
+    },
+    [report],
+  );
+
+  useEffect(() => {
+    setSelectedId(null);
+    setHoistedNodeId(null);
+    setEditingNodeId(null);
+    setEditingEdgeNodeId(null);
+    setDeleteConfirmNode(null);
+    setRefPickerOpen(false);
+    setHeights({});
+    setWidths({});
+    if (!boardId) {
+      setData(null);
+      return;
+    }
+    void loadData(boardId, true);
+  }, [boardId, loadData]);
+
+  // 若下鑽目標已不存在，退回全局
+  useEffect(() => {
+    if (!data || !hoistedNodeId) return;
+    if (!data.nodes.some((n) => n.id === hoistedNodeId)) {
+      setHoistedNodeId(null);
+    }
+  }, [data, hoistedNodeId]);
+
+  // ResizeObserver 量測多行節點實際尺寸並批次更新
+  const observerRef = useRef<ResizeObserver | null>(null);
+  if (!observerRef.current && typeof ResizeObserver !== "undefined") {
+    observerRef.current = new ResizeObserver((entries) => {
+      let changed = false;
+      const nextH: Record<string, number> = {};
+      const nextW: Record<string, number> = {};
+      for (const entry of entries) {
+        const id = (entry.target as HTMLElement).dataset.mmId;
+        if (!id) continue;
+        const rect = entry.target.getBoundingClientRect();
+        const curScale = scaleRef.current || 1;
+        const w = Math.round(rect.width / curScale);
+        const h = Math.round(rect.height / curScale);
+        if (w > 0 && h > 0) {
+          nextW[id] = w;
+          nextH[id] = h;
+          changed = true;
+        }
+      }
+      if (!changed) return;
+      const prev = pendingSizesRef.current ?? { h: {}, w: {} };
+      pendingSizesRef.current = {
+        h: { ...prev.h, ...nextH },
+        w: { ...prev.w, ...nextW },
+      };
+      if (sizeRafRef.current === null) {
+        sizeRafRef.current = requestAnimationFrame(() => {
+          sizeRafRef.current = null;
+          const batch = pendingSizesRef.current;
+          pendingSizesRef.current = null;
+          if (!batch) return;
+          setHeights((old) => {
+            let diff = false;
+            for (const [k, v] of Object.entries(batch.h)) {
+              if (Math.abs((old[k] ?? 0) - v) >= 1) {
+                diff = true;
+                break;
+              }
+            }
+            return diff ? { ...old, ...batch.h } : old;
+          });
+          setWidths((old) => {
+            let diff = false;
+            for (const [k, v] of Object.entries(batch.w)) {
+              if (Math.abs((old[k] ?? 0) - v) >= 1) {
+                diff = true;
+                break;
+              }
+            }
+            return diff ? { ...old, ...batch.w } : old;
+          });
+        });
+      }
+    });
+  }
+
+  useEffect(() => {
+    return () => {
+      observerRef.current?.disconnect();
+      if (sizeRafRef.current !== null) cancelAnimationFrame(sizeRafRef.current);
+      if (longPressTimerRef.current !== null) window.clearTimeout(longPressTimerRef.current);
+    };
+  }, []);
+
+  const bindNodeEl = useCallback((id: string, el: HTMLElement | null) => {
+    const obs = observerRef.current;
+    const prev = nodeElsRef.current.get(id);
+    if (prev && prev !== el) {
+      obs?.unobserve(prev);
+      nodeElsRef.current.delete(id);
+    }
+    if (el) {
+      el.dataset.mmId = id;
+      nodeElsRef.current.set(id, el);
+      obs?.observe(el);
+    }
+  }, []);
+
+  // 節點索引與子孫統計
+  const nodeMap = useMemo(() => {
+    const m = new Map<string, MindNode>();
+    for (const n of data?.nodes ?? []) m.set(n.id, n);
+    return m;
+  }, [data]);
+
+  const childrenMap = useMemo(() => {
+    const m = new Map<string | null, MindNode[]>();
+    for (const n of data?.nodes ?? []) {
+      const list = m.get(n.parent_id) ?? [];
+      list.push(n);
+      m.set(n.parent_id, list);
+    }
+    for (const list of m.values()) {
+      list.sort((a, b) => a.sort_order - b.sort_order || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+    }
+    return m;
+  }, [data]);
+
+  const descendantCountMap = useMemo(() => {
+    const counts = new Map<string, number>();
+    const countOf = (id: string, seen: Set<string>): number => {
+      if (counts.has(id)) return counts.get(id)!;
+      seen.add(id);
+      let sum = 0;
+      for (const ch of childrenMap.get(id) ?? []) {
+        if (!seen.has(ch.id)) {
+          sum += 1 + countOf(ch.id, seen);
+        }
+      }
+      counts.set(id, sum);
+      return sum;
+    };
+    for (const n of data?.nodes ?? []) {
+      countOf(n.id, new Set());
+    }
+    return counts;
+  }, [data, childrenMap]);
+
+  // 計算樹狀排版座標
+  const { layoutNodes, layoutEdges } = useMemo(() => {
+    if (!data) return { layoutNodes: [] as LayoutNode[], layoutEdges: [] as LayoutEdge[] };
+
+    const activeRootId = hoistedNodeId && nodeMap.has(hoistedNodeId) ? hoistedNodeId : ROOT_ID;
+    const rootChildrenParentKey: string | null = activeRootId === ROOT_ID ? null : activeRootId;
+
+    const getW = (id: string, depth: number) => widths[id] ?? (depth === 0 ? 156 : depth === 1 ? 168 : 148);
+    const getH = (id: string) => heights[id] ?? DEFAULT_NODE_H;
+
+    const subtreeSpan = new Map<string, number>();
+    const computeSpan = (id: string, parentKey: string | null, isHoistedRoot: boolean, seen: Set<string>): number => {
+      seen.add(id);
+      const selfH = getH(id);
+      const nodeObj = id === ROOT_ID ? null : nodeMap.get(id);
+      const collapsed = !isHoistedRoot && nodeObj?.collapsed === 1;
+      const kids = collapsed ? [] : (childrenMap.get(parentKey) ?? []);
+      if (kids.length === 0) {
+        subtreeSpan.set(id, selfH);
+        return selfH;
+      }
+      let total = 0;
+      for (let i = 0; i < kids.length; i++) {
+        const ch = kids[i];
+        if (seen.has(ch.id)) continue;
+        total += computeSpan(ch.id, ch.id, false, seen);
+        if (i > 0) total += V_GAP;
+      }
+      const span = Math.max(selfH, total);
+      subtreeSpan.set(id, span);
+      return span;
+    };
+
+    computeSpan(activeRootId, rootChildrenParentKey, true, new Set());
+
+    // 原因：子節點原本跟著各自父節點的右緣走，同一層的 x 會參差不齊，層級就畫不出乾淨的欄；
+    // 改成同一層共用同一個 x（＝前面各層最寬節點加間距），讓每一層成為一整欄
+    const maxWAtDepth: number[] = [];
+    const collectWidth = (id: string, parentKey: string | null, depth: number, isHoistedRoot: boolean, seen: Set<string>) => {
+      seen.add(id);
+      maxWAtDepth[depth] = Math.max(maxWAtDepth[depth] ?? 0, getW(id, depth));
+      const nodeObj = id === ROOT_ID ? null : nodeMap.get(id);
+      if (!isHoistedRoot && nodeObj?.collapsed === 1) return;
+      for (const ch of childrenMap.get(parentKey) ?? []) {
+        if (seen.has(ch.id)) continue;
+        collectWidth(ch.id, ch.id, depth + 1, false, seen);
+      }
+    };
+    collectWidth(activeRootId, rootChildrenParentKey, 0, true, new Set());
+    const colX: number[] = [];
+    let colAcc = 0;
+    for (let d = 0; d < maxWAtDepth.length; d++) {
+      colX[d] = colAcc;
+      colAcc += (maxWAtDepth[d] ?? 0) + H_GAP;
+    }
+
+    const nodesOut: LayoutNode[] = [];
+    const edgesOut: LayoutEdge[] = [];
+
+    const place = (
+      id: string,
+      parentKey: string | null,
+      depth: number,
+      x: number,
+      topY: number,
+      isHoistedRoot: boolean,
+      seen: Set<string>,
+    ) => {
+      seen.add(id);
+      const w = getW(id, depth);
+      const h = getH(id);
+      const span = subtreeSpan.get(id) ?? h;
+      const y = topY + (span - h) / 2;
+      const nodeObj = id === ROOT_ID ? null : (nodeMap.get(id) ?? null);
+      const rawKids = childrenMap.get(parentKey) ?? [];
+      const descCount =
+        id === ROOT_ID
+          ? (data.nodes.length)
+          : (descendantCountMap.get(id) ?? 0);
+
+      nodesOut.push({
+        id,
+        depth,
+        x,
+        y,
+        w,
+        h,
+        node: nodeObj,
+        parentId: nodeObj?.parent_id ?? null,
+        descendantCount: descCount,
+        hasChildren: rawKids.length > 0,
+      });
+
+      const collapsed = !isHoistedRoot && nodeObj?.collapsed === 1;
+      const visibleKids = collapsed ? [] : rawKids;
+      if (visibleKids.length === 0) return;
+
+      let kidsTotal = 0;
+      for (let i = 0; i < visibleKids.length; i++) {
+        kidsTotal += subtreeSpan.get(visibleKids[i].id) ?? getH(visibleKids[i].id);
+        if (i > 0) kidsTotal += V_GAP;
+      }
+
+      let curY = topY + (span - kidsTotal) / 2;
+      const childX = colX[depth + 1] ?? x + w + H_GAP;
+      const pRightX = x + w;
+      const pCenterY = y + h / 2;
+
+      for (const ch of visibleKids) {
+        if (seen.has(ch.id)) continue;
+        const chSpan = subtreeSpan.get(ch.id) ?? getH(ch.id);
+        const chH = getH(ch.id);
+        const chY = curY + (chSpan - chH) / 2;
+        const cCenterY = chY + chH / 2;
+        const ctrlX = pRightX + (childX - pRightX) * 0.5;
+        const d = `M ${pRightX} ${pCenterY} C ${ctrlX} ${pCenterY}, ${ctrlX} ${cCenterY}, ${childX} ${cCenterY}`;
+        edgesOut.push({
+          id: `${id}->${ch.id}`,
+          parentId: id,
+          childId: ch.id,
+          childNode: ch,
+          d,
+          midX: (pRightX + childX) / 2,
+          midY: (pCenterY + cCenterY) / 2,
+        });
+        place(ch.id, ch.id, depth + 1, childX, curY, false, seen);
+        curY += chSpan + V_GAP;
+      }
+    };
+
+    const totalSpan = subtreeSpan.get(activeRootId) ?? DEFAULT_NODE_H;
+    place(activeRootId, rootChildrenParentKey, 0, 0, -totalSpan / 2, true, new Set());
+
+    return { layoutNodes: nodesOut, layoutEdges: edgesOut };
+  }, [data, hoistedNodeId, nodeMap, childrenMap, descendantCountMap, widths, heights]);
+
+  // 層級區塊：每一層（不含根）一欄。left／right 取相鄰兩欄的中線，所以各欄首尾相接、不重疊；
+  // targets＝這一層裡有子節點的節點，收合鈕只動它們
+  const levelBands = useMemo(() => {
+    const cols = new Map<number, { minX: number; maxX: number; nodes: LayoutNode[] }>();
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const ln of layoutNodes) {
+      minY = Math.min(minY, ln.y);
+      maxY = Math.max(maxY, ln.y + ln.h);
+      const c = cols.get(ln.depth) ?? { minX: Infinity, maxX: -Infinity, nodes: [] };
+      c.minX = Math.min(c.minX, ln.x);
+      c.maxX = Math.max(c.maxX, ln.x + ln.w);
+      c.nodes.push(ln);
+      cols.set(ln.depth, c);
+    }
+    return Array.from(cols.keys())
+      .filter((d) => d >= 1)
+      .sort((a, b) => a - b)
+      .map((d) => {
+        const c = cols.get(d)!;
+        const prevMax = cols.get(d - 1)?.maxX;
+        const nextMin = cols.get(d + 1)?.minX;
+        const targets = c.nodes.filter((ln) => ln.node !== null && ln.hasChildren);
+        return {
+          depth: d,
+          left: prevMax !== undefined ? (prevMax + c.minX) / 2 : c.minX - H_GAP / 2,
+          right: nextMin !== undefined ? (c.maxX + nextMin) / 2 : c.maxX + H_GAP / 2,
+          top: minY,
+          bottom: maxY,
+          targets,
+          anyExpanded: targets.some((ln) => ln.node?.collapsed !== 1),
+        };
+      });
+  }, [layoutNodes]);
+
+  // 適配全局視圖
+  const fitView = useCallback(() => {
+    const stage = stageRef.current;
+    if (!stage || layoutNodes.length === 0) return;
+    const rect = stage.getBoundingClientRect();
+    const vw = rect.width || 640;
+    const vh = rect.height || 360;
+    const pad = 48;
+
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const ln of layoutNodes) {
+      minX = Math.min(minX, ln.x);
+      minY = Math.min(minY, ln.y);
+      maxX = Math.max(maxX, ln.x + ln.w);
+      maxY = Math.max(maxY, ln.y + ln.h);
+    }
+    const bw = Math.max(120, maxX - minX);
+    const bh = Math.max(80, maxY - minY);
+    const nextScale = Math.max(MIN_SCALE, Math.min(1.15, Math.min((vw - pad * 2) / bw, (vh - pad * 2) / bh)));
+    const nextX = vw / 2 - (minX + bw / 2) * nextScale;
+    const nextY = vh / 2 - (minY + bh / 2) * nextScale;
+    setScale(nextScale);
+    setPan({ x: nextX, y: nextY });
+  }, [layoutNodes]);
+
+  useLayoutEffect(() => {
+    if (needInitialFitRef.current && layoutNodes.length > 0) {
+      needInitialFitRef.current = false;
+      fitView();
+    }
+  }, [layoutNodes, fitView]);
+
+  // 路徑聚光燈集合（根 -> 選取節點 -> 其子樹）
+  const spotlightSet = useMemo(() => {
+    if (!spotlightOn || !selectedId || selectedId === ROOT_ID) return null;
+    if (!nodeMap.has(selectedId)) return null;
+    const lit = new Set<string>([ROOT_ID, selectedId]);
+    let cur = nodeMap.get(selectedId)?.parent_id ?? null;
+    const seenAnc = new Set<string>([selectedId]);
+    while (cur && !seenAnc.has(cur)) {
+      seenAnc.add(cur);
+      lit.add(cur);
+      cur = nodeMap.get(cur)?.parent_id ?? null;
+    }
+    const walkDesc = (id: string) => {
+      for (const ch of childrenMap.get(id) ?? []) {
+        if (!lit.has(ch.id)) {
+          lit.add(ch.id);
+          walkDesc(ch.id);
+        }
+      }
+    };
+    walkDesc(selectedId);
+    return lit;
+  }, [spotlightOn, selectedId, nodeMap, childrenMap]);
+
+  // 分支下鑽麵包屑
+  const hoistBreadcrumbs = useMemo(() => {
+    if (!data || !hoistedNodeId) return [];
+    const chain: { id: string | null; label: string }[] = [];
+    let cur: string | null = hoistedNodeId;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      const n = nodeMap.get(cur);
+      if (!n) break;
+      const label = n.text.trim() || n.ref_title || n.ref_title_snapshot || "（未命名分支）";
+      chain.unshift({ id: n.id, label });
+      cur = n.parent_id;
+    }
+    chain.unshift({ id: null, label: data.display_title });
+    return chain;
+  }, [data, hoistedNodeId, nodeMap]);
+
+  // CRUD 操作封装
+  const applyMutation = useCallback(
+    async (fn: () => Promise<MindMapData>, after?: (next: MindMapData) => void) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      try {
+        const next = await fn();
+        setData(next);
+        after?.(next);
+        await onMutated?.();
+      } catch (e) {
+        report(e, "心智圖操作失敗");
+      } finally {
+        busyRef.current = false;
+      }
+    },
+    [onMutated, report],
+  );
+
+  const startEditNode = useCallback(
+    (id: string) => {
+      if (!data) return;
+      setEditingEdgeNodeId(null);
+      setEditingNodeId(id);
+      if (id === ROOT_ID) {
+        setEditingText(data.mindmap_title);
+      } else {
+        const n = nodeMap.get(id);
+        setEditingText(n?.text ?? "");
+      }
+    },
+    [data, nodeMap],
+  );
+
+  const commitEditNode = useCallback(async () => {
+    if (!boardId || !editingNodeId) return;
+    const targetId = editingNodeId;
+    const val = editingText;
+    setEditingNodeId(null);
+    if (targetId === ROOT_ID) {
+      if (data && val.trim() === data.mindmap_title) return;
+      await applyMutation(() => api.patchMindMapTitle(boardId, val));
+    } else {
+      const cur = nodeMap.get(targetId);
+      if (!cur || cur.text === val) return;
+      await applyMutation(() => api.patchMindNode(boardId, targetId, { text: val }));
+    }
+  }, [boardId, editingNodeId, editingText, data, nodeMap, applyMutation]);
+
+  const startEditEdge = useCallback(
+    (nodeId: string) => {
+      if (nodeId === ROOT_ID) return;
+      const n = nodeMap.get(nodeId);
+      if (!n) return;
+      setEditingNodeId(null);
+      setEditingEdgeNodeId(nodeId);
+      setEditingEdgeText(n.edge_label);
+    },
+    [nodeMap],
+  );
+
+  const commitEditEdge = useCallback(async () => {
+    if (!boardId || !editingEdgeNodeId) return;
+    const targetId = editingEdgeNodeId;
+    const val = editingEdgeText.trim();
+    setEditingEdgeNodeId(null);
+    const cur = nodeMap.get(targetId);
+    if (!cur || cur.edge_label === val) return;
+    await applyMutation(() => api.patchMindNode(boardId, targetId, { edge_label: val }));
+  }, [boardId, editingEdgeNodeId, editingEdgeText, nodeMap, applyMutation]);
+
+  const handleAddChild = useCallback(
+    async (baseId?: string | null) => {
+      if (!boardId || !data) return;
+      const anchorId = baseId !== undefined ? baseId : selectedId;
+      const parentId =
+        anchorId && anchorId !== ROOT_ID && nodeMap.has(anchorId)
+          ? anchorId
+          : (hoistedNodeId && nodeMap.has(hoistedNodeId) ? hoistedNodeId : null);
+
+      const prevIds = new Set(data.nodes.map((n) => n.id));
+      await applyMutation(
+        async () => {
+          if (parentId && nodeMap.get(parentId)?.collapsed === 1) {
+            await api.patchMindNode(boardId, parentId, { collapsed: 0 });
+          }
+          return api.createMindNode(boardId, { parent_id: parentId, type: "text", text: "" });
+        },
+        (next) => {
+          const created = next.nodes.find((n) => !prevIds.has(n.id));
+          if (created) {
+            setSelectedId(created.id);
+            setEditingNodeId(created.id);
+            setEditingText("");
+          }
+        },
+      );
+    },
+    [boardId, data, selectedId, nodeMap, hoistedNodeId, applyMutation],
+  );
+
+  const handleAddSibling = useCallback(
+    async (baseId?: string | null) => {
+      if (!boardId || !data) return;
+      const anchorId = baseId !== undefined ? baseId : selectedId;
+      if (!anchorId || anchorId === ROOT_ID || anchorId === hoistedNodeId) {
+        await handleAddChild(anchorId);
+        return;
+      }
+      const target = nodeMap.get(anchorId);
+      if (!target) {
+        await handleAddChild(null);
+        return;
+      }
+      const sibs = childrenMap.get(target.parent_id) ?? [];
+      const idx = sibs.findIndex((s) => s.id === target.id);
+      const pos = idx >= 0 ? idx + 1 : sibs.length;
+      const prevIds = new Set(data.nodes.map((n) => n.id));
+
+      await applyMutation(
+        () => api.createMindNode(boardId, { parent_id: target.parent_id, type: "text", text: "", position: pos }),
+        (next) => {
+          const created = next.nodes.find((n) => !prevIds.has(n.id));
+          if (created) {
+            setSelectedId(created.id);
+            setEditingNodeId(created.id);
+            setEditingText("");
+          }
+        },
+      );
+    },
+    [boardId, data, selectedId, hoistedNodeId, nodeMap, childrenMap, handleAddChild, applyMutation],
+  );
+
+  const handleDeleteRequest = useCallback(
+    async (targetId?: string | null) => {
+      if (!boardId) return;
+      const id = targetId !== undefined ? targetId : selectedId;
+      if (!id || id === ROOT_ID) return;
+      const target = nodeMap.get(id);
+      if (!target) return;
+      const childCount = descendantCountMap.get(id) ?? 0;
+      if (childCount > 0) {
+        setDeleteConfirmNode({ node: target, childCount });
+        return;
+      }
+      await applyMutation(
+        () => api.deleteMindNode(boardId, id, "block"),
+        () => {
+          if (selectedId === id) setSelectedId(target.parent_id ?? ROOT_ID);
+          if (hoistedNodeId === id) setHoistedNodeId(target.parent_id);
+        },
+      );
+    },
+    [boardId, selectedId, nodeMap, descendantCountMap, applyMutation, hoistedNodeId],
+  );
+
+  const confirmDeleteWithMode = async (mode: MindNodeChildrenMode) => {
+    if (!boardId || !deleteConfirmNode) return;
+    const { node } = deleteConfirmNode;
+    setDeleteConfirmNode(null);
+    await applyMutation(
+      () => api.deleteMindNode(boardId, node.id, mode),
+      () => {
+        if (selectedId === node.id) setSelectedId(node.parent_id ?? ROOT_ID);
+        if (hoistedNodeId === node.id) setHoistedNodeId(node.parent_id);
+      },
+    );
+  };
+
+  // 層級展開控制（1 層｜2 層｜全展開）
+  const applyExpandLevel = async (level: 1 | 2 | "all") => {
+    if (!boardId || !data) return;
+    const depthMap = new Map<string, number>();
+    const assignDepth = (parentKey: string | null, d: number, seen: Set<string>) => {
+      for (const ch of childrenMap.get(parentKey) ?? []) {
+        if (seen.has(ch.id)) continue;
+        seen.add(ch.id);
+        depthMap.set(ch.id, d);
+        assignDepth(ch.id, d + 1, seen);
+      }
+    };
+    assignDepth(null, 1, new Set());
+
+    const updates: { id: string; collapsed: 0 | 1 }[] = [];
+    for (const n of data.nodes) {
+      const hasKids = (childrenMap.get(n.id)?.length ?? 0) > 0;
+      if (!hasKids) continue;
+      const d = depthMap.get(n.id) ?? 1;
+      const wantCollapsed: 0 | 1 =
+        level === "all" ? 0 : level === 1 ? (d >= 1 ? 1 : 0) : (d >= 2 ? 1 : 0);
+      if (n.collapsed !== wantCollapsed) {
+        updates.push({ id: n.id, collapsed: wantCollapsed });
+      }
+    }
+    if (updates.length === 0) {
+      fitView();
+      return;
+    }
+
+    await applyMutation(() => api.patchMindNodesCollapsed(boardId, updates));
+  };
+
+  // 掛載卡片／白板挑選器搜尋
+  useEffect(() => {
+    if (!refPickerOpen) return;
+    let alive = true;
+    setRefLoading(true);
+    if (refTab === "card") {
+      api
+        .listCards({ q: refQuery.trim() || undefined, limit: 30 })
+        .then((r) => alive && setCardCandidates(r.items))
+        .catch((e) => alive && report(e, "載入卡片清單失敗"))
+        .finally(() => alive && setRefLoading(false));
+    } else {
+      api
+        .listBoards()
+        .then((r) => {
+          if (!alive) return;
+          const kw = refQuery.trim().toLowerCase();
+          const active = r.boards.filter((b) => !b.question?.archived_at);
+          setBoardCandidates(
+            kw
+              ? active.filter(
+                  (b) =>
+                    b.name.toLowerCase().includes(kw) ||
+                    (b.mindmap_title ?? "").toLowerCase().includes(kw),
+                )
+              : active,
+          );
+        })
+        .catch((e) => alive && report(e, "載入白板清單失敗"))
+        .finally(() => alive && setRefLoading(false));
+    }
+    return () => {
+      alive = false;
+    };
+  }, [refPickerOpen, refTab, refQuery, report]);
+
+  const attachReferenceNode = async (type: MindNodeType, refId: string) => {
+    if (!boardId || !data) return;
+    const parentId =
+      selectedId && selectedId !== ROOT_ID && nodeMap.has(selectedId)
+        ? selectedId
+        : (hoistedNodeId && nodeMap.has(hoistedNodeId) ? hoistedNodeId : null);
+    const prevIds = new Set(data.nodes.map((n) => n.id));
+    setRefPickerOpen(false);
+    setRefQuery("");
+    await applyMutation(
+      async () => {
+        if (parentId && nodeMap.get(parentId)?.collapsed === 1) {
+          await api.patchMindNode(boardId, parentId, { collapsed: 0 });
+        }
+        return api.createMindNode(boardId, { parent_id: parentId, type, ref_id: refId, text: "" });
+      },
+      (next) => {
+        info?.(type === "card" ? "已掛載卡片節點" : "已掛載白板／問題節點");
+        const created = next.nodes.find((n) => !prevIds.has(n.id));
+        if (created) setSelectedId(created.id);
+      },
+    );
+  };
+
+  // 鍵盤操作（Tab / Enter / Alt+Enter / F2 / L / 方向鍵 / Delete / Esc）
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (editingNodeId || editingEdgeNodeId || deleteConfirmNode || refPickerOpen) return;
+    if (isImeComposing(e)) return;
+
+    if (e.key === "Escape") {
+      if (hoistedNodeId) {
+        e.preventDefault();
+        const cur = nodeMap.get(hoistedNodeId);
+        setHoistedNodeId(cur?.parent_id ?? null);
+        needInitialFitRef.current = true;
+      } else if (selectedId) {
+        e.preventDefault();
+        setSelectedId(null);
+      }
+      return;
+    }
+
+    if (e.key === "Tab") {
+      e.preventDefault();
+      void handleAddChild(selectedId);
+      return;
+    }
+
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (e.altKey && selectedId && selectedId !== ROOT_ID && selectedId !== hoistedNodeId) {
+        setHoistedNodeId(selectedId);
+        needInitialFitRef.current = true;
+      } else {
+        void handleAddSibling(selectedId);
+      }
+      return;
+    }
+
+    if (e.key === "F2" && selectedId) {
+      e.preventDefault();
+      startEditNode(selectedId);
+      return;
+    }
+
+    if ((e.key === "l" || e.key === "L") && selectedId && selectedId !== ROOT_ID) {
+      e.preventDefault();
+      startEditEdge(selectedId);
+      return;
+    }
+
+    if ((e.key === "Delete" || e.key === "Backspace") && selectedId && selectedId !== ROOT_ID) {
+      e.preventDefault();
+      void handleDeleteRequest(selectedId);
+      return;
+    }
+
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
+      e.preventDefault();
+      const visibleMap = new Map(layoutNodes.map((ln) => [ln.id, ln]));
+      const activeRoot = hoistedNodeId && visibleMap.has(hoistedNodeId) ? hoistedNodeId : ROOT_ID;
+      if (!selectedId || !visibleMap.has(selectedId)) {
+        setSelectedId(activeRoot);
+        return;
+      }
+      const curLn = visibleMap.get(selectedId)!;
+      if (e.key === "ArrowLeft") {
+        if (selectedId === activeRoot) return;
+        const parentKey = curLn.parentId ?? ROOT_ID;
+        if (visibleMap.has(parentKey)) setSelectedId(parentKey);
+      } else if (e.key === "ArrowRight") {
+        if (curLn.node && curLn.node.collapsed === 1 && curLn.hasChildren && boardId) {
+          void applyMutation(() => api.patchMindNode(boardId, curLn.id, { collapsed: 0 }));
+          return;
+        }
+        const parentKey = curLn.id === ROOT_ID ? null : curLn.id;
+        const kids = (childrenMap.get(parentKey) ?? []).filter((k) => visibleMap.has(k.id));
+        if (kids.length > 0) setSelectedId(kids[0].id);
+      } else {
+        const sameDepth = layoutNodes
+          .filter((ln) => ln.depth === curLn.depth)
+          .sort((a, b) => a.y - b.y);
+        const idx = sameDepth.findIndex((ln) => ln.id === curLn.id);
+        if (idx >= 0) {
+          const nextIdx = e.key === "ArrowUp" ? idx - 1 : idx + 1;
+          if (nextIdx >= 0 && nextIdx < sameDepth.length) {
+            setSelectedId(sameDepth[nextIdx].id);
+          }
+        }
+      }
+    }
+  };
+
+  // 節點單擊選取（卡片參照同步於右側欄開啟卡片詳情，不離開心智圖）
+  const handleSelectNode = (ln: LayoutNode) => {
+    setSelectedId(ln.id);
+    if (ln.node && ln.node.type === "card" && ln.node.ref_id && ln.node.ref_status === "ok") {
+      onSelectCard?.(ln.node.ref_id);
+    }
+  };
+
+  // 計算拖曳放置目標與上／中／下三段插槽
+  const evaluateDropTarget = useCallback(
+    (draggedId: string, clientX: number, clientY: number): { targetId: string | null; slot: DropSlot | null } => {
+      const stage = stageRef.current;
+      if (!stage) return { targetId: null, slot: null };
+      const rect = stage.getBoundingClientRect();
+      const wx = (clientX - rect.left - panRef.current.x) / scaleRef.current;
+      const wy = (clientY - rect.top - panRef.current.y) / scaleRef.current;
+
+      const forbidden = new Set<string>([draggedId]);
+      const collectDesc = (id: string) => {
+        for (const ch of childrenMap.get(id) ?? []) {
+          if (!forbidden.has(ch.id)) {
+            forbidden.add(ch.id);
+            collectDesc(ch.id);
+          }
+        }
+      };
+      collectDesc(draggedId);
+
+      for (const ln of layoutNodes) {
+        if (forbidden.has(ln.id)) continue;
+        if (wx >= ln.x - 6 && wx <= ln.x + ln.w + 6 && wy >= ln.y - 6 && wy <= ln.y + ln.h + 6) {
+          if (ln.id === ROOT_ID || ln.id === hoistedNodeId) {
+            return { targetId: ln.id, slot: "inside" };
+          }
+          const relY = (wy - ln.y) / Math.max(1, ln.h);
+          if (relY < 0.28) return { targetId: ln.id, slot: "before" };
+          if (relY > 0.72) return { targetId: ln.id, slot: "after" };
+          return { targetId: ln.id, slot: "inside" };
+        }
+      }
+      return { targetId: null, slot: null };
+    },
+    [childrenMap, layoutNodes, hoistedNodeId],
+  );
+
+  const commitDropMove = useCallback(
+    async (draggedId: string, targetId: string, slot: DropSlot) => {
+      if (!boardId) return;
+      if (targetId === ROOT_ID || targetId === hoistedNodeId || slot === "inside") {
+        const newParentId = targetId === ROOT_ID ? null : targetId;
+        const sibs = (childrenMap.get(newParentId) ?? []).filter((s) => s.id !== draggedId);
+        await applyMutation(async () => {
+          if (newParentId && nodeMap.get(newParentId)?.collapsed === 1) {
+            await api.patchMindNode(boardId, newParentId, { collapsed: 0 });
+          }
+          return api.moveMindNode(boardId, draggedId, { parent_id: newParentId, position: sibs.length });
+        });
+        return;
+      }
+      const targetNode = nodeMap.get(targetId);
+      if (!targetNode) return;
+      const newParentId = targetNode.parent_id;
+      const sibsExcludingDragged = (childrenMap.get(newParentId) ?? []).filter((s) => s.id !== draggedId);
+      const targetIdx = sibsExcludingDragged.findIndex((s) => s.id === targetId);
+      const pos = targetIdx < 0 ? sibsExcludingDragged.length : slot === "before" ? targetIdx : targetIdx + 1;
+      await applyMutation(() => api.moveMindNode(boardId, draggedId, { parent_id: newParentId, position: pos }));
+    },
+    [boardId, hoistedNodeId, childrenMap, nodeMap, applyMutation],
+  );
+
+  // 背景平移與雙指縮放 PointerEvent 處理
+  const onStagePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    if ((e.target as HTMLElement).closest(".mindmap-node, .mindmap-edge-label, .mindmap-toolbar, .mindmap-floating-bar, .mindmap-modal")) {
+      return;
+    }
+    stageRef.current?.focus();
+    setSelectedId(null);
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    e.currentTarget.setPointerCapture(e.pointerId);
+
+    if (pointersRef.current.size === 1) {
+      panGestureRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        origPanX: panRef.current.x,
+        origPanY: panRef.current.y,
+      };
+      pinchGestureRef.current = null;
+    } else if (pointersRef.current.size === 2) {
+      const pts = Array.from(pointersRef.current.values());
+      const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      const rect = stageRef.current?.getBoundingClientRect();
+      const midScreenX = (pts[0].x + pts[1].x) / 2 - (rect?.left ?? 0);
+      const midScreenY = (pts[0].y + pts[1].y) / 2 - (rect?.top ?? 0);
+      pinchGestureRef.current = {
+        startDist: Math.max(10, dist),
+        startScale: scaleRef.current,
+        midWorldX: (midScreenX - panRef.current.x) / scaleRef.current,
+        midWorldY: (midScreenY - panRef.current.y) / scaleRef.current,
+      };
+      panGestureRef.current = null;
+    }
+  };
+
+  const onStagePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (dragState) {
+      const { targetId, slot } = evaluateDropTarget(dragState.draggedId, e.clientX, e.clientY);
+      setDragState({ draggedId: dragState.draggedId, clientX: e.clientX, clientY: e.clientY, targetId, slot });
+      return;
+    }
+    if (!pointersRef.current.has(e.pointerId)) return;
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (pointersRef.current.size === 2 && pinchGestureRef.current) {
+      const pts = Array.from(pointersRef.current.values());
+      const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      const nextScale = Math.max(
+        MIN_SCALE,
+        Math.min(MAX_SCALE, pinchGestureRef.current.startScale * (dist / pinchGestureRef.current.startDist)),
+      );
+      const rect = stageRef.current?.getBoundingClientRect();
+      const midScreenX = (pts[0].x + pts[1].x) / 2 - (rect?.left ?? 0);
+      const midScreenY = (pts[0].y + pts[1].y) / 2 - (rect?.top ?? 0);
+      setScale(nextScale);
+      setPan({
+        x: midScreenX - pinchGestureRef.current.midWorldX * nextScale,
+        y: midScreenY - pinchGestureRef.current.midWorldY * nextScale,
+      });
+    } else if (pointersRef.current.size === 1 && panGestureRef.current) {
+      const dx = e.clientX - panGestureRef.current.startX;
+      const dy = e.clientY - panGestureRef.current.startY;
+      setPan({ x: panGestureRef.current.origPanX + dx, y: panGestureRef.current.origPanY + dy });
+    }
+  };
+
+  const onStagePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    if (dragState) {
+      const { draggedId, targetId, slot } = dragState;
+      setDragState(null);
+      if (targetId && slot) {
+        void commitDropMove(draggedId, targetId, slot);
+      }
+      return;
+    }
+    pointersRef.current.delete(e.pointerId);
+    if (pointersRef.current.size === 0) {
+      panGestureRef.current = null;
+      pinchGestureRef.current = null;
+    }
+  };
+
+  // 游標所在層級：把螢幕座標換算成世界座標，落在哪一欄就是哪一層（游標在節點上方也算）。
+  // 拖曳、按住平移、觸控時不顯示，避免畫面在操作中跳動
+  const updateHoverLevel = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType !== "mouse" || e.buttons !== 0 || dragState) {
+      setHoverLevel((prev) => (prev === null ? prev : null));
+      return;
+    }
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const s = scaleRef.current || 1;
+    const wx = (e.clientX - rect.left - panRef.current.x) / s;
+    const wy = (e.clientY - rect.top - panRef.current.y) / s;
+    const hit = levelBands.find(
+      (b) =>
+        wx >= b.left &&
+        wx <= b.right &&
+        wy >= b.top - LEVEL_PAD_TOP_PX / s &&
+        wy <= b.bottom + LEVEL_PAD_BOTTOM_PX / s,
+    );
+    const next = hit ? hit.depth : null;
+    setHoverLevel((prev) => (prev === next ? prev : next));
+  };
+
+  // 這一層只要有任何一個節點是展開的，就一次全收合（它們底下的子孫自然跟著隱藏）；全都已收合時改為一次展開這一層
+  const toggleLevelCollapse = (band: (typeof levelBands)[number]) => {
+    if (!boardId) return;
+    const want: 0 | 1 = band.anyExpanded ? 1 : 0;
+    const items = band.targets
+      .filter((ln) => (ln.node?.collapsed ?? 0) !== want)
+      .map((ln) => ({ id: ln.id, collapsed: want }));
+    if (items.length === 0) return;
+    void applyMutation(() => api.patchMindNodesCollapsed(boardId, items));
+  };
+
+  // 觸控裝置沒有懸浮：改用目前選取節點所在的層級
+  const activeLevel =
+    hoverLevel ?? (isIpad && selectedId ? (layoutNodes.find((ln) => ln.id === selectedId)?.depth ?? null) : null);
+  const activeBand = levelBands.find((b) => b.depth === activeLevel) ?? null;
+
+  const onStageWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const rect = stageRef.current?.getBoundingClientRect();
+    const sx = e.clientX - (rect?.left ?? 0);
+    const sy = e.clientY - (rect?.top ?? 0);
+    const factor = e.deltaY < 0 ? 1.1 : 0.91;
+    const nextScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scaleRef.current * factor));
+    const wx = (sx - panRef.current.x) / scaleRef.current;
+    const wy = (sy - panRef.current.y) / scaleRef.current;
+    setScale(nextScale);
+    setPan({ x: sx - wx * nextScale, y: sy - wy * nextScale });
+  };
+
+  const startNodeDrag = (nodeId: string, clientX: number, clientY: number) => {
+    if (nodeId === ROOT_ID || nodeId === hoistedNodeId) return;
+    setSelectedId(nodeId);
+    setDragState({ draggedId: nodeId, clientX, clientY, targetId: null, slot: null });
+  };
+
+  if (!boardId) {
+    return <div className="empty">請先選擇一塊白板以檢視心智圖</div>;
+  }
+
+  const selectedNode = selectedId && selectedId !== ROOT_ID ? (nodeMap.get(selectedId) ?? null) : null;
+  const canHoistSelected = Boolean(selectedId && selectedId !== ROOT_ID && selectedId !== hoistedNodeId);
+
+  return (
+    <div className="mindmap-wrap" tabIndex={0} onKeyDown={handleKeyDown} aria-label="心智圖畫布">
+      {/* 頂部精簡工具列 */}
+      <div className="mindmap-toolbar" role="toolbar" aria-label="心智圖工具列">
+        <div className="mindmap-tool-group">
+          <button type="button" onClick={() => void handleAddChild(selectedId)} title="新增子節點 (Tab)">
+            <StrokeIcon size={14}>
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </StrokeIcon>
+            <span>子節點</span>
+          </button>
+          <button
+            type="button"
+            disabled={!selectedId || selectedId === ROOT_ID || selectedId === hoistedNodeId}
+            onClick={() => void handleAddSibling(selectedId)}
+            title="新增同層節點 (Enter)"
+          >
+            <StrokeIcon size={14}>
+              <polyline points="9 10 4 15 9 20" />
+              <path d="M20 4v7a4 4 0 0 1-4 4H4" />
+            </StrokeIcon>
+            <span>同層</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setRefTab("card");
+              setRefQuery("");
+              setRefPickerOpen(true);
+            }}
+            title="掛載既有卡片或白板／問題節點"
+          >
+            <StrokeIcon size={14}>
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+            </StrokeIcon>
+            <span>掛卡片／問題</span>
+          </button>
+          <button
+            type="button"
+            disabled={!selectedNode}
+            onClick={() => selectedNode && startEditEdge(selectedNode.id)}
+            title="編輯父子連線標籤 (L)"
+          >
+            <StrokeIcon size={14}>
+              <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
+              <line x1="7" y1="7" x2="7.01" y2="7" />
+            </StrokeIcon>
+            <span>連線標籤</span>
+          </button>
+        </div>
+
+        <span className="mindmap-tool-sep" aria-hidden="true" />
+
+        {/* 焦點三件組：層級展開控制 + 路徑聚光燈 + 分支下鑽 */}
+        <div className="mindmap-tool-group" role="group" aria-label="層級展開控制">
+          <button type="button" onClick={() => void applyExpandLevel(1)} title="只展開第 1 層">
+            1 層
+          </button>
+          <button type="button" onClick={() => void applyExpandLevel(2)} title="展開至第 2 層">
+            2 層
+          </button>
+          <button type="button" onClick={() => void applyExpandLevel("all")} title="展開全部節點">
+            全展開
+          </button>
+          <button type="button" onClick={fitView} title="縮放並置中顯示全局">
+            <StrokeIcon size={14}>
+              <polyline points="15 3 21 3 21 9" />
+              <polyline points="9 21 3 21 3 15" />
+              <line x1="21" y1="3" x2="14" y2="10" />
+              <line x1="3" y1="21" x2="10" y2="14" />
+            </StrokeIcon>
+            <span>適配全局</span>
+          </button>
+        </div>
+
+        <div className="mindmap-tool-group">
+          <button
+            type="button"
+            className={spotlightOn ? "on" : ""}
+            aria-pressed={spotlightOn}
+            onClick={() => setSpotlightOn((v) => !v)}
+            title="路徑聚光燈：高亮「根 → 目前節點 → 其子樹」，淡化其餘分支"
+          >
+            <StrokeIcon size={14}>
+              <circle cx="12" cy="12" r="5" />
+              <line x1="12" y1="1" x2="12" y2="3" />
+              <line x1="12" y1="21" x2="12" y2="23" />
+              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+              <line x1="1" y1="12" x2="3" y2="12" />
+              <line x1="21" y1="12" x2="23" y2="12" />
+            </StrokeIcon>
+            <span>聚光燈</span>
+          </button>
+          <button
+            type="button"
+            disabled={!canHoistSelected}
+            onClick={() => {
+              if (canHoistSelected && selectedId) {
+                setHoistedNodeId(selectedId);
+                needInitialFitRef.current = true;
+              }
+            }}
+            title="聚焦此支：將選取分支暫時置中為根重排 (Alt+Enter)"
+          >
+            <StrokeIcon size={14}>
+              <circle cx="11" cy="11" r="8" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              <line x1="11" y1="8" x2="11" y2="14" />
+              <line x1="8" y1="11" x2="14" y2="11" />
+            </StrokeIcon>
+            <span>聚焦此支</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 分支下鑽麵包屑 */}
+      {hoistedNodeId && hoistBreadcrumbs.length > 0 && (
+        <nav className="mindmap-breadcrumb" aria-label="分支聚焦路徑">
+          {hoistBreadcrumbs.map((crumb, idx) => {
+            const isLast = idx === hoistBreadcrumbs.length - 1;
+            return (
+              <span key={crumb.id ?? ROOT_ID} className="mindmap-crumb-item">
+                {idx > 0 && <span className="muted">›</span>}
+                {isLast ? (
+                  <strong>{crumb.label}</strong>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHoistedNodeId(crumb.id);
+                      needInitialFitRef.current = true;
+                    }}
+                  >
+                    {crumb.label}
+                  </button>
+                )}
+              </span>
+            );
+          })}
+          <button
+            type="button"
+            className="mindmap-crumb-exit"
+            onClick={() => {
+              setHoistedNodeId(null);
+              needInitialFitRef.current = true;
+            }}
+            title="返回全局 (Esc)"
+          >
+            返回全局
+          </button>
+        </nav>
+      )}
+
+      {/* 主畫布：單一 CSS transform 縮放平移 + SVG 三次貝茲曲線層 + HTML 節點層 */}
+      <div
+        ref={stageRef}
+        className="mindmap-stage"
+        onPointerDown={onStagePointerDown}
+        onPointerMove={(e) => {
+          onStagePointerMove(e);
+          updateHoverLevel(e);
+        }}
+        onPointerLeave={() => setHoverLevel(null)}
+        onPointerUp={onStagePointerUp}
+        onPointerCancel={onStagePointerUp}
+        onWheel={onStageWheel}
+      >
+        {loading && !data && <div className="board-hint">載入心智圖中…</div>}
+
+        {data && (
+          <div
+            className="mindmap-world"
+            style={{
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
+              transformOrigin: "0 0",
+            }}
+          >
+            {/* 層級區塊：游標所在的那一層整欄淡色底＋細框，類似被選取的感覺 */}
+            {activeBand && (
+              <div
+                aria-hidden="true"
+                style={{
+                  position: "absolute",
+                  left: activeBand.left + 4,
+                  top: activeBand.top - LEVEL_PAD_TOP_PX / scale,
+                  width: Math.max(0, activeBand.right - activeBand.left - 8),
+                  height: activeBand.bottom - activeBand.top + (LEVEL_PAD_TOP_PX + LEVEL_PAD_BOTTOM_PX) / scale,
+                  borderRadius: 14 / scale,
+                  background: "color-mix(in srgb, var(--accent, #60a5fa) 9%, transparent)",
+                  border: `${1 / scale}px solid color-mix(in srgb, var(--accent, #60a5fa) 38%, transparent)`,
+                  pointerEvents: "none",
+                }}
+              />
+            )}
+
+            {/* SVG 三次貝茲曲線層 */}
+            <svg className="mindmap-svg" aria-hidden="true">
+              {layoutEdges.map((edge) => {
+                const lit =
+                  !spotlightSet || (spotlightSet.has(edge.parentId) && spotlightSet.has(edge.childId));
+                return (
+                  <g key={edge.id} style={{ opacity: lit ? 1 : 0.25, transition: "opacity 0.16s ease" }}>
+                    <path
+                      d={edge.d}
+                      fill="none"
+                      stroke={spotlightSet && lit ? "var(--accent)" : "var(--line)"}
+                      strokeWidth={spotlightSet && lit ? 2.2 : 1.6}
+                    />
+                    <circle
+                      cx={edge.midX + 6}
+                      cy={edge.midY}
+                      r={14}
+                      fill="transparent"
+                      style={{ pointerEvents: "all", cursor: "pointer" }}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        startEditEdge(edge.childId);
+                      }}
+                    />
+                  </g>
+                );
+              })}
+            </svg>
+
+            {/* 連線極簡短標籤膠囊（中點偏右） */}
+            {layoutEdges.map((edge) => {
+              const isEditingThisEdge = editingEdgeNodeId === edge.childId;
+              const label = edge.childNode.edge_label;
+              if (!label && !isEditingThisEdge) return null;
+              const lit =
+                !spotlightSet || (spotlightSet.has(edge.parentId) && spotlightSet.has(edge.childId));
+              return (
+                <div
+                  key={`lbl:${edge.id}`}
+                  className="mindmap-edge-label"
+                  style={{
+                    left: edge.midX + 6,
+                    top: edge.midY,
+                    opacity: lit ? 1 : 0.25,
+                  }}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    startEditEdge(edge.childId);
+                  }}
+                  title="雙擊編輯連線標籤"
+                >
+                  {isEditingThisEdge ? (
+                    <input
+                      autoFocus
+                      maxLength={40}
+                      value={editingEdgeText}
+                      placeholder="連線詞…"
+                      onChange={(e) => setEditingEdgeText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (isImeComposing(e)) return;
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          void commitEditEdge();
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setEditingEdgeNodeId(null);
+                        }
+                      }}
+                      onBlur={() => void commitEditEdge()}
+                      onPointerDown={(e) => e.stopPropagation()}
+                    />
+                  ) : (
+                    <span>{label}</span>
+                  )}
+                </div>
+              );
+            })}
+
+            {/* HTML 節點層 */}
+            {layoutNodes.map((ln) => {
+              const isSelected = selectedId === ln.id;
+              const isEditing = editingNodeId === ln.id;
+              const lit = !spotlightSet || spotlightSet.has(ln.id);
+              const isDropTarget = dragState?.targetId === ln.id ? dragState.slot : null;
+              const n = ln.node;
+
+              const isRoot = ln.depth === 0;
+              const isMissing = n?.ref_status === "missing";
+              const isArchived = n?.ref_status === "archived";
+
+              let primaryTitle = "";
+              let subTitle = "";
+              if (!n) {
+                primaryTitle = data.display_title;
+              } else if (n.type === "text") {
+                primaryTitle = n.text || "（空白節點）";
+              } else if (isMissing) {
+                const snap = n.ref_title || n.ref_title_snapshot || (n.type === "card" ? "未知卡片" : "未知白板");
+                primaryTitle = n.text.trim() ? n.text.trim() : `（已失效）${snap}`;
+                subTitle = n.text.trim() ? `（已失效）${snap}` : "";
+              } else {
+                const liveTitle = n.ref_title || n.ref_title_snapshot || (n.type === "card" ? "（無標題卡片）" : "（未命名白板）");
+                if (n.text.trim()) {
+                  primaryTitle = n.text.trim();
+                  subTitle = liveTitle;
+                } else {
+                  primaryTitle = liveTitle;
+                }
+              }
+
+              const levelClass = isRoot
+                ? "level-root"
+                : ln.depth === 1
+                  ? "level-1"
+                  : ln.depth === 2
+                    ? "level-2"
+                    : "level-deep";
+
+              return (
+                <div
+                  key={ln.id}
+                  ref={(el) => bindNodeEl(ln.id, el)}
+                  className={[
+                    "mindmap-node",
+                    levelClass,
+                    isSelected ? "selected" : "",
+                    isMissing ? "card-ref deleted" : "",
+                    isArchived ? "archived" : "",
+                    isDropTarget ? `drop-${isDropTarget}` : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  style={{
+                    left: ln.x,
+                    top: ln.y,
+                    opacity: lit ? 1 : 0.3,
+                  }}
+                  onPointerDown={(e) => {
+                    if (isEditing) return;
+                    e.stopPropagation();
+                    if (e.pointerType === "touch" && !isRoot) {
+                      const cx = e.clientX;
+                      const cy = e.clientY;
+                      longPressTimerRef.current = window.setTimeout(() => {
+                        longPressTimerRef.current = null;
+                        startNodeDrag(ln.id, cx, cy);
+                      }, 320);
+                    }
+                  }}
+                  onPointerUp={() => {
+                    if (longPressTimerRef.current !== null) {
+                      window.clearTimeout(longPressTimerRef.current);
+                      longPressTimerRef.current = null;
+                    }
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleSelectNode(ln);
+                  }}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    if (n && n.type === "board" && n.ref_id && !isMissing) {
+                      onJumpBoard?.(n.ref_id);
+                      return;
+                    }
+                    startEditNode(ln.id);
+                  }}
+                >
+                  {/* 拖曳排序把手（非根節點） */}
+                  {!isRoot && !isEditing && (
+                    <span
+                      className="mindmap-drag-grip"
+                      title="拖曳移動或調整層級順序"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        startNodeDrag(ln.id, e.clientX, e.clientY);
+                      }}
+                    >
+                      <StrokeIcon size={12}>
+                        <circle cx="9" cy="6" r="1" />
+                        <circle cx="15" cy="6" r="1" />
+                        <circle cx="9" cy="12" r="1" />
+                        <circle cx="15" cy="12" r="1" />
+                        <circle cx="9" cy="18" r="1" />
+                        <circle cx="15" cy="18" r="1" />
+                      </StrokeIcon>
+                    </span>
+                  )}
+
+                  {/* 參照類型描邊圖標 */}
+                  {n?.type === "card" && (
+                    <span className="mindmap-node-icon" title="卡片參照">
+                      <StrokeIcon size={13}>
+                        <rect x="3" y="4" width="18" height="16" rx="2" />
+                        <line x1="7" y1="9" x2="17" y2="9" />
+                        <line x1="7" y1="13" x2="13" y2="13" />
+                      </StrokeIcon>
+                    </span>
+                  )}
+                  {n?.type === "board" && (
+                    <span className="mindmap-node-icon" title="白板／問題參照">
+                      <StrokeIcon size={13}>
+                        <rect x="3" y="3" width="7" height="7" rx="1" />
+                        <rect x="14" y="3" width="7" height="7" rx="1" />
+                        <rect x="14" y="14" width="7" height="7" rx="1" />
+                        <path d="M10 6.5h4M17.5 10v4" />
+                      </StrokeIcon>
+                    </span>
+                  )}
+
+                  {/* 節點文字或行內編輯框 */}
+                  {isEditing ? (
+                    <input
+                      autoFocus
+                      className="mindmap-node-input"
+                      value={editingText}
+                      placeholder={
+                        isRoot
+                          ? `心智圖名稱（留空顯示：${data.board_name}）`
+                          : n && n.type !== "text"
+                            ? "自訂主標（留空顯示來源標題）"
+                            : "輸入節點內容…"
+                      }
+                      onChange={(e) => setEditingText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (isImeComposing(e)) return;
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          void commitEditNode();
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setEditingNodeId(null);
+                        }
+                      }}
+                      onBlur={() => void commitEditNode()}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  ) : (
+                    <div className="mindmap-node-content">
+                      <div className="mindmap-node-title">
+                        <span>{primaryTitle}</span>
+                        {isArchived && <span className="mindmap-archived-tag">已封存</span>}
+                      </div>
+                      {subTitle && <div className="mindmap-node-sub">{subTitle}</div>}
+                    </div>
+                  )}
+
+                  {/* 白板參照跳轉按鈕（已失效則不可跳轉） */}
+                  {!isEditing && n?.type === "board" && n.ref_id && !isMissing && (
+                    <button
+                      type="button"
+                      className="mindmap-jump-btn"
+                      title="跳轉至此白板"
+                      aria-label="跳轉至此白板"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (n.ref_id) onJumpBoard?.(n.ref_id);
+                      }}
+                    >
+                      <StrokeIcon size={13}>
+                        <line x1="7" y1="17" x2="17" y2="7" />
+                        <polyline points="7 7 17 7 17 17" />
+                      </StrokeIcon>
+                    </button>
+                  )}
+
+                  {/* 收合狀態顯示子樹總數膠囊；展開狀態顯示收合小按鈕 */}
+                  {!isEditing && !isRoot && ln.hasChildren && boardId && (
+                    n?.collapsed === 1 ? (
+                      <button
+                        type="button"
+                        className="mindmap-collapse-pill"
+                        title={`展開子樹（共 ${ln.descendantCount} 個子孫節點）`}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void applyMutation(() => api.patchMindNode(boardId, ln.id, { collapsed: 0 }));
+                        }}
+                      >
+                        +{ln.descendantCount}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="mindmap-collapse-btn"
+                        title="收合此分支"
+                        aria-label="收合此分支"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void applyMutation(() => api.patchMindNode(boardId, ln.id, { collapsed: 1 }));
+                        }}
+                      >
+                        <StrokeIcon size={11}>
+                          <line x1="5" y1="12" x2="19" y2="12" />
+                        </StrokeIcon>
+                      </button>
+                    )
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* 空心智圖引導提示 */}
+        {data && data.nodes.length === 0 && !loading && (
+          <div className="mindmap-empty-hint">
+            按工具列「＋ 子節點」或按 <kbd>Tab</kbd> 開始建立第一個心智圖分支
+          </div>
+        )}
+
+        {/* 網頁／iPad 端選取節點時的浮動精簡操作列 */}
+        {isIpad && selectedId && (
+          <div className="mindmap-floating-bar" role="toolbar" aria-label="節點快速操作列">
+            <button type="button" onClick={() => void handleAddChild(selectedId)}>
+              +子
+            </button>
+            <button
+              type="button"
+              disabled={selectedId === ROOT_ID || selectedId === hoistedNodeId}
+              onClick={() => void handleAddSibling(selectedId)}
+            >
+              +同層
+            </button>
+            <button type="button" onClick={() => startEditNode(selectedId)}>
+              改字
+            </button>
+            <button
+              type="button"
+              disabled={selectedId === ROOT_ID}
+              onClick={() => startEditEdge(selectedId)}
+            >
+              連線詞
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setRefTab("card");
+                setRefQuery("");
+                setRefPickerOpen(true);
+              }}
+            >
+              掛卡片／問題
+            </button>
+            <button
+              type="button"
+              disabled={!canHoistSelected}
+              onClick={() => {
+                if (canHoistSelected) {
+                  setHoistedNodeId(selectedId);
+                  needInitialFitRef.current = true;
+                }
+              }}
+            >
+              聚焦此支
+            </button>
+            <button
+              type="button"
+              className="danger"
+              style={{ marginTop: 0 }}
+              disabled={selectedId === ROOT_ID}
+              onClick={() => void handleDeleteRequest(selectedId)}
+            >
+              刪
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* 刪除含子節點確認彈窗 */}
+      {deleteConfirmNode && (
+        <div className="modal mindmap-modal" role="dialog" aria-label="刪除心智圖節點確認">
+          <div className="modal-card" style={{ maxWidth: 420 }}>
+            <h4>刪除含有子節點的分支</h4>
+            <p style={{ margin: "4px 0", fontSize: 13 }}>
+              節點「<strong>{deleteConfirmNode.node.text || deleteConfirmNode.node.ref_title || "（未命名）"}</strong>」底下還有{" "}
+              <strong>{deleteConfirmNode.childCount}</strong> 個子孫節點，請選擇處理方式：
+            </p>
+            <div className="modal-actions" style={{ justifyContent: "flex-end", flexWrap: "wrap", gap: 8 }}>
+              <button type="button" onClick={() => setDeleteConfirmNode(null)}>
+                取消
+              </button>
+              <button type="button" onClick={() => void confirmDeleteWithMode("promote")}>
+                子節點上提一級
+              </button>
+              <button
+                type="button"
+                className="danger"
+                style={{ marginTop: 0 }}
+                onClick={() => void confirmDeleteWithMode("subtree")}
+              >
+                連子樹一起刪
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 掛載卡片／白板問題彈窗 */}
+      {refPickerOpen && (
+        <div className="modal mindmap-modal" role="dialog" aria-label="掛載卡片或白板問題">
+          <div className="modal-card" style={{ width: 440, maxWidth: "92vw" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h4 style={{ margin: 0 }}>掛載卡片／白板問題節點</h4>
+              <button type="button" onClick={() => setRefPickerOpen(false)} aria-label="關閉">
+                ✕
+              </button>
+            </div>
+            <div className="tabs" role="tablist">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={refTab === "card"}
+                className={refTab === "card" ? "on" : ""}
+                onClick={() => setRefTab("card")}
+              >
+                卡片
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={refTab === "board"}
+                className={refTab === "board" ? "on" : ""}
+                onClick={() => setRefTab("board")}
+              >
+                白板／問題
+              </button>
+            </div>
+            <input
+              autoFocus
+              value={refQuery}
+              onChange={(e) => setRefQuery(e.target.value)}
+              placeholder={refTab === "card" ? "搜尋卡片標題或內容…" : "搜尋白板或問題名稱…"}
+            />
+            <div style={{ maxHeight: 260, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+              {refLoading ? (
+                <div className="muted" style={{ padding: 12 }}>
+                  載入中…
+                </div>
+              ) : refTab === "card" ? (
+                cardCandidates.length === 0 ? (
+                  <div className="muted" style={{ padding: 12 }}>
+                    找不到符合的卡片
+                  </div>
+                ) : (
+                  cardCandidates.map((c) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      className="result-main"
+                      style={{ padding: "6px 8px" }}
+                      onClick={() => void attachReferenceNode("card", c.id)}
+                    >
+                      <strong>{c.title || "（無標題）"}</strong>
+                      {c.snippet && <span className="snippet">{c.snippet}</span>}
+                    </button>
+                  ))
+                )
+              ) : boardCandidates.length === 0 ? (
+                <div className="muted" style={{ padding: 12 }}>
+                  找不到符合的白板
+                </div>
+              ) : (
+                boardCandidates.map((b) => (
+                  <button
+                    key={b.id}
+                    type="button"
+                    className="result-main"
+                    style={{ padding: "6px 8px" }}
+                    onClick={() => void attachReferenceNode("board", b.id)}
+                  >
+                    <strong>
+                      {b.question ? "↳ " : ""}
+                      {b.mindmap_title?.trim() || b.name}
+                    </strong>
+                    {b.mindmap_title?.trim() && b.mindmap_title.trim() !== b.name && (
+                      <span className="snippet">白板：{b.name}</span>
+                    )}
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+

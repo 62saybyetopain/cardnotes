@@ -365,6 +365,47 @@ export async function uploadPcBackupToCloud(
   loadBlob: (id: string) => Promise<Blob | null>,
 ): Promise<MediaBackupReport> {
   const token = await resolveAccessToken(credentialInput);
+  const existingPcFileId = await findDriveFileId(token, PC_BACKUP_FILENAME);
+  if (existingPcFileId) {
+    let existingPkg: SyncPackage | null = null;
+    try {
+      existingPkg = await downloadJsonFromDrive(token, PC_BACKUP_FILENAME);
+    } catch (readErr) {
+      if (
+        !window.confirm(
+          `⚠️ 無法讀取雲端既有的電腦完整備份（${readErr instanceof Error ? readErr.message : String(readErr)}），無法確認是否會覆蓋較完整的資料。\n仍要繼續上傳並覆蓋雲端備份嗎？`,
+        )
+      ) {
+        throw new Error("已取消上傳：無法確認雲端既有備份內容");
+      }
+    }
+    if (existingPkg) {
+      const cloudCards = existingPkg.cards?.length ?? 0;
+      const localCards = pkg.cards?.length ?? 0;
+      const cloudStreams = existingPkg.daily_streams?.length ?? 0;
+      const localStreams = pkg.daily_streams?.length ?? 0;
+      const cloudMindNodes = existingPkg.mind_nodes?.length ?? 0;
+      const localMindNodes = pkg.mind_nodes?.length ?? 0;
+      const isShrinking =
+        (localCards === 0 && cloudCards > 0) ||
+        localCards < cloudCards ||
+        localStreams < cloudStreams ||
+        localMindNodes < cloudMindNodes;
+      if (isShrinking) {
+        const emptyWarn = localCards === 0 && cloudCards > 0 ? "【高風險：目前本機卡片數為 0！】\n" : "";
+        const ok = window.confirm(
+          `⚠️ ${emptyWarn}雲端既有的電腦備份（${new Date(existingPkg.exported_at).toLocaleString()}）資料量多於目前本機：\n` +
+            `・卡片：雲端 ${cloudCards} 張 → 本機 ${localCards} 張\n` +
+            `・日誌：雲端 ${cloudStreams} 則 → 本機 ${localStreams} 則\n` +
+            `・心智圖節點：雲端 ${cloudMindNodes} 個 → 本機 ${localMindNodes} 個\n\n` +
+            "若你是剛換電腦或剛重灌，請改按「從雲端完整覆蓋還原」而非上傳。\n確定要用目前本機資料覆蓋雲端備份嗎？",
+        );
+        if (!ok) {
+          throw new Error("已取消上傳，雲端既有完整備份已保留");
+        }
+      }
+    }
+  }
   const ids = collectMediaIds(pkg);
   const folderId = await ensureMediaFolder(token);
   const media: SyncMediaEntry[] = [];
@@ -421,6 +462,14 @@ export async function downloadMediaFromCloud(id: string): Promise<Blob | null> {
     throw new Error(`雲端圖片 ${id} 沒有有效的媒體類型（${blob.type || "空白"}）`);
   }
   return blob;
+}
+
+/**
+ * 電腦端：從 Google Drive 拉取電腦端完整備份 (cardboard-pc-backup.json) 供本機完整覆蓋還原
+ */
+export async function pullPcBackupFromCloud(credentialInput?: string): Promise<SyncPackage> {
+  const token = await resolveAccessToken(credentialInput);
+  return await downloadJsonFromDrive(token, PC_BACKUP_FILENAME);
 }
 
 /**
@@ -499,13 +548,35 @@ export function sendP2PPackage(
           }
           prevPkg = null; // 使用者已明確同意覆蓋，不再重複詢問（舊檔已讀到但標記讀失敗時也一併放棄比對）
         }
-        if (!alreadyMerged && prevPkg && Array.isArray(prevPkg.cards) && prevPkg.cards.length > 0) {
-          const nextIds = new Set(pkg.cards.map((c) => c.id));
-          const dropped = prevPkg.cards.filter((c) => !nextIds.has(c.id));
-          if (dropped.length > 0) {
+        if (!alreadyMerged && prevPkg) {
+          const nextIds = new Set((pkg.cards ?? []).map((c) => c.id));
+          const dropped = (prevPkg.cards ?? []).filter((c) => !nextIds.has(c.id));
+          const nextStreamIds = new Set((pkg.daily_streams ?? []).map((s) => s.id));
+          const droppedStreams = (prevPkg.daily_streams ?? []).filter((s) => !nextStreamIds.has(s.id));
+          const nextMmBoards = new Set(
+            pkg.mindmap_board_ids ?? Array.from(new Set((pkg.mind_nodes ?? []).map((n) => n.board_id))),
+          );
+          const prevMmBoards =
+            prevPkg.mindmap_board_ids ?? Array.from(new Set((prevPkg.mind_nodes ?? []).map((n) => n.board_id)));
+          const droppedMindmaps = prevMmBoards.filter((bid) => !nextMmBoards.has(bid));
+          const nextTbKeys = new Set((pkg.tombstones ?? []).map((t) => `${t.entity_type}::${t.entity_key}`));
+          const droppedTombstones = (prevPkg.tombstones ?? []).filter(
+            (t) => !nextTbKeys.has(`${t.entity_type}::${t.entity_key}`),
+          );
+          if (
+            dropped.length > 0 ||
+            droppedStreams.length > 0 ||
+            droppedMindmaps.length > 0 ||
+            droppedTombstones.length > 0
+          ) {
+            const parts: string[] = [];
+            if (dropped.length > 0) parts.push(`${dropped.length} 張卡片`);
+            if (droppedStreams.length > 0) parts.push(`${droppedStreams.length} 則日誌`);
+            if (droppedMindmaps.length > 0) parts.push(`${droppedMindmaps.length} 張心智圖`);
+            if (droppedTombstones.length > 0) parts.push(`${droppedTombstones.length} 筆刪除紀錄`);
             const ok = window.confirm(
-              `⚠️ 雲端上已有一份 iPad 同步檔（匯出時間：${new Date(prevPkg.exported_at).toLocaleString()}），其中包含 ${dropped.length} 張本次未包含的卡片。\n` +
-                "若電腦端尚未拉取該份資料，直接上傳將會覆蓋它並導致這幾張卡片的變更遺失。\n\n確定要覆蓋雲端檔案嗎？",
+              `⚠️ 雲端上已有一份 iPad 同步檔（匯出時間：${new Date(prevPkg.exported_at).toLocaleString()}），其中包含 ${parts.join("與")}（本次未包含）。\n` +
+                "若電腦端尚未拉取該份資料，直接上傳將會覆蓋它並導致這些變更遺失。\n\n確定要覆蓋雲端檔案嗎？",
             );
             if (!ok) {
               onError(new Error("已取消上傳，雲端既有同步封包已保留"));

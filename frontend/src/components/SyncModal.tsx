@@ -23,8 +23,14 @@ import {
   CARD_TYPE_LABELS,
   type CardDetail,
   type CardType,
+  type DailyStreamCardSyncItem,
+  type DailyStreamSyncItem,
+  type MindNodeSyncItem,
   type SyncCardDiff,
+  type SyncDailyStreamDiff,
   type SyncDiffReport,
+  type SyncMindmapTitleDiff,
+  type SyncMindNodeDiff,
   type SyncPackage,
 } from "../types";
 
@@ -101,6 +107,22 @@ interface IpadSyncBaseline {
   imported_at: string;
   backup_exported_at: string;
   card_signatures: Record<string, string>;
+  stream_signatures?: Record<string, string>;
+  mind_node_signatures?: Record<string, string>;
+  board_mindmap_titles?: Record<string, string>;
+}
+
+function mindNodeSignature(n: MindNodeSyncItem): string {
+  return `${n.updated_at}|${n.board_id}|${n.parent_id ?? ""}|${n.sort_order}|${n.type}|${n.text}|${n.edge_label}|${n.ref_id ?? ""}|${n.ref_title_snapshot}|${n.collapsed}`;
+}
+
+function streamSignature(s: DailyStreamSyncItem, streamCards: DailyStreamCardSyncItem[] = []): string {
+  const boundIds = streamCards
+    .filter((b) => b.stream_id === s.id)
+    .map((b) => b.card_id)
+    .sort()
+    .join(",");
+  return `${s.updated_at}|${s.day}|${s.kind}|${s.title}|${s.status}|${s.recall_text}|${s.review_text}|${s.peeked_at ?? ""}|${s.unlocked_at ?? ""}|${s.converted_card_id ?? ""}|${boundIds}`;
 }
 
 function cardSignature(
@@ -161,10 +183,28 @@ async function saveIpadBaseline(pkg: SyncPackage): Promise<IpadSyncBaseline> {
   for (const c of pkg.cards ?? []) {
     sigs[c.id] = cardSignature(c, cts, lks, bcs);
   }
+  const streamSigs: Record<string, string> = {};
+  const dscs = pkg.daily_stream_cards ?? [];
+  for (const s of pkg.daily_streams ?? []) {
+    streamSigs[s.id] = streamSignature(s, dscs);
+  }
+  const mindNodeSigs: Record<string, string> = {};
+  for (const mn of pkg.mind_nodes ?? []) {
+    mindNodeSigs[mn.id] = mindNodeSignature(mn);
+  }
+  const boardMindmapTitles: Record<string, string> = {};
+  for (const b of pkg.boards ?? []) {
+    if (b.mindmap_title !== undefined) {
+      boardMindmapTitles[b.id] = b.mindmap_title;
+    }
+  }
   const baseline: IpadSyncBaseline = {
     imported_at: new Date().toISOString(),
     backup_exported_at: pkg.exported_at || new Date().toISOString(),
     card_signatures: sigs,
+    stream_signatures: streamSigs,
+    mind_node_signatures: mindNodeSigs,
+    board_mindmap_titles: boardMindmapTitles,
   };
   const drv = storage as unknown as BaselineStorageDriver;
   if (typeof drv.setSyncBaseline === "function") {
@@ -226,20 +266,33 @@ async function overwriteIpadLocal(pkg: SyncPackage): Promise<boolean> {
   const incomingBoards = new Set((pkg.boards ?? []).map((b) => b.id));
   const incomingNotes = new Set((pkg.board_notes ?? []).map((n) => n.id));
   const incomingGroups = new Set((pkg.board_groups ?? []).map((g) => g.id));
+  const incomingStreams = new Set((pkg.daily_streams ?? []).map((s) => s.id));
+  const incomingMindNodes = new Set((pkg.mind_nodes ?? []).map((mn) => mn.id));
   const lostBoards = local.boards.filter((b) => !incomingBoards.has(b.id));
   const lostNotes = (local.board_notes ?? []).filter((n) =>
     pkg.board_notes ? !incomingNotes.has(n.id) : !incomingBoards.has(n.board_id),
   );
   const lostGroups = (local.board_groups ?? []).filter((g) => !incomingGroups.has(g.id));
-  if (lostBoards.length + lostNotes.length + lostGroups.length > 0) {
+  const lostStreams = Array.isArray(pkg.daily_streams)
+    ? (local.daily_streams ?? []).filter((s) => !incomingStreams.has(s.id))
+    : [];
+  const lostMindNodes = (local.mind_nodes ?? []).filter((mn) =>
+    Array.isArray(pkg.mind_nodes) ? !incomingMindNodes.has(mn.id) : !incomingBoards.has(mn.board_id),
+  );
+  if (lostBoards.length + lostNotes.length + lostGroups.length + lostStreams.length + lostMindNodes.length > 0) {
     const shownBoards = lostBoards
       .slice(0, 5)
       .map((b) => "・白板：" + (b.name || "（未命名）"))
       .join("\n");
+    const shownStreams = lostStreams
+      .slice(0, 5)
+      .map((s) => `・日誌（${s.day}）：` + (s.title || "（無標題）"))
+      .join("\n");
     const proceedStructures = window.confirm(
       "此 iPad 上有電腦備份沒有的項目，繼續覆蓋會永久刪除它們：\n" +
-        `白板 ${lostBoards.length} 個、便利貼 ${lostNotes.length} 張、分組框 ${lostGroups.length} 個\n` +
+        `白板 ${lostBoards.length} 個、便利貼 ${lostNotes.length} 張、分組框 ${lostGroups.length} 個、日誌 ${lostStreams.length} 則、心智圖節點 ${lostMindNodes.length} 個\n` +
         (shownBoards ? shownBoards + "\n" : "") +
+        (shownStreams ? shownStreams + "\n" : "") +
         "\n按「確定」繼續覆蓋，按「取消」中止（iPad 資料不會變動）。",
     );
     if (!proceedStructures) return false;
@@ -271,16 +324,46 @@ async function overwriteIpadLocal(pkg: SyncPackage): Promise<boolean> {
       // 只要 iPad 本機簽章與上次同步快照不同即代表有未同步變更；移除 incoming.get(c.id) !== c.updated_at，避免僅改連結或白板位置時因 updated_at 未變而漏判並靜默覆蓋。
       return prev !== undefined && cardSignature(c, localTags, localLinks, localBcs) !== prev;
     });
-    if (modified.length > 0) {
-      const shown = modified
-        .slice(0, 5)
-        .map((c) => "・" + (c.title || "（無標題）"))
-        .join("\n");
-      const rest = modified.length > 5 ? "\n…另有 " + String(modified.length - 5) + " 張" : "";
+    const localDscs = local.daily_stream_cards ?? [];
+    const modifiedStreams = (local.daily_streams ?? []).filter((s) => {
+      const prev = baseline.stream_signatures?.[s.id];
+      return prev !== undefined && streamSignature(s, localDscs) !== prev;
+    });
+    const modifiedMindNodes = (local.mind_nodes ?? []).filter((mn) => {
+      const prev = baseline.mind_node_signatures?.[mn.id];
+      return prev !== undefined && mindNodeSignature(mn) !== prev;
+    });
+    const modifiedMindmapTitles = local.boards.filter((b) => {
+      const prev = baseline.board_mindmap_titles?.[b.id];
+      return prev !== undefined && (b.mindmap_title ?? "") !== prev;
+    });
+    if (
+      modified.length > 0 ||
+      modifiedStreams.length > 0 ||
+      modifiedMindNodes.length > 0 ||
+      modifiedMindmapTitles.length > 0
+    ) {
+      const shown = [
+        ...modified.slice(0, 5).map((c) => "・卡片：" + (c.title || "（無標題）")),
+        ...modifiedStreams.slice(0, 5).map((s) => `・日誌（${s.day}）：` + (s.title || "（無標題）")),
+        ...modifiedMindNodes.slice(0, 5).map((mn) => "・心智圖節點：" + (mn.text || mn.ref_title_snapshot || "（未命名節點）")),
+        ...modifiedMindmapTitles.slice(0, 5).map((b) => "・心智圖名稱：" + (b.mindmap_title || b.name)),
+      ].join("\n");
+      const totalMod = modified.length + modifiedStreams.length + modifiedMindNodes.length + modifiedMindmapTitles.length;
+      const shownCount =
+        Math.min(modified.length, 5) +
+        Math.min(modifiedStreams.length, 5) +
+        Math.min(modifiedMindNodes.length, 5) +
+        Math.min(modifiedMindmapTitles.length, 5);
+      const rest = totalMod > shownCount ? "\n…另有 " + String(totalMod - shownCount) + " 筆" : "";
       const proceedModified = window.confirm(
         "此 iPad 上有 " +
           String(modified.length) +
-          " 張卡片自上次同步後被修改過，覆蓋會讓這些修改永久消失：\n" +
+          " 張卡片、" +
+          String(modifiedStreams.length) +
+          " 則日誌、" +
+          String(modifiedMindNodes.length) +
+          " 個心智圖節點自上次同步後被修改過，覆蓋會讓這些修改永久消失：\n" +
           shown +
           rest +
           "\n\n按「確定」繼續覆蓋，按「取消」中止（iPad 資料不會變動）。",
@@ -481,6 +564,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       // 原因：後端保留本機關係句型時會濾掉橋樑標籤已不在備份內的句型與其關係句；不回報就是把資料遺失報成成功。
       if (res.relation_patterns_pruned) lost.push(`${res.relation_patterns_pruned} 個關係句型（其橋樑標籤已不在備份中）`);
       if (res.card_relations_pruned) lost.push(`${res.card_relations_pruned} 筆卡片關係句`);
+      if (res.mind_nodes_pruned) lost.push(`${res.mind_nodes_pruned} 個心智圖節點`);
       if (lost.length > 0) {
         report(new Error(`備份檔沒有這些資料的對應內容，本機原有的已無法保留：${lost.join("、")}`), "還原完成但有資料被捨棄");
       }
@@ -504,6 +588,11 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
   const [applying, setApplying] = useState(false);
   const [selectedNewCardIds, setSelectedNewCardIds] = useState<Set<string>>(new Set());
   const [selectedUpdateCardIds, setSelectedUpdateCardIds] = useState<Set<string>>(new Set());
+  const [selectedNewStreamIds, setSelectedNewStreamIds] = useState<Set<string>>(new Set());
+  const [selectedUpdateStreamIds, setSelectedUpdateStreamIds] = useState<Set<string>>(new Set());
+  const [selectedNewMindNodeIds, setSelectedNewMindNodeIds] = useState<Set<string>>(new Set());
+  const [selectedUpdateMindNodeIds, setSelectedUpdateMindNodeIds] = useState<Set<string>>(new Set());
+  const [selectedUpdateMindmapBoardIds, setSelectedUpdateMindmapBoardIds] = useState<Set<string>>(new Set());
   const [expandedDiffIds, setExpandedDiffIds] = useState<Set<string>>(new Set());
 
   const initDiffSelection = (res: SyncDiffReport) => {
@@ -514,8 +603,27 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       .filter((c) => isCardNewer(c))
       .map((c) => c.id);
     setSelectedUpdateCardIds(new Set(newerIds));
+    const newStreams = res.daily_streams_new ?? [];
+    const updStreams = res.daily_streams_updated ?? [];
+    setSelectedNewStreamIds(new Set(newStreams.map((s) => s.id)));
+    setSelectedUpdateStreamIds(
+      new Set(updStreams.filter((s) => (s.new_updated_at || "") >= (s.old_updated_at || "")).map((s) => s.id)),
+    );
+    const newMindNodes = res.mind_nodes_new ?? [];
+    const updMindNodes = res.mind_nodes_updated ?? [];
+    const updMindmapTitles = res.mindmap_titles_updated ?? [];
+    setSelectedNewMindNodeIds(new Set(newMindNodes.map((mn) => mn.id)));
+    setSelectedUpdateMindNodeIds(
+      new Set(updMindNodes.filter((mn) => (mn.new_updated_at || "") >= (mn.old_updated_at || "")).map((mn) => mn.id)),
+    );
+    setSelectedUpdateMindmapBoardIds(new Set(updMindmapTitles.map((t) => t.board_id)));
     setExpandedDiffIds(new Set());
-    if (res.cards_new.length === 0 && res.cards_updated.length > 0) {
+    if (
+      res.cards_new.length === 0 &&
+      newStreams.length === 0 &&
+      newMindNodes.length === 0 &&
+      (res.cards_updated.length > 0 || updStreams.length > 0 || updMindNodes.length > 0 || updMindmapTitles.length > 0)
+    ) {
       setActiveTab("updated");
     } else {
       setActiveTab("new");
@@ -547,15 +655,44 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
     void loadIpadCurrentPackage();
   }, [loadIpadCurrentPackage]);
 
-  // 計算 iPad 篩選後要匯出的卡片與封包
-  const ipadFilteredExport = useMemo((): { pkg: SyncPackage | null; matchedCards: CardDetail[]; totalCount: number } => {
-    if (!ipadFullPkg) return { pkg: null, matchedCards: [], totalCount: 0 };
+  // 計算 iPad 篩選後要匯出的卡片、日誌與封包
+  const ipadFilteredExport = useMemo((): {
+    pkg: SyncPackage | null;
+    matchedCards: CardDetail[];
+    totalCount: number;
+    matchedStreams: DailyStreamSyncItem[];
+    totalStreamCount: number;
+    matchedMindNodes: MindNodeSyncItem[];
+    totalMindNodeCount: number;
+  } => {
+    if (!ipadFullPkg) {
+      return {
+        pkg: null,
+        matchedCards: [],
+        totalCount: 0,
+        matchedStreams: [],
+        totalStreamCount: 0,
+        matchedMindNodes: [],
+        totalMindNodeCount: 0,
+      };
+    }
     const allCards = ipadFullPkg.cards ?? [];
     const allCts = ipadFullPkg.card_tags ?? [];
     const allLinks = ipadFullPkg.links ?? [];
     const allBcs = ipadFullPkg.board_cards ?? [];
+    const allStreams = ipadFullPkg.daily_streams ?? [];
+    const allDscs = ipadFullPkg.daily_stream_cards ?? [];
+    const allMindNodes = ipadFullPkg.mind_nodes ?? [];
     if (!onlyChangedAfterBaseline) {
-      return { pkg: ipadFullPkg, matchedCards: allCards, totalCount: allCards.length };
+      return {
+        pkg: ipadFullPkg,
+        matchedCards: allCards,
+        totalCount: allCards.length,
+        matchedStreams: allStreams,
+        totalStreamCount: allStreams.length,
+        matchedMindNodes: allMindNodes,
+        totalMindNodeCount: allMindNodes.length,
+      };
     }
 
     const cutoffMs = customCutoffLocal ? new Date(customCutoffLocal).getTime() : NaN;
@@ -580,7 +717,36 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       return true;
     });
 
+    const matchedStreams = allStreams.filter((s) => {
+      if (isUsingExactBaseline && ipadBaseline && ipadBaseline.stream_signatures) {
+        const prevSig = ipadBaseline.stream_signatures[s.id];
+        if (!prevSig) return true;
+        return streamSignature(s, allDscs) !== prevSig;
+      }
+      if (Number.isFinite(cutoffMs)) {
+        const uMs = new Date(s.updated_at).getTime();
+        const cMs = new Date(s.created_at).getTime();
+        return uMs > cutoffMs || cMs > cutoffMs;
+      }
+      return true;
+    });
+
+    const matchedMindNodes = allMindNodes.filter((mn) => {
+      if (isUsingExactBaseline && ipadBaseline && ipadBaseline.mind_node_signatures) {
+        const prevSig = ipadBaseline.mind_node_signatures[mn.id];
+        if (!prevSig) return true;
+        return mindNodeSignature(mn) !== prevSig;
+      }
+      if (Number.isFinite(cutoffMs)) {
+        const uMs = new Date(mn.updated_at).getTime();
+        const cMs = new Date(mn.created_at).getTime();
+        return uMs > cutoffMs || cMs > cutoffMs;
+      }
+      return true;
+    });
+
     const matchedIds = new Set(matchedCards.map((c) => c.id));
+    const matchedStreamIds = new Set(matchedStreams.map((s) => s.id));
     const filteredPkg: SyncPackage = {
       ...ipadFullPkg,
       is_partial: true,
@@ -590,8 +756,19 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       card_tags: allCts.filter((ct) => matchedIds.has(ct.card_id)),
       links: allLinks.filter((l) => matchedIds.has(l.source_id) || matchedIds.has(l.target_id)),
       board_cards: allBcs.filter((bc) => matchedIds.has(bc.card_id)),
+      daily_streams: matchedStreams,
+      daily_stream_cards: allDscs.filter((b) => matchedStreamIds.has(b.stream_id)),
+      mind_nodes: matchedMindNodes,
     };
-    return { pkg: filteredPkg, matchedCards, totalCount: allCards.length };
+    return {
+      pkg: filteredPkg,
+      matchedCards,
+      totalCount: allCards.length,
+      matchedStreams,
+      totalStreamCount: allStreams.length,
+      matchedMindNodes,
+      totalMindNodeCount: allMindNodes.length,
+    };
   }, [customCutoffLocal, ipadBaseline, ipadFullPkg, onlyChangedAfterBaseline]);
 
   // ============================================================
@@ -692,8 +869,12 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       (mediaRep) => {
         setCloudBusy(false);
         const mediaNote = mediaRep && mediaRep.uploaded > 0 ? `、並新上傳 ${mediaRep.uploaded} 張圖片` : "";
+        const streamNote =
+          ipadFilteredExport.matchedStreams.length > 0
+            ? `、${ipadFilteredExport.matchedStreams.length} 則新增／修改日誌`
+            : "";
         info(
-          `☁️ 已將 iPad 資料（${ipadFilteredExport.matchedCards.length} 張新增／修改卡片${mediaNote}）上傳至 Google Drive！請在電腦版點選「拉取 iPad 資料」合併。`,
+          `☁️ 已將 iPad 資料（${ipadFilteredExport.matchedCards.length} 張新增／修改卡片${streamNote}${mediaNote}）上傳至 Google Drive！請在電腦版點選「拉取 iPad 資料」合併。`,
         );
         if (mediaRep && mediaRep.missing.length > 0) {
           report(
@@ -913,15 +1094,63 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
     });
   };
 
+  const toggleNewStream = (id: string) => {
+    setSelectedNewStreamIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const toggleUpdateStream = (id: string) => {
+    setSelectedUpdateStreamIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const toggleNewMindNode = (id: string) => {
+    setSelectedNewMindNodeIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const toggleUpdateMindNode = (id: string) => {
+    setSelectedUpdateMindNodeIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const toggleUpdateMindmapBoard = (boardId: string) => {
+    setSelectedUpdateMindmapBoardIds((prev) => {
+      const next = new Set(prev);
+      next.has(boardId) ? next.delete(boardId) : next.add(boardId);
+      return next;
+    });
+  };
+
   const applyChanges = async () => {
     if (!pkg || !diff) return;
-    const totalSelected = selectedNewCardIds.size + selectedUpdateCardIds.size;
+    const totalSelected =
+      selectedNewCardIds.size +
+      selectedUpdateCardIds.size +
+      selectedNewStreamIds.size +
+      selectedUpdateStreamIds.size +
+      selectedNewMindNodeIds.size +
+      selectedUpdateMindNodeIds.size +
+      selectedUpdateMindmapBoardIds.size;
     if (
       totalSelected === 0 &&
       diff.tags_new.length === 0 &&
       diff.links_new.length === 0 &&
       diff.card_tags_new.length === 0 &&
-      diff.board_cards_new.length === 0
+      diff.board_cards_new.length === 0 &&
+      (diff.daily_stream_cards_new?.length ?? 0) === 0
     ) {
       info("未選取任何欲套用的變更項目");
       return;
@@ -943,12 +1172,34 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
             .filter((c) => selectedUpdateCardIds.has(c.id) && c.old_updated_at !== undefined)
             .map((c) => [c.id, c.old_updated_at as string] as [string, string]),
         ),
+        daily_stream_ids_to_add: Array.from(selectedNewStreamIds),
+        daily_stream_ids_to_update: Array.from(selectedUpdateStreamIds),
+        daily_stream_expected_updated_at: Object.fromEntries(
+          (diff.daily_streams_updated ?? [])
+            .filter((s) => selectedUpdateStreamIds.has(s.id))
+            .map((s) => [s.id, s.old_updated_at] as [string, string]),
+        ),
+        daily_stream_cards_to_add: diff.daily_stream_cards_new ?? [],
+        mind_node_ids_to_add: Array.from(selectedNewMindNodeIds),
+        mind_node_ids_to_update: Array.from(selectedUpdateMindNodeIds),
+        mind_node_expected_updated_at: Object.fromEntries(
+          (diff.mind_nodes_updated ?? [])
+            .filter((mn) => selectedUpdateMindNodeIds.has(mn.id))
+            .map((mn) => [mn.id, mn.old_updated_at] as [string, string]),
+        ),
+        mindmap_title_board_ids_to_update: Array.from(selectedUpdateMindmapBoardIds),
         package: pkg,
       });
-      // 原因：合併完成後在雲端記下「這一包已合併」，iPad 之後上傳才不會對已合併的卡片誤報；只在所有差異卡片都已勾選時標記，
-      // 否則未勾選的卡片仍只存在雲端舊檔與 iPad，標成已合併會讓覆蓋警告失效。標記失敗不影響已完成的合併，但必須大聲報錯。
+      // 原因：合併完成後在雲端記下「這一包已合併」，iPad 之後上傳才不會對已合併的卡片或日誌誤報；只在所有差異項目都已勾選時標記，
+      // 否則未勾選的項目仍只存在雲端舊檔與 iPad，標成已合併會讓覆蓋警告失效。標記失敗不影響已完成的合併，但必須大聲報錯。
       const allSelected =
-        selectedNewCardIds.size === diff.cards_new.length && selectedUpdateCardIds.size === diff.cards_updated.length;
+        selectedNewCardIds.size === diff.cards_new.length &&
+        selectedUpdateCardIds.size === diff.cards_updated.length &&
+        selectedNewStreamIds.size === (diff.daily_streams_new?.length ?? 0) &&
+        selectedUpdateStreamIds.size === (diff.daily_streams_updated?.length ?? 0) &&
+        selectedNewMindNodeIds.size === (diff.mind_nodes_new?.length ?? 0) &&
+        selectedUpdateMindNodeIds.size === (diff.mind_nodes_updated?.length ?? 0) &&
+        selectedUpdateMindmapBoardIds.size === (diff.mindmap_titles_updated?.length ?? 0);
       if (pkgFromCloud && allSelected) {
         try {
           await markIpadPackageMerged(cloudCredential.trim(), pkg.exported_at);
@@ -962,8 +1213,16 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       if (res.applied.board_cards_skipped) {
         notes.push(`⚠️ ${res.applied.board_cards_skipped} 筆白板歸屬因電腦端沒有對應白板而未套用`);
       }
+      const streamSummary =
+        (res.applied.daily_streams_added ?? 0) + (res.applied.daily_streams_updated ?? 0) > 0
+          ? `、新增 ${res.applied.daily_streams_added ?? 0} 則／更新 ${res.applied.daily_streams_updated ?? 0} 則日誌`
+          : "";
+      const mindSummary =
+        (res.applied.mind_nodes_added ?? 0) + (res.applied.mind_nodes_updated ?? 0) + (res.applied.mindmap_titles_updated ?? 0) > 0
+          ? `、新增 ${res.applied.mind_nodes_added ?? 0} 個／更新 ${res.applied.mind_nodes_updated ?? 0} 個心智圖節點`
+          : "";
       info(
-        `同步成功！新增 ${res.applied.cards_added} 張、更新 ${res.applied.cards_updated} 張、建立 ${res.applied.links_added} 條連結${notes.length > 0 ? "；" + notes.join("；") : ""}`,
+        `同步成功！新增 ${res.applied.cards_added} 張、更新 ${res.applied.cards_updated} 張、建立 ${res.applied.links_added} 條連結${streamSummary}${mindSummary}${notes.length > 0 ? "；" + notes.join("；") : ""}`,
       );
       onApplied();
       onClose();
@@ -981,7 +1240,13 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
       diff.tags_new.length > 0 ||
       diff.links_new.length > 0 ||
       diff.card_tags_new.length > 0 ||
-      diff.board_cards_new.length > 0);
+      diff.board_cards_new.length > 0 ||
+      (diff.daily_streams_new?.length ?? 0) > 0 ||
+      (diff.daily_streams_updated?.length ?? 0) > 0 ||
+      (diff.daily_stream_cards_new?.length ?? 0) > 0 ||
+      (diff.mind_nodes_new?.length ?? 0) > 0 ||
+      (diff.mind_nodes_updated?.length ?? 0) > 0 ||
+      (diff.mindmap_titles_updated?.length ?? 0) > 0);
 
   return (
     <div className="modal" role="dialog" aria-label="資料同步與備份">
@@ -1100,33 +1365,75 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                   </div>
                 )}
 
-                <div className="sync-summary-bar" style={{ marginTop: 2 }}>
+                <div
+                  className="sync-summary-bar"
+                  style={{ marginTop: 2 }}
+                >
                   <span>
-                    符合條件：<strong>{ipadFilteredExport.matchedCards.length}</strong> 張卡片
-                    <span className="muted">（iPad 全庫共 {ipadFilteredExport.totalCount} 張）</span>
+                    符合條件：<strong>{ipadFilteredExport.matchedCards.length}</strong> 張卡片、
+                    <strong>{ipadFilteredExport.matchedStreams.length}</strong> 則日誌、
+                    <strong>{ipadFilteredExport.matchedMindNodes.length}</strong> 個心智圖節點
+                    <span className="muted">
+                      （iPad 全庫共 {ipadFilteredExport.totalCount} 張卡片、{ipadFilteredExport.totalStreamCount} 則日誌、{ipadFilteredExport.totalMindNodeCount} 個心智圖節點）
+                    </span>
                   </span>
                 </div>
 
-                {onlyChangedAfterBaseline && ipadFilteredExport.matchedCards.length > 0 && (
-                  <div className="sync-diff-list" style={{ maxHeight: 150, overflow: "auto" }}>
-                    {ipadFilteredExport.matchedCards.map((c) => {
-                      const isNewAfterBaseline = ipadBaseline && !ipadBaseline.card_signatures[c.id];
-                      return (
-                        <div key={c.id} className="sync-diff-item">
-                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span className={`facet-badge sync-badge ${isNewAfterBaseline ? "green" : "blue"}`}>
-                              {isNewAfterBaseline ? "新增" : "修改"}
+                {onlyChangedAfterBaseline &&
+                  (ipadFilteredExport.matchedCards.length > 0 || ipadFilteredExport.matchedStreams.length > 0) && (
+                    <div
+                      className="sync-diff-list"
+                      style={{ maxHeight: 150, overflow: "auto" }}
+                    >
+                      {ipadFilteredExport.matchedCards.map((c) => {
+                        const isNewAfterBaseline = ipadBaseline && !ipadBaseline.card_signatures[c.id];
+                        return (
+                          <div
+                            key={c.id}
+                            className="sync-diff-item"
+                          >
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <span className={`facet-badge sync-badge ${isNewAfterBaseline ? "green" : "blue"}`}>
+                                {isNewAfterBaseline ? "新增卡片" : "修改卡片"}
+                              </span>
+                              <strong>{c.title || "（無標題）"}</strong>
+                            </div>
+                            <span
+                              className="muted"
+                              style={{ fontSize: 11 }}
+                            >
+                              {new Date(c.updated_at).toLocaleString()}
                             </span>
-                            <strong>{c.title || "（無標題）"}</strong>
                           </div>
-                          <span className="muted" style={{ fontSize: 11 }}>
-                            {new Date(c.updated_at).toLocaleString()}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                        );
+                      })}
+                      {ipadFilteredExport.matchedStreams.map((s) => {
+                        const isNewAfterBaseline =
+                          ipadBaseline?.stream_signatures && !ipadBaseline.stream_signatures[s.id];
+                        return (
+                          <div
+                            key={`stream:${s.id}`}
+                            className="sync-diff-item"
+                          >
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <span className={`facet-badge sync-badge ${isNewAfterBaseline ? "green" : "blue"}`}>
+                                {isNewAfterBaseline ? "新增日誌" : "修改日誌"}
+                              </span>
+                              <strong>
+                                {s.day} · {s.title || (s.kind === "journal" ? "（無標題靈感）" : "（未命名主題串）")}
+                              </strong>
+                            </div>
+                            <span
+                              className="muted"
+                              style={{ fontSize: 11 }}
+                            >
+                              {new Date(s.updated_at).toLocaleString()}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
 
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
                   <button
@@ -1136,7 +1443,9 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                     disabled={cloudBusy || !ipadFilteredExport.pkg}
                     title="將篩選後的變更上傳至 Google Drive，供電腦版拉取合併"
                   >
-                    {cloudBusy ? "雲端傳輸中…" : `☁️ 上傳變更至 Drive（${ipadFilteredExport.matchedCards.length} 張卡片）`}
+                    {cloudBusy
+                      ? "雲端傳輸中…"
+                      : `☁️ 上傳變更至 Drive（${ipadFilteredExport.matchedCards.length} 卡 / ${ipadFilteredExport.matchedStreams.length} 日誌）`}
                   </button>
                   <button
                     type="button"
@@ -1144,7 +1453,7 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                     disabled={cloudBusy || !ipadFilteredExport.pkg}
                     title="匯出上方篩選條件的變更封包（供電腦端合併匯入）"
                   >
-                    📤 匯出篩選變更 (.json, {ipadFilteredExport.matchedCards.length} 張)
+                    📤 匯出篩選變更 (.json, {ipadFilteredExport.matchedCards.length} 卡 / {ipadFilteredExport.matchedStreams.length} 日誌)
                   </button>
                   <button
                     type="button"
@@ -1428,11 +1737,40 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                         </div>
 
                         <div className="sync-diff-list">
-                          {diff.cards_new.length === 0 && (
-                            <div className="empty">本次匯入沒有新卡片。請切換至「既有卡片兩邊不一致」分頁檢視修改。</div>
-                          )}
+                          {diff.cards_new.length === 0 &&
+                            (diff.daily_streams_new?.length ?? 0) === 0 &&
+                            (diff.mind_nodes_new?.length ?? 0) === 0 && (
+                              <div className="empty">本次匯入沒有新卡片、新日誌或新心智圖節點。請切換至「既有項目兩邊不一致」分頁檢視修改。</div>
+                            )}
+                          {(diff.mind_nodes_new ?? []).map((mn) => (
+                            <div
+                              key={`mind-new:${mn.id}`}
+                              className="sync-diff-item"
+                            >
+                              <label className="sync-check-row">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedNewMindNodeIds.has(mn.id)}
+                                  onChange={() => toggleNewMindNode(mn.id)}
+                                />
+                                <span className="facet-badge sync-badge green">
+                                  新增心智圖節點
+                                </span>
+                                <strong>{mn.text || mn.ref_title_snapshot || "（未命名節點）"}</strong>
+                              </label>
+                              <span
+                                className="snippet"
+                                style={{ maxWidth: 260 }}
+                              >
+                                {mn.edge_label ? `連線：${mn.edge_label}` : mn.type}
+                              </span>
+                            </div>
+                          ))}
                           {diff.cards_new.map((c) => (
-                            <div key={c.id} className="sync-diff-item">
+                            <div
+                              key={c.id}
+                              className="sync-diff-item"
+                            >
                               <label className="sync-check-row">
                                 <input
                                   type="checkbox"
@@ -1444,8 +1782,37 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                                 </span>
                                 <strong>{c.title || "（無標題）"}</strong>
                               </label>
-                              <span className="snippet" style={{ maxWidth: 260 }}>
+                              <span
+                                className="snippet"
+                                style={{ maxWidth: 260 }}
+                              >
                                 {c.body.slice(0, 50) || "（空內文）"}
+                              </span>
+                            </div>
+                          ))}
+                          {(diff.daily_streams_new ?? []).map((s) => (
+                            <div
+                              key={`stream:${s.id}`}
+                              className="sync-diff-item"
+                            >
+                              <label className="sync-check-row">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedNewStreamIds.has(s.id)}
+                                  onChange={() => toggleNewStream(s.id)}
+                                />
+                                <span className="facet-badge sync-badge green">
+                                  新增{s.kind === "journal" ? "靈感" : "總結"}
+                                </span>
+                                <strong>
+                                  {s.day} · {s.title || "（無標題）"}
+                                </strong>
+                              </label>
+                              <span
+                                className="snippet"
+                                style={{ maxWidth: 260 }}
+                              >
+                                {(s.review_text || s.recall_text).slice(0, 50) || "（空內容）"}
                               </span>
                             </div>
                           ))}
@@ -1488,9 +1855,106 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                         </div>
 
                         <div className="sync-diff-list">
-                          {diff.cards_updated.length === 0 && (
-                            <div className="empty">所有既有卡片在兩邊內容、標籤與連結皆完全一致。</div>
-                          )}
+                          {diff.cards_updated.length === 0 &&
+                            (diff.daily_streams_updated?.length ?? 0) === 0 &&
+                            (diff.mind_nodes_updated?.length ?? 0) === 0 &&
+                            (diff.mindmap_titles_updated?.length ?? 0) === 0 && (
+                              <div className="empty">所有既有卡片、日誌與心智圖在兩邊皆完全一致。</div>
+                            )}
+                          {(diff.mindmap_titles_updated ?? []).map((mt: SyncMindmapTitleDiff) => (
+                            <div
+                              key={`mindmap-title:${mt.board_id}`}
+                              className="sync-diff-item"
+                            >
+                              <label className="sync-check-row">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedUpdateMindmapBoardIds.has(mt.board_id)}
+                                  onChange={() => toggleUpdateMindmapBoard(mt.board_id)}
+                                />
+                                <span className="facet-badge sync-badge blue">
+                                  心智圖名稱
+                                </span>
+                                <strong>
+                                  {mt.board_name}：{mt.old_mindmap_title || "（未命名）"} → {mt.new_mindmap_title || "（回退白板名）"}
+                                </strong>
+                              </label>
+                            </div>
+                          ))}
+                          {(diff.mind_nodes_updated ?? []).map((mn: SyncMindNodeDiff) => {
+                            const mnNewer = (mn.new_updated_at || "") > (mn.old_updated_at || "");
+                            return (
+                              <div
+                                key={`mind-upd:${mn.id}`}
+                                className="sync-diff-item"
+                              >
+                                <label className="sync-check-row">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedUpdateMindNodeIds.has(mn.id)}
+                                    onChange={() => toggleUpdateMindNode(mn.id)}
+                                  />
+                                  <span className={`facet-badge sync-badge ${mnNewer ? "green" : "amber"}`}>
+                                    {mnNewer ? "匯入節點較新" : "電腦端節點較新"}
+                                  </span>
+                                  <strong>
+                                    [{mn.board_name}] {mn.new_text || mn.old_text || "（未命名節點）"}
+                                  </strong>
+                                  {mn.diff_fields.map((f) => (
+                                    <span
+                                      key={f}
+                                      className="facet-badge"
+                                    >
+                                      {f}
+                                    </span>
+                                  ))}
+                                </label>
+                                <span
+                                  className="muted"
+                                  style={{ fontSize: 11 }}
+                                >
+                                  匯入：{formatSyncTime(mn.new_updated_at)}
+                                </span>
+                              </div>
+                            );
+                          })}
+                          {(diff.daily_streams_updated ?? []).map((s: SyncDailyStreamDiff) => {
+                            const streamNewer = (s.new_updated_at || "") > (s.old_updated_at || "");
+                            return (
+                              <div
+                                key={`stream:${s.id}`}
+                                className="sync-diff-item"
+                              >
+                                <label className="sync-check-row">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedUpdateStreamIds.has(s.id)}
+                                    onChange={() => toggleUpdateStream(s.id)}
+                                  />
+                                  <span className={`facet-badge sync-badge ${streamNewer ? "green" : "amber"}`}>
+                                    {streamNewer ? "匯入日誌較新" : "電腦端日誌較新"}
+                                  </span>
+                                  <strong>
+                                    {s.day} · {s.new_title || s.old_title || "（無標題）"}
+                                  </strong>
+                                  {s.diff_fields.map((f) => (
+                                    <span
+                                      key={f}
+                                      className="facet-badge"
+                                    >
+                                      {f}
+                                    </span>
+                                  ))}
+                                </label>
+                                <span
+                                  className="muted"
+                                  style={{ fontSize: 11 }}
+                                >
+                                  匯入：{formatSyncTime(s.new_updated_at)}
+                                </span>
+                              </div>
+                            );
+                          })}
                           {(diff.cards_updated as ExtendedCardDiff[]).map((c) => {
                             const newer = isCardNewer(c);
                             const isExpanded = expandedDiffIds.has(c.id);
@@ -1705,16 +2169,22 @@ export function SyncModal({ onClose, onApplied, report, info }: Props) {
                     applying ||
                     (selectedNewCardIds.size === 0 &&
                       selectedUpdateCardIds.size === 0 &&
+                      selectedNewStreamIds.size === 0 &&
+                      selectedUpdateStreamIds.size === 0 &&
+                      selectedNewMindNodeIds.size === 0 &&
+                      selectedUpdateMindNodeIds.size === 0 &&
+                      selectedUpdateMindmapBoardIds.size === 0 &&
                       diff.tags_new.length === 0 &&
                       diff.links_new.length === 0 &&
                       diff.card_tags_new.length === 0 &&
-                      diff.board_cards_new.length === 0)
+                      diff.board_cards_new.length === 0 &&
+                      (diff.daily_stream_cards_new?.length ?? 0) === 0)
                   }
                   onClick={() => void applyChanges()}
                 >
                   {applying
                     ? "套用中…"
-                    : `確認套用所選變更（新卡 ${selectedNewCardIds.size}＋更新 ${selectedUpdateCardIds.size}）`}
+                    : `確認套用所選變更（新卡 ${selectedNewCardIds.size}＋更新 ${selectedUpdateCardIds.size}＋日誌 ${selectedNewStreamIds.size + selectedUpdateStreamIds.size}＋心智圖 ${selectedNewMindNodeIds.size + selectedUpdateMindNodeIds.size + selectedUpdateMindmapBoardIds.size}）`}
                 </button>
               )}
             </div>

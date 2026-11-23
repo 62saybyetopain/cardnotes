@@ -109,6 +109,7 @@ export class HttpDriver implements StorageDriver {
   deleteLiteratureCitation = httpApi.deleteLiteratureCitation;
 
   listDailyStreams = httpApi.listDailyStreams;
+  listDailyStreamsRange = httpApi.listDailyStreamsRange;
   createDailyStream = httpApi.createDailyStream;
   patchDailyStream = httpApi.patchDailyStream;
   unlockDailyStream = httpApi.unlockDailyStream;
@@ -120,4 +121,12 @@ export class HttpDriver implements StorageDriver {
   bindDailyCard = httpApi.bindDailyCard;
   unbindDailyCard = httpApi.unbindDailyCard;
   listDailyChanges = httpApi.listDailyChanges;
+
+  getMindMap = httpApi.getMindMap;
+  patchMindMapTitle = httpApi.patchMindMapTitle;
+  createMindNode = httpApi.createMindNode;
+  patchMindNode = httpApi.patchMindNode;
+  patchMindNodesCollapsed = httpApi.patchMindNodesCollapsed;
+  moveMindNode = httpApi.moveMindNode;
+  deleteMindNode = httpApi.deleteMindNode;
 }

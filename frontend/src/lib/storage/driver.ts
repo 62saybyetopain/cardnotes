@@ -18,6 +18,10 @@ import type {
   CleanupResult,
   ConceptGraphResponse,
   CurationStatus,
+  DailyChangesResponse,
+  DailyStream,
+  DailyStreamKind,
+  DailyStreamsRangeResponse,
   DeletePreview,
   LinkStatus,
   Literature,
@@ -25,6 +29,9 @@ import type {
   LiteratureDeleteImpact,
   LiteratureSummary,
   MediaInfo,
+  MindMapData,
+  MindNodeChildrenMode,
+  MindNodeType,
   RelationPattern,
   RelationPatternCreate,
   RelationPatternPatch,
@@ -139,6 +146,9 @@ export interface StorageDriver {
   syncApply(payload: SyncApplyRequest): Promise<SyncApplyResult>;
   importPackageOverwrite?(pkg: SyncPackage): Promise<{ imported: number }>;
   findLocalOnlyCards?(pkg: SyncPackage): Promise<{ id: string; title: string }[]>;
+  findLocalOnlyDailyStreams?(
+    pkg: SyncPackage,
+  ): Promise<{ id: string; day: string; kind: DailyStreamKind; title: string }[]>;
   pickSystemFile?(body: {
     mode?: "open" | "save";
     title?: string;
@@ -186,5 +196,67 @@ export interface StorageDriver {
   putCardLiterature(card_id: string, body: { literature_id: string; locator?: string }): Promise<{ id: string; card_id: string; literature_id: string; locator: string; existed: boolean }>;
   patchLiteratureCitation(id: string, locator: string): Promise<{ id: string; locator: string }>;
   deleteLiteratureCitation(id: string): Promise<{ removed: boolean }>;
+
+  // 今日總結與靈感日記（雙端支援：SQLite 與 IndexedDB）
+  listDailyStreams(day: string): Promise<{ items: DailyStream[] }>;
+  listDailyStreamsRange(p: {
+    from_day?: string;
+    to_day?: string;
+    kind?: DailyStreamKind;
+    q?: string;
+    limit?: number;
+  }): Promise<DailyStreamsRangeResponse>;
+  createDailyStream(
+    day: string,
+    opts?: { kind?: DailyStreamKind; title?: string; review_text?: string },
+  ): Promise<DailyStream>;
+  patchDailyStream(
+    id: string,
+    patch: { title?: string; recall_text?: string; review_text?: string },
+    expected_updated_at: string,
+  ): Promise<DailyStream>;
+  unlockDailyStream(id: string, recall_text: string, expected_updated_at: string): Promise<DailyStream>;
+  finishDailyStream(id: string, review_text: string, expected_updated_at: string): Promise<DailyStream>;
+  reopenDailyStream(id: string, expected_updated_at: string): Promise<DailyStream>;
+  peekDailyStream(id: string): Promise<DailyStream>;
+  convertDailyStream(id: string, expected_updated_at: string): Promise<DailyStream>;
+  deleteDailyStream(id: string): Promise<{ deleted: boolean }>;
+  bindDailyCard(stream_id: string, card_id: string): Promise<DailyStream>;
+  unbindDailyCard(stream_id: string, card_id: string): Promise<DailyStream>;
+  listDailyChanges(from: string, to: string): Promise<DailyChangesResponse>;
+
+  // 心智圖（雙端支援：SQLite 與 IndexedDB）
+  getMindMap(board_id: string): Promise<MindMapData>;
+  patchMindMapTitle(board_id: string, mindmap_title: string): Promise<MindMapData>;
+  createMindNode(
+    board_id: string,
+    body: {
+      parent_id?: string | null;
+      type?: MindNodeType;
+      text?: string;
+      edge_label?: string;
+      ref_id?: string | null;
+      position?: number;
+    },
+  ): Promise<MindMapData>;
+  patchMindNode(
+    board_id: string,
+    node_id: string,
+    patch: { text?: string; edge_label?: string; collapsed?: 0 | 1 },
+  ): Promise<MindMapData>;
+  patchMindNodesCollapsed(
+    board_id: string,
+    items: { id: string; collapsed: 0 | 1 }[],
+  ): Promise<MindMapData>;
+  moveMindNode(
+    board_id: string,
+    node_id: string,
+    body: { parent_id: string | null; position: number },
+  ): Promise<MindMapData>;
+  deleteMindNode(
+    board_id: string,
+    node_id: string,
+    children?: MindNodeChildrenMode,
+  ): Promise<MindMapData>;
 }
 

@@ -23,13 +23,14 @@ import { subscribeOpenLiterature } from "./components/LiteratureField";
 import { LiteratureLibrary } from "./components/LiteratureLibrary";
 import { LiteraturePicker } from "./components/LiteraturePicker";
 import { CardOpenProvider, notifyCardDeleted, notifyCardTitleUpdated } from "./components/Markdown";
+import { MindMapOverview } from "./components/MindMapOverview";
 import { CardEditorPane, RightPanel, type Filter, type LiteraturePatch, type TabKey } from "./components/RightPanel";
 import { initDeviceEnvironment } from "./lib/device";
 import { useNotify } from "./notify";
 import type { BoardLink, BoardSummary, CardDetail, CardSummary, RelationType, Tag } from "./types";
 
 const VIEW_KEY = "cardboard:view";
-type ViewMode = "board" | "graph" | "cards" | "daily" | "literature";
+type ViewMode = "board" | "graph" | "cards" | "daily" | "literature" | "mindmap";
 
 // 還原重新整理前的白板、視圖與篩選；欄位型別不符一律丟棄，退回預設
 function loadSavedView(): { boardId: string | null; viewMode: ViewMode; filter: Filter } {
@@ -43,7 +44,8 @@ function loadSavedView(): { boardId: string | null; viewMode: ViewMode; filter: 
       v.viewMode === "graph" ||
       v.viewMode === "cards" ||
       v.viewMode === "daily" ||
-      v.viewMode === "literature"
+      v.viewMode === "literature" ||
+      v.viewMode === "mindmap"
     )
       view.viewMode = v.viewMode;
     const f = v.filter;
@@ -521,8 +523,8 @@ export default function App() {
 
   if (!booted) return <div className="boot">載入中…</div>;
 
-  // 日誌視圖整頁接管中央與右欄；standalone 沒有日誌視圖，不隱藏右側面板
-  const showRight = rightOpen && !(viewMode === "daily" && !isStandalone);
+  // 日誌視圖自帶右側異動與總覽面板，雙端皆整頁接管中央與右欄
+  const showRight = rightOpen && viewMode !== "daily";
 
   // 左側收合時的展開／主題按鈕：桌面版放進頂欄（在版面流內），獨立模式沒有頂欄，仍浮在左上角
   const collapsedBar = leftOpen ? null : (
@@ -543,7 +545,43 @@ export default function App() {
         aria-label={theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
         title={theme === "dark" ? "切換至淺色模式" : "切換至深色模式"}
       >
-        {theme === "dark" ? "☀️" : "🌙"}
+        {theme === "dark" ? (
+          <svg
+            width="15"
+            height="15"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="8" cy="8" r="3" />
+            <line x1="8" y1="1.5" x2="8" y2="3" />
+            <line x1="8" y1="13" x2="8" y2="14.5" />
+            <line x1="1.5" y1="8" x2="3" y2="8" />
+            <line x1="13" y1="8" x2="14.5" y2="8" />
+            <line x1="3.4" y1="3.4" x2="4.5" y2="4.5" />
+            <line x1="11.5" y1="11.5" x2="12.6" y2="12.6" />
+            <line x1="12.6" y1="3.4" x2="11.5" y2="4.5" />
+            <line x1="4.5" y1="11.5" x2="3.4" y2="12.6" />
+          </svg>
+        ) : (
+          <svg
+            width="15"
+            height="15"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M13.2 10.2A5.5 5.5 0 0 1 5.8 2.8a5.5 5.5 0 1 0 7.4 7.4Z" />
+          </svg>
+        )}
       </button>
     </div>
   );
@@ -583,6 +621,16 @@ export default function App() {
           onBoardsChanged={refreshBoards}
           onOpenLiterature={() => openLiterature()}
           literatureOpen={viewMode === "literature"}
+          onOpenDaily={() => {
+            setViewMode("daily");
+            setCenterEditing(false);
+          }}
+          dailyOpen={viewMode === "daily"}
+          onOpenMindmap={() => {
+            setViewMode("mindmap");
+            setCenterEditing(false);
+          }}
+          mindmapOpen={viewMode === "mindmap"}
           onFilter={(f) => {
             setFilter(f);
             setViewMode("cards");
@@ -741,7 +789,23 @@ export default function App() {
           )}
 
           <div className="center-stage">
-          {!isStandalone && viewMode !== "cards" ? (
+          {viewMode === "mindmap" ? (
+            <MindMapOverview
+              boards={boards}
+              rightOpen={rightOpen}
+              onToggleRight={() => setRightOpen((o) => !o)}
+              onSelectCard={showCardInContent}
+              onJumpBoardToCards={(targetBoardId) => {
+                setBoardId(targetBoardId);
+                setFilter({});
+                setViewMode("cards");
+                setCenterEditing(false);
+              }}
+              onBoardsChanged={refreshBoards}
+              report={report}
+              info={info}
+            />
+          ) : !isStandalone && viewMode !== "cards" ? (
             <>
               <Board
                 ref={boardRef}
@@ -805,6 +869,14 @@ export default function App() {
                 />
               )}
             </>
+          ) : viewMode === "daily" ? (
+            <DailyReview
+              version={version}
+              centerEditing={centerEditing}
+              onOpenCard={openCardInCenter}
+              report={report}
+              info={info}
+            />
           ) : (
             <IPadCardView
               cards={ipadCardList}
@@ -838,8 +910,11 @@ export default function App() {
                 className="center-editor-head"
                 style={isStandalone || viewMode === "cards" ? { paddingRight: 16 } : undefined}
               >
-                <button onClick={closeCenterEditor} title="返回（Esc）">
-                  ← 返回{isStandalone ? "卡片冊" : viewMode === "graph" ? "概念圖譜" : viewMode === "daily" ? "今日總結" : viewMode === "literature" ? "文獻庫" : "白板"}
+                <button
+                  onClick={closeCenterEditor}
+                  title="返回（Esc）"
+                >
+                  ← 返回{viewMode === "daily" ? "今日總結" : isStandalone ? "卡片冊" : viewMode === "graph" ? "概念圖譜" : viewMode === "literature" ? "文獻庫" : "白板"}
                 </button>
                 <span className="muted">
                   {selected.startsWith("note:")
@@ -847,9 +922,9 @@ export default function App() {
                     : selected.startsWith("lit:")
                       ? "文獻編輯模式"
                       : "卡片編輯模式"}
-                  （按 Esc 返回{isStandalone ? "卡片冊" : viewMode === "daily" ? "今日總結" : viewMode === "literature" ? "文獻庫" : "白板"}）
+                  （按 Esc 返回{viewMode === "daily" ? "今日總結" : isStandalone ? "卡片冊" : viewMode === "literature" ? "文獻庫" : "白板"}）
                 </span>
-                {(isStandalone || viewMode === "cards") && (
+                {(isStandalone || viewMode === "cards") && viewMode !== "daily" && (
                   <button
                     type="button"
                     className="toggle-right"

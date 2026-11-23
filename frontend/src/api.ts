@@ -28,6 +28,8 @@ import type {
   CurationStatus,
   DailyChangesResponse,
   DailyStream,
+  DailyStreamKind,
+  DailyStreamsRangeResponse,
   DeletePreview,
   LinkStatus,
   Literature,
@@ -35,6 +37,9 @@ import type {
   LiteratureDeleteImpact,
   LiteratureSummary,
   MediaInfo,
+  MindMapData,
+  MindNodeChildrenMode,
+  MindNodeType,
   RelationPattern,
   RelationPatternCreate,
   RelationPatternPatch,
@@ -317,7 +322,7 @@ export const httpApi = {
       images_pruned: number;
       image_links_pruned: number;
       relation_patterns_pruned: number; // 對齊 cards.py::sync_overwrite：保留本機句型時被捨棄的筆數
-      // 刪除重複宣告的 card_relations_pruned（第 314 行已定義），消除 TS2300 重複識別碼錯誤。
+      mind_nodes_pruned: number;
     }>(
       "POST",
       "/sync/overwrite",
@@ -396,9 +401,19 @@ export const httpApi = {
   patchLiteratureCitation: (id: string, locator: string) =>
     request<{ id: string; locator: string }>("PATCH", `/literature-citations/${id}`, { locator }),
   deleteLiteratureCitation: (id: string) => request<{ removed: boolean }>("DELETE", `/literature-citations/${id}`),
-  // daily（今日總結）：僅電腦端 SQLite。新增方法時 driver.ts／httpDriver.ts 要同步，否則 Proxy 回 501
+  // daily（今日總結）：雙端支援（SQLite 與 IndexedDB）。新增方法時 driver.ts／httpDriver.ts／indexedDbDriver.ts 要同步
   listDailyStreams: (day: string) => request<{ items: DailyStream[] }>("GET", `/daily/streams${qs({ day })}`),
-  createDailyStream: (day: string) => request<DailyStream>("POST", "/daily/streams", { day }),
+  listDailyStreamsRange: (p: {
+    from_day?: string;
+    to_day?: string;
+    kind?: DailyStreamKind;
+    q?: string;
+    limit?: number;
+  }) => request<DailyStreamsRangeResponse>("GET", `/daily/streams/range${qs(p)}`),
+  createDailyStream: (
+    day: string,
+    opts?: { kind?: DailyStreamKind; title?: string; review_text?: string },
+  ) => request<DailyStream>("POST", "/daily/streams", { day, ...opts }),
   patchDailyStream: (
     id: string,
     patch: { title?: string; recall_text?: string; review_text?: string },
@@ -420,6 +435,39 @@ export const httpApi = {
     request<DailyStream>("DELETE", `/daily/streams/${stream_id}/cards/${card_id}`),
   listDailyChanges: (from: string, to: string) =>
     request<DailyChangesResponse>("GET", `/daily/changes${qs({ from, to })}`),
+  // mindmap（心智圖）：雙端支援（SQLite 與 IndexedDB）。新增方法時 driver.ts／httpDriver.ts／indexedDbDriver.ts 要同步
+  getMindMap: (board_id: string) => request<MindMapData>("GET", `/boards/${board_id}/mindmap`),
+  patchMindMapTitle: (board_id: string, mindmap_title: string) =>
+    request<MindMapData>("PATCH", `/boards/${board_id}/mindmap`, { mindmap_title }),
+  createMindNode: (
+    board_id: string,
+    body: {
+      parent_id?: string | null;
+      type?: MindNodeType;
+      text?: string;
+      edge_label?: string;
+      ref_id?: string | null;
+      position?: number;
+    },
+  ) => request<MindMapData>("POST", `/boards/${board_id}/mindmap/nodes`, body),
+  patchMindNode: (
+    board_id: string,
+    node_id: string,
+    patch: { text?: string; edge_label?: string; collapsed?: 0 | 1 },
+  ) => request<MindMapData>("PATCH", `/boards/${board_id}/mindmap/nodes/${node_id}`, patch),
+  // 原因：一次折疊／展開多個節點，避免逐筆 PATCH 造成多次往返與中途失敗的半套狀態；新增方法時 driver.ts／httpDriver.ts／indexedDbDriver.ts 要同步
+  patchMindNodesCollapsed: (board_id: string, items: { id: string; collapsed: 0 | 1 }[]) =>
+    request<MindMapData>("PATCH", `/boards/${board_id}/mindmap/nodes/collapsed`, { items }),
+  moveMindNode: (
+    board_id: string,
+    node_id: string,
+    body: { parent_id: string | null; position: number },
+  ) => request<MindMapData>("POST", `/boards/${board_id}/mindmap/nodes/${node_id}/move`, body),
+  deleteMindNode: (
+    board_id: string,
+    node_id: string,
+    children?: MindNodeChildrenMode,
+  ) => request<MindMapData>("DELETE", `/boards/${board_id}/mindmap/nodes/${node_id}${qs({ children })}`),
 };
 
 import { getStorageDriver } from "./lib/storage";
@@ -449,4 +497,3 @@ export const api: typeof httpApi = new Proxy(httpApi, {
 if (typeof window !== "undefined") {
   (window as any).__cardnoteApi = api;
 }
-

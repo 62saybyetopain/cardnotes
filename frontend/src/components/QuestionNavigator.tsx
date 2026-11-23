@@ -8,6 +8,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { api } from "../api";
 import type { BoardQuestionNode, BoardSummary, QuestionPage, QuestionPageSelf, QuestionRelation, QuestionRelationEdge, QuestionRelationType, QuestionStatus } from "../types";
 import { QUESTION_DIRECTED_RELATIONS, QUESTION_RELATION_LABELS, QUESTION_RELATION_TYPES } from "../types";
+import { MindMap } from "./MindMap";
 
 interface Props {
   open: boolean;
@@ -15,8 +16,10 @@ interface Props {
   boardId: string | null;
   boards: BoardSummary[]; // 用來判斷歷史裡的白板還在不在
   onSelectBoard(id: string): void;
+  onSelectCard?(id: string): void;
   onBoardsChanged(): void;
   report(e: unknown, prefix?: string): void;
+  info?(text: string): void;
 }
 
 const GRID_THRESHOLD = 8; // 子問題超過這個數量，自動改成網格＋搜尋
@@ -42,7 +45,7 @@ const CSS = `
 .qnav-page.side{animation:qnav-side .15s ease-out}
 .qnav-card{cursor:pointer;transition:border-color .12s,transform .12s}
 .qnav-card:hover,.qnav-card:focus-visible{border-color:var(--accent,#60a5fa)!important;transform:translateY(-1px);outline:none}
-.qnav-btn{background:transparent;border:1px solid var(--line,#475569);color:var(--text);border-radius:6px;padding:2px 8px;cursor:pointer;font-size:12px;line-height:20px}
+.qnav-btn{background:transparent;border:1px solid var(--line,#475569);color:var(--text);border-radius:6px;padding:2px 8px;cursor:pointer;font-size:12px;line-height:20px;white-space:nowrap;flex-shrink:0}
 .qnav-btn:disabled{opacity:.4;cursor:default}
 .qnav-btn[aria-expanded="true"],.qnav-btn[aria-pressed="true"]{border-color:var(--accent,#60a5fa);background:var(--row-hover,rgba(59,130,246,.15))}
 .qnav-grp{display:inline-flex;flex-shrink:0}
@@ -594,9 +597,11 @@ function TreeBranch({
   );
 }
 
-export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoard, onBoardsChanged, report }: Props) {
+export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoard, onSelectCard, onBoardsChanged, report, info }: Props) {
   const reportRef = useRef(report);
   reportRef.current = report;
+  const [navTab, setNavTab] = useState<"path" | "mindmap">("path");
+  const [mindmapExpanded, setMindmapExpanded] = useState(false);
   const [page, setPage] = useState<QuestionPage | null>(null);
   const pageRef = useRef<QuestionPage | null>(null);
   const [dir, setDir] = useState<"down" | "up" | "side">("side");
@@ -1085,16 +1090,16 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
       role="region"
       aria-label="問題路徑導航器"
       onKeyDown={(e) => {
-        if (e.key === "Escape") (treeOpen ? setTreeOpen(false) : onClose());
+        if (e.key === "Escape" && navTab === "path") (treeOpen ? setTreeOpen(false) : onClose());
       }}
       style={{
         position: "absolute",
         left: 56, // 讓出左下角的縮放／適應畫面控制項
         right: 10,
         bottom: 10,
-        height: "32%",
-        minHeight: 196,
-        maxHeight: "60%",
+        height: navTab === "mindmap" ? (mindmapExpanded ? "86%" : "62%") : "32%",
+        minHeight: navTab === "mindmap" ? 340 : 196,
+        maxHeight: navTab === "mindmap" ? "90%" : "60%",
         zIndex: 20,
         display: "flex",
         flexDirection: "column",
@@ -1106,7 +1111,31 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
       }}
     >
       <style>{CSS}</style>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderBottom: "1px solid var(--line, #475569)" }}>
+      {/* 原因：視窗太窄時按鈕被擠壓並溢出面板；允許換行，並讓每個按鈕保持完整寬度 */}
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "4px 6px", padding: "6px 10px", borderBottom: "1px solid var(--line, #475569)" }}>
+        <div className="qnav-grp" role="tablist" aria-label="導航器模式">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={navTab === "path"}
+            aria-pressed={navTab === "path"}
+            className="qnav-btn"
+            onClick={() => setNavTab("path")}
+          >
+            路徑
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={navTab === "mindmap"}
+            aria-pressed={navTab === "mindmap"}
+            className="qnav-btn"
+            onClick={() => setNavTab("mindmap")}
+          >
+            心智圖
+          </button>
+        </div>
+        <span className="qnav-sep" aria-hidden />
         <div className="qnav-grp" role="group" aria-label="瀏覽歷史">
           <button className="qnav-btn" disabled={back < 0} onClick={() => goHistory(-1)} title={back >= 0 ? `上一步（剛才看過的問題）：${nameOf(hist.current.stack[back])}` : "沒有上一步"} aria-label="上一步">
             ◀
@@ -1129,17 +1158,19 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
           >
             ⤒ 最上層
           </button>
-          <button
-            className="qnav-btn"
-            aria-expanded={treeOpen}
-            onClick={() => setTreeOpen((v) => !v)}
-            title="展開整棵問題樹（可橫向、縱向捲動）"
-            aria-label="展開問題樹狀圖"
-          >
-            {treeOpen ? "▴ 樹狀圖" : "▾ 樹狀圖"}
-          </button>
+          {navTab === "path" && (
+            <button
+              className="qnav-btn"
+              aria-expanded={treeOpen}
+              onClick={() => setTreeOpen((v) => !v)}
+              title="展開整棵問題樹（可橫向、縱向捲動）"
+              aria-label="展開問題樹狀圖"
+            >
+              {treeOpen ? "▴ 樹狀圖" : "▾ 樹狀圖"}
+            </button>
+          )}
         </div>
-        <nav aria-label="問題路徑" style={{ display: "flex", alignItems: "center", gap: 2, flex: 1, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" }}>
+        <nav aria-label="問題路徑" style={{ display: "flex", alignItems: "center", gap: 2, flex: "1 1 120px", minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" }}>
           {page?.path.map((p) => (
             <span key={p.id} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
               <button className="qnav-crumb" onClick={() => onSelectBoard(p.id)} title={p.name}>
@@ -1150,7 +1181,16 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
           ))}
           <strong style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis" }}>{page?.self.name ?? ""}</strong>
         </nav>
-        {treeOpen && (
+        {navTab === "mindmap" && (
+          <button
+            className="qnav-btn"
+            onClick={() => setMindmapExpanded((v) => !v)}
+            title={mindmapExpanded ? "還原標準視窗高度" : "加高心智圖視窗"}
+          >
+            {mindmapExpanded ? "▾ 還原高度" : "▴ 加高畫布"}
+          </button>
+        )}
+        {navTab === "path" && treeOpen && (
           <button
             className="qnav-btn"
             aria-pressed={relPanel}
@@ -1160,7 +1200,7 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
             ⇄ 關聯面板
           </button>
         )}
-        {effective === "grid" && !treeOpen && (
+        {navTab === "path" && effective === "grid" && !treeOpen && (
           <input
             type="search"
             value={search}
@@ -1170,16 +1210,34 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
             style={{ width: 140, fontSize: 12 }}
           />
         )}
-        <button className="qnav-btn" onClick={() => setView(effective === "row" ? "grid" : "row")} title="切換橫向卡片／網格" aria-label="切換顯示方式">
-          {effective === "row" ? "▦ 網格" : "▭ 橫向"}
-        </button>
-        <button className="qnav-btn" disabled={!page || busy} onClick={() => void addQuestion()}>
-          ＋ 新增問題
-        </button>
+        {navTab === "path" && (
+          <button className="qnav-btn" onClick={() => setView(effective === "row" ? "grid" : "row")} title="切換橫向卡片／網格" aria-label="切換顯示方式">
+            {effective === "row" ? "▦ 網格" : "▭ 橫向"}
+          </button>
+        )}
+        {navTab === "path" && (
+          <button className="qnav-btn" disabled={!page || busy} onClick={() => void addQuestion()}>
+            ＋ 新增問題
+          </button>
+        )}
         <button className="qnav-btn" onClick={onClose} title="收起（Esc）" aria-label="收起導航器">
           ✕
         </button>
       </div>
+      {navTab === "mindmap" ? (
+        <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+          <MindMap
+            boardId={boardId}
+            info={info}
+            isIpad={false}
+            onJumpBoard={onSelectBoard}
+            onMutated={onBoardsChanged}
+            onSelectCard={onSelectCard}
+            report={report}
+          />
+        </div>
+      ) : (
+      <>
       {added && (
         <div className="muted" style={{ padding: "3px 12px", fontSize: 12, display: "flex", gap: 8, alignItems: "center" }} role="status">
           <span>已新增「{added.name}」</span>
@@ -1249,7 +1307,6 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
               </button>
             </span>
           ))}
-          {/* 關聯只在樹狀圖的關聯面板建立；這一列暫時只顯示與刪除，檢查點 4 會換成新的呈現 */}
         </div>
       )}
       <div ref={bodyRef} style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 10 }}>
@@ -1371,6 +1428,8 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
           </div>
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }

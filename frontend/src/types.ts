@@ -465,6 +465,7 @@ export interface QuestionRelationEdge {
 export interface BoardSummary {
   id: string;
   name: string;
+  mindmap_title?: string;
   card_count: number;
   question?: BoardQuestion | null;
 }
@@ -475,6 +476,7 @@ export interface BoardContents {
   literatures: number; // 文獻的擺放位置
   notes: number; // 靈感筆記（文字會消失）
   groups: number;
+  mind_nodes: number; // 心智圖節點
 }
 export interface BoardDeletePreview {
   id: string;
@@ -549,6 +551,7 @@ export interface BoardRecommendations {
 export interface BoardData {
   id: string;
   name: string;
+  mindmap_title?: string;
   question?: BoardQuestion | null; // 一般白板沒有；Dexie 也沒有
   questions?: BoardQuestionNode[]; // 這塊白板畫布上的子問題節點（不含已封存）
   cards: BoardCard[];
@@ -602,7 +605,7 @@ export interface SyncPackage {
   tags: Tag[];
   card_tags: { card_id: string; tag_id: string }[];
   links: BoardLink[];
-  boards: { id: string; name: string }[];
+  boards: { id: string; name: string; mindmap_title?: string }[];
   // z＝疊放順序，僅電腦端匯出會帶；沒有 z＝iPad 封包或舊備份，覆蓋時沿用本機同一張卡在同一塊白板上的 z（iPad 無法調整 z，匯出不帶）
   board_cards: { board_id: string; card_id: string; x?: number; y?: number; w?: number; h?: number; z?: number }[];
   board_groups?: BoardGroup[];
@@ -619,8 +622,162 @@ export interface SyncPackage {
   // 後端 sync_export 的文獻區塊；前端只讀寫 items[].body（內文引用圖片），其餘欄位原樣保留。沒有此欄＝iPad 封包或舊備份
   // 原因：collectMediaIds 與還原時的圖片 id 改寫都要碰文獻內文，沒有型別宣告就得用 any 繞過。
   literature?: { items: { id: string; body: string }[]; [key: string]: unknown };
+  // 日誌（卡片總結與靈感日記）：兩欄必須同進同出（後端 schemas.SyncPackage._daily_pair 驗證）
+  daily_streams?: DailyStreamSyncItem[];
+  daily_stream_cards?: DailyStreamCardSyncItem[];
+  // 心智圖節點（雙端支援）；沒有此欄＝舊備份，覆蓋時保留本機既有心智圖並修剪已消失白板的孤兒節點
+  mind_nodes?: MindNodeSyncItem[];
+  mindmap_board_ids?: string[];
+  tombstones?: SyncTombstoneItem[];
   // 電腦端雲端備份才有：卡片內文與白板圖片引用的圖檔清單；iPad 據此下載缺少的圖片（iPad 不渲染白板圖片，不會下載它們）
   media?: SyncMediaEntry[];
+}
+
+export type MindNodeType = "text" | "card" | "board";
+export type MindNodeRefStatus = "ok" | "archived" | "missing";
+export type MindNodeChildrenMode = "block" | "subtree" | "promote";
+
+export interface MindNode {
+  id: string;
+  board_id: string;
+  parent_id: string | null;
+  sort_order: number;
+  type: MindNodeType;
+  text: string;
+  edge_label: string;
+  ref_id: string | null;
+  ref_title_snapshot: string;
+  collapsed: 0 | 1;
+  created_at: string;
+  updated_at: string;
+  ref_status: MindNodeRefStatus | null;
+  ref_title: string | null;
+}
+
+export interface MindMapData {
+  board_id: string;
+  board_name: string;
+  mindmap_title: string;
+  display_title: string;
+  nodes: MindNode[];
+}
+
+export interface MindNodeSyncItem {
+  id: string;
+  board_id: string;
+  parent_id: string | null;
+  sort_order: number;
+  type: MindNodeType;
+  text: string;
+  edge_label: string;
+  ref_id: string | null;
+  ref_title_snapshot: string;
+  collapsed: 0 | 1;
+  created_at: string;
+  updated_at: string;
+}
+
+export type TombstoneEntityType =
+  | "card"
+  | "tag"
+  | "card_tag"
+  | "link"
+  | "board"
+  | "board_card"
+  | "daily_stream"
+  | "daily_stream_card";
+
+export interface SyncTombstoneItem {
+  entity_type: TombstoneEntityType;
+  entity_key: string;
+  deleted_at: string;
+  label_snapshot: string;
+}
+
+export interface SyncTombstonePending extends SyncTombstoneItem {
+  local_updated_at: string | null;
+  has_conflict: boolean;
+}
+
+export interface SyncLinkUpdateDiff extends BoardLink {
+  old_status: LinkStatus;
+  old_reason: string;
+}
+
+export interface SyncMindMapDiff {
+  board_id: string;
+  board_name: string;
+  old_mindmap_title: string;
+  new_mindmap_title: string;
+  title_changed: boolean;
+  added_count: number;
+  updated_count: number;
+  removed_count: number;
+  old_node_count: number;
+  new_node_count: number;
+  old_updated_at: string;
+  new_updated_at: string;
+  is_newer: boolean;
+}
+
+export interface SyncMindNodeDiff {
+  id: string;
+  board_id: string;
+  board_name: string;
+  old_text: string;
+  new_text: string;
+  old_updated_at: string;
+  new_updated_at: string;
+  diff_fields: string[];
+}
+
+export interface SyncMindmapTitleDiff {
+  board_id: string;
+  board_name: string;
+  old_mindmap_title: string;
+  new_mindmap_title: string;
+}
+
+export interface DailyStreamSyncItem {
+  id: string;
+  day: string;
+  position: number;
+  kind: DailyStreamKind;
+  title: string;
+  status: DailyStatus;
+  recall_text: string;
+  review_text: string;
+  peeked_at: string | null;
+  unlocked_at: string | null;
+  converted_card_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DailyStreamCardSyncItem {
+  stream_id: string;
+  card_id: string;
+  created_at: string;
+}
+
+export interface SyncDailyStreamDiff {
+  id: string;
+  day: string;
+  kind: DailyStreamKind;
+  title: string;
+  old_title: string;
+  new_title: string;
+  old_status: DailyStatus;
+  new_status: DailyStatus;
+  old_recall_text: string;
+  new_recall_text: string;
+  old_review_text: string;
+  new_review_text: string;
+  old_converted_card_id: string | null;
+  new_converted_card_id: string | null;
+  diff_fields: string[];
+  old_updated_at: string;
+  new_updated_at: string;
 }
 
 export interface SyncCardDiff {
@@ -645,6 +802,16 @@ export interface SyncDiffReport {
   card_tags_new: { card_id: string; tag_id: string }[];
   links_new: BoardLink[];
   board_cards_new: { board_id: string; card_id: string }[];
+  daily_streams_new?: DailyStreamSyncItem[];
+  daily_streams_updated?: SyncDailyStreamDiff[];
+  daily_streams_unchanged_count?: number;
+  daily_stream_cards_new?: DailyStreamCardSyncItem[];
+  links_updated?: SyncLinkUpdateDiff[];
+  mindmaps_updated?: SyncMindMapDiff[];
+  mind_nodes_new?: MindNodeSyncItem[];
+  mind_nodes_updated?: SyncMindNodeDiff[];
+  mindmap_titles_updated?: SyncMindmapTitleDiff[];
+  tombstones_pending?: SyncTombstonePending[];
 }
 
 export interface SyncApplyRequest {
@@ -654,9 +821,21 @@ export interface SyncApplyRequest {
   tag_ids_to_update: string[];
   card_tags_to_add: { card_id: string; tag_id: string }[];
   links_to_add: BoardLink[];
+  links_to_update?: BoardLink[];
   board_cards_to_add: { board_id: string; card_id: string }[];
   // 比對差異當下的電腦端 updated_at（key＝card_ids_to_update 內的卡片 id）；後端以相等比較偵測比對後被改動的卡片，見 cards.py::sync_apply
   card_expected_updated_at: Record<string, string>;
+  daily_stream_ids_to_add?: string[];
+  daily_stream_ids_to_update?: string[];
+  daily_stream_expected_updated_at?: Record<string, string>;
+  daily_stream_cards_to_add?: DailyStreamCardSyncItem[];
+  mindmap_board_ids_to_apply?: string[];
+  mindmap_expected_updated_at?: Record<string, string>;
+  mind_node_ids_to_add?: string[];
+  mind_node_ids_to_update?: string[];
+  mind_node_expected_updated_at?: Record<string, string>;
+  mindmap_title_board_ids_to_update?: string[];
+  tombstones_to_apply?: SyncTombstoneItem[];
   package: SyncPackage;
 }
 
@@ -669,10 +848,19 @@ export interface SyncApplyResult {
     tags_updated: number;
     card_tags_added: number;
     links_added: number;
+    links_updated?: number;
     board_cards_added: number;
     tags_merged?: number;
     board_cards_skipped?: number;
     boards_created?: number;
+    daily_streams_added?: number;
+    daily_streams_updated?: number;
+    daily_stream_cards_added?: number;
+    mindmaps_applied?: number;
+    mind_nodes_added?: number;
+    mind_nodes_updated?: number;
+    mindmap_titles_updated?: number;
+    tombstones_applied?: number;
   };
 }
 
@@ -858,14 +1046,16 @@ export interface LiteratureDeleteImpact {
   board_names: string[];
 }
 
-// 今日總結（日誌）。值必須與後端 schemas.py 的 DailyStatus／DailyChangeKind 一致
+// 今日總結（日誌）。值必須與後端 schemas.py 的 DailyStatus／DailyStreamKind／DailyChangeKind 一致
 export type DailyStatus = "recalling" | "comparing" | "done";
+export type DailyStreamKind = "card" | "journal";
 export type DailyChangeKind = "new" | "updated";
 
 export interface DailyStream {
   id: string;
   day: string; // 用戶端本地日期 YYYY-MM-DD
   position: number;
+  kind: DailyStreamKind;
   title: string;
   status: DailyStatus;
   recall_text: string;
@@ -876,6 +1066,11 @@ export interface DailyStream {
   created_at: string;
   updated_at: string;
   cards: { id: string; title: string }[];
+}
+
+export interface DailyStreamsRangeResponse {
+  items: DailyStream[];
+  truncated: boolean;
 }
 
 export interface DailyChange {

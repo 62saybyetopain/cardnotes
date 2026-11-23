@@ -8,6 +8,10 @@ import type {
   BoardQuestion,
   CardType,
   CurationStatus,
+  DailyStatus,
+  DailyStreamKind,
+  MindNodeType,
+  TombstoneEntityType,
 } from "../../types";
 import { upgradeLinkRelation } from "../relations";
 
@@ -46,10 +50,34 @@ export interface DbCardTag {
 export interface DbBoard {
   id: string;
   name: string;
+  mindmap_title?: string;
   created_at?: string;
   updated_at?: string;
   // 電腦端問題白板的母子結構；一般白板沒有。非索引欄位，Dexie 不需要升版，舊資料沒有此欄
   question?: BoardQuestion | null;
+}
+
+export interface DbMindNode {
+  id: string;
+  board_id: string;
+  parent_id: string | null;
+  sort_order: number;
+  type: MindNodeType;
+  text: string;
+  edge_label: string;
+  ref_id: string | null;
+  ref_title_snapshot: string;
+  collapsed: 0 | 1;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbSyncTombstone {
+  key: string;
+  entity_type: TombstoneEntityType;
+  entity_key: string;
+  deleted_at: string;
+  label_snapshot: string;
 }
 
 export interface DbBoardCard {
@@ -81,6 +109,29 @@ export interface DbMedia {
   created_at: string;
 }
 
+export interface DbDailyStream {
+  id: string;
+  day: string;
+  position: number;
+  kind: DailyStreamKind;
+  title: string;
+  status: DailyStatus;
+  recall_text: string;
+  review_text: string;
+  peeked_at: string | null;
+  unlocked_at: string | null;
+  converted_card_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbDailyStreamCard {
+  id?: number;
+  stream_id: string;
+  card_id: string;
+  created_at: string;
+}
+
 export interface DbSyncMeta {
   key: string;
   value: unknown;
@@ -97,7 +148,11 @@ export class CardboardDatabase extends Dexie {
   board_groups!: Table<BoardGroup, string>;
   board_notes!: Table<BoardNote, string>;
   media!: Table<DbMedia, string>;
+  daily_streams!: Table<DbDailyStream, string>;
+  daily_stream_cards!: Table<DbDailyStreamCard, number>;
   sync_meta!: Table<DbSyncMeta, string>;
+  mind_nodes!: Table<DbMindNode, string>;
+  sync_tombstones!: Table<DbSyncTombstone, string>;
 
   constructor() {
     super("cardboard_db");
@@ -139,6 +194,18 @@ export class CardboardDatabase extends Dexie {
     // v5：新增 sync_meta 存放同步基準線，確保與卡片資料同存於 IndexedDB，不會因 Safari 單獨清理 localStorage 而遺失
     this.version(5).stores({
       sync_meta: "key",
+    });
+    // v6：新增日誌資料表（daily_streams、daily_stream_cards），供網頁／iPad 端離線記錄與同步
+    this.version(6).stores({
+      daily_streams: "id, day, kind, [day+position]",
+      daily_stream_cards: "++id, [stream_id+card_id], stream_id, card_id",
+    });
+    // v7：新增心智圖資料表 mind_nodes，索引避開可為 null 的 parent_id
+    this.version(7).stores({
+      mind_nodes: "id, board_id, ref_id",
+    });
+    this.version(8).stores({
+      sync_tombstones: "key, entity_type, deleted_at",
     });
   }
 }

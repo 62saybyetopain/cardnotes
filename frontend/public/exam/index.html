@@ -48,6 +48,7 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 input.num{width:4.5em}
 input[type=file]{border:0;background:none;padding:4px 0;box-shadow:none}
 textarea{min-height:64px;resize:vertical}
+.ed textarea{min-height:10em;max-height:70vh;field-sizing:content}
 label{display:block;margin:12px 0 4px;font-weight:500}
 details{margin:6px 0}
 summary{cursor:pointer;color:var(--muted)}
@@ -252,7 +253,7 @@ const po=(p,q)=>(p.passages||[]).find(x=>x.id===q.pid);
 
 function fromMineru(j, scopePrefix){
   const out=[];
-  j.pdf_info.forEach((pg,pi)=>{if(pi>0)out.push({t:'brk'});pg.para_blocks.forEach(b=>{
+  j.pdf_info.forEach((pg,pi)=>{if(pi>0)out.push({t:'brk'});[...(pg.discarded_blocks||[]).filter(b=>b.type==='header'&&/^\s*▲/.test(linesOf(b)[0]||'')),...pg.para_blocks].forEach(b=>{
     // 原因：頁首過濾（y≤62）會誤殺貼在頁面最上緣、只有一行的「14. …」詳解或題目；開頭是題號的區塊一律保留。
     if(pi>0&&b.bbox&&b.bbox[3]<=62&&(b.type==='title'||b.type==='text')&&!/^\s*\d{1,3}\s*[.．、](?!\d)/.test(linesOf(b)[0]||''))return;
     // 原因：圖表（chart）區塊原本沒人處理，折線圖等圖檔在資料夾裡卻不屬於任何題目。
@@ -351,7 +352,7 @@ function assemble(blocks,keyText){
       if(inNotice){if(/翻閱試題本作答|開始作答/.test(s)){inNotice=false}continue}
       // 原因：「試題詳解」區沒被排除，解析的 1. 2. 會變成假題目，且答案列 1.(B) 2.(A)… 沒被讀取；進入答案區後只收這種純答案列，其餘照舊略過。
       // 原因：第 1 題的編號若在圖裡，「1.」之前的圖與文字原本因 ex 為空被丟掉；先放進編號 0 的暫存詳解，缺號切分時才有東西可切。
-      if(/參考答案|試題詳解/.test(s)){inKey=true;cur=null;if(!ex)ex=pre={no:0,blocks:[],cuts:[],fresh:false};continue}
+      if(/參考答案|試題詳解|【\s*解答\s*】/.test(s)){inKey=true;cur=null;if(!ex)ex=pre={no:0,blocks:[],cuts:[],fresh:false};continue}
       if(inKey){
         if(/^(?:\d{1,3}\s*[.、．]?\s*[(（][A-Ha-h]{1,8}[)）]\s*)+$/.test(s.trim())){kl.push(s.replace(/[(（]([A-Ha-h]{1,8})[)）]/g,'$1'));continue}
         // 原因：答案列之後的「N. …」是每題的詳解。編號要依序（容許跳過 1~2 個）且不超過最後一題，避免把詳解裡的步驟編號當成新的一題。
@@ -399,7 +400,7 @@ function assemble(blocks,keyText){
       // 原因：MinerU 會把題幹與選項併成同一行（中間含 \n），(.*) 不跨行會讓整題認不出來；改用 [\s\S]* 讓換行也算題目內容。
       m=s.match(/^(\d{1,3})\s*[.．、](?!\d)\s*([\s\S]*)$/);
       const hasOpt=q=>q&&splitOpts(q.blocks.filter(b=>b.t==='text').map(b=>b.v).join('\n')).opts.length>=2;
-      if(m&&((+m[1]===1)||(+m[1]>last&&+m[1]<=last+3&&(!cur||last===0||hasOpt(cur)||!/^\d+\s*[.．、]/.test(m[2]))))){
+      if(m&&((+m[1]===1)||(+m[1]>last&&(+m[1]<=last+3||(f&&splitOpts(b.ls.join('\n')).opts.length>=2))&&(!cur||last===0||hasOpt(cur)||!/^\d+\s*[.．、]/.test(m[2]))))){
         last=+m[1];cur={no:last,blocks:[{t:'text',v:m[2]}]};
         if(pc&&last>pc.to)pc=null;
         if(pc&&last>=pc.from)cur.pid=pc.id;
@@ -642,6 +643,7 @@ const qidOf=(p,q)=>q.qid||cid(p,q);
 // 原因：重做／抽題卷會複製題組，複本的 oid 指向原題組；改題組時要連同這些複本一起改，與題組文字既有的同步規則一致。回傳 [考卷, 題組] 配對（含自己）。
 const pTw=(p,ps)=>{const pk=ps.oid||p.id+':'+ps.id;return S.papers.flatMap(x=>x.passages.filter(z=>z===ps||(z.oid||x.id+':'+z.id)===pk).map(z=>[x,z]))};
 const twins=(p,q)=>{const id=qidOf(p,q),r=[];S.papers.forEach(x=>x.questions.forEach(y=>{if(y!==q&&qidOf(x,y)===id)r.push([x,y])}));return r};
+const srcOf=(p,q)=>twins(p,q).find(a=>a[0].source!=='compose');
 function syncEdit(p,q,f,v){
   const tw=twins(p,q),oo=o=>o.o||o.k;
   if(f.startsWith('eb:')){const j=+f.slice(3);q.blocks[j].v=v;tw.forEach(([x,y])=>{if(y.blocks[j])y.blocks[j].v=v})}
@@ -1356,7 +1358,7 @@ const subjNames=()=>[...new Set([...S.subjs,...S.papers.map(p=>p.subj||'').filte
 function paperRow(p){
   const w=p.questions.filter(q=>q.st==='x').length;
   // 原因：stage 預設是 1，所以每份沒碰過的考卷都顯示「作答中」；改成已按開始作答、或確實有作答（舊資料）且尚未交卷才顯示。
-  const st=p.stage>1?'檢討中・錯 '+w:(p.started||p.questions.some(q=>q.mine))?'作答中':'';
+  const st=p.stage>1?'檢討中・錯 '+w:p.started?'作答中':'';
   // data-a="stop"：點下拉選單時不要觸發整列的「開啟考卷」。
   const sel='<select data-a="stop" data-f="psubj" data-id="'+p.id+'" title="移到分類" aria-label="移到分類">'+['',...subjNames()].map(s=>'<option value="'+esc(s)+'"'+((p.subj||'')===s?' selected':'')+'>'+esc(s||'未分類')+'</option>').join('')+'</select>';
   return'<div class="row" data-a="open" data-id="'+p.id+'"><b>'+nameHtml(p.name)+'</b><span>'+p.questions.length+' 題'+(st?'・'+st:'')+'</span>'+sel+'<button class="ghost" data-a="redo" data-id="'+p.id+'">再做一次</button><button class="ghost" data-a="del" data-id="'+p.id+'">'+(S.delc===p.id?'再按一次確認刪除':'刪除')+'</button></div>';
@@ -1443,6 +1445,7 @@ const keyImgUI=p=>{
 const ta=(f,i,v,ph)=>'<textarea data-f="'+f+'" data-i="'+i+'" placeholder="'+ph+'">'+esc(v)+'</textarea>';
 const ref=q=>q.from?'<small>'+esc(q.from)+'</small>':'';
 const eb=i=>'<button class="ghost" data-a="edit" data-i="'+i+'">✎ 編輯</button>';
+const sb=(p,q,i)=>p.source!=='compose'?'':srcOf(p,q)?'<button class="ghost" data-a="srcjump" data-i="'+i+'">↗ 跳到原卷第 '+srcOf(p,q)[1].no+' 題</button>':'<small>找不到原卷</small>';
 const imgDel=(a,i,j,b,t)=>'<div class="mk">'+(U[b.id]?'<img src="'+U[b.id]+'" alt="" style="max-height:56px;max-width:120px;background:#fff;border-radius:4px">':'')+'<button class="ghost" data-a="'+a+'" data-i="'+i+'" data-j="'+j+'">✕ 移除'+t+'</button></div>';
 const pEb=i=>'<button class="ghost" data-a="pedit" data-i="'+i+'">✎ 編輯題組</button>';
 const passagePanel=(p,ps,i)=>'<div class="ed">'+ps.blocks.map((b,j)=>{
@@ -1454,9 +1457,10 @@ function editPanel(p,q,i,k){
   const et=(f,v,l)=>'<small>'+l+'</small><textarea data-f="'+f+'" data-i="'+i+'">'+esc(v)+'</textarea>';
   return'<div class="ed">'+
   q.blocks.map((b,j)=>b.t==='text'||b.t==='code'?et('eb:'+j,b.v,'題幹'):'').join('')+(q.blocks.some(b=>b.t==='text')?'':'<button class="ghost" data-a="addtxt" data-i="'+i+'">＋補題幹文字</button>')+
-  (q.exp||[]).map((b,j)=>b.t==='text'?et('ex:'+j,b.v,'詳解文字'):'').join('')+'<div class="mk"><button class="ghost" data-a="addxtxt" data-i="'+i+'">＋補詳解文字</button></div><small>補詳解圖片（接在詳解最後）</small><input type="file" accept="image/*" multiple data-addximg data-i="'+i+'">'+
+  (q.options.length?'':'<small>選項：這題沒有切出選項，按「＋新增選項」一次建立 A–D 四個</small>')+
   q.options.map(o=>'<small>選項 '+o.k+'</small><input data-f="eo:'+o.k+'" data-i="'+i+'" value="'+esc(o.v)+'">').join('')+
   '<div class="mk"><button class="ghost" data-a="addopt" data-i="'+i+'">＋新增選項</button>'+(q.options.length?'<button class="ghost" data-a="rmopt" data-i="'+i+'">✕ 移除最後一個選項（'+q.options[q.options.length-1].k+'）</button>':'')+'<button class="ghost" data-a="resplit" data-i="'+i+'">用題幹文字重新切選項</button></div>'+
+  (q.exp||[]).map((b,j)=>b.t==='text'?et('ex:'+j,b.v,'詳解文字'):'').join('')+'<div class="mk"><button class="ghost" data-a="addxtxt" data-i="'+i+'">＋補詳解文字</button></div><small>補詳解圖片（接在詳解最後）</small><input type="file" accept="image/*" multiple data-addximg data-i="'+i+'">'+
   (k?'<small>正解（字母）</small><input data-f="key" data-i="'+i+'" value="'+esc(q.key)+'">':'')+
   // 原因：MinerU 漏切的圖沒有位址可對，改成直接把截圖或相簿圖接在這一題後面（接在最後；選項整張被漏掉時，可截圖整個選項區）。
   '<small>補圖片（接在題目最後）</small><input type="file" accept="image/*" multiple data-addimg data-i="'+i+'">'+
@@ -1494,7 +1498,7 @@ const stMenu=(q,i)=>{
 };
 // 原因：詳解很長、算式又多，預設收起；展開時才畫內容並排版，平常不佔 KaTeX 的時間。展開狀態只記在記憶體（不存檔），render() 整頁重畫後仍維持。
 const EXPO=new Set();
-const LOCKED=new Set(['edit','addq','addtxt','addxtxt','addopt','rmopt','resplit','rmimg','rmximg','rmpblk','pedit','addptxt','useorph','useorphx','setkeyimg','rmkeyimg']);
+const LOCKED=new Set(['edit','em','srcjump','addq','addtxt','addxtxt','addopt','rmopt','resplit','rmimg','rmximg','rmpblk','pedit','addptxt','useorph','useorphx','setkeyimg','rmkeyimg']);
 // 原因：原檔缺詳解編號時，內容是依換頁位置推測歸給這題的；提醒放在展開的詳解裡，不放進自動檢查（那邊的提醒沒辦法解除，會一直掛著）。
 const expBody=q=>(q.expInf?'<p class="wr">⚠ 原檔沒有這題詳解的編號，以下是依圖片或換頁位置推測歸給這題的內容，請核對。</p>':'')+
   (q.expGap?'<p class="wr">⚠ 原檔缺少第 '+q.expGap.join('、')+' 題詳解的編號，又找不到可切開的位置，那幾題的詳解可能被併在這一題裡，請核對。</p>':'')+(q.expLead?'<p class="wr">⚠ 最上方是依位置歸給這一題的「題組詳解」（文章翻譯／圖表），原檔沒有它的題號，請核對。</p>':'')+blks(q.exp);
@@ -1534,7 +1538,7 @@ function rev(p,q,i){
   '<span class="vs">我的 <b>'+esc(q.mine||'—')+'</b>・正解 <b>'+esc(q.key||'無')+'</b></span>'+
   '<div class="vr">'+(S.skip&&S.skip[k]?'<em class="nd" title="這題不會寫入卡片軟體">不匯出</em>':'')+
   '<label class="tgl" title="猜對的題目，仍會算進弱點與組卷"><input type="checkbox" data-f="guess" data-i="'+i+'"'+(q.guess?' checked':'')+'>猜的</label>'+
-  '<details class="more"><summary class="'+(S.edit===p.id+':'+i?'on':'')+'" aria-label="更多">⋯</summary><div class="more-menu">'+eb(i)+stMenu(q,i)+
+  '<details class="more"><summary class="'+(S.edit===p.id+':'+i?'on':'')+'" aria-label="更多">⋯</summary><div class="more-menu">'+eb(i)+sb(p,q,i)+stMenu(q,i)+
   '<label class="ck"><input type="checkbox" data-f="skip" data-i="'+i+'"'+(S.skip&&S.skip[k]?' checked':'')+'>不匯出成卡片</label></div></details></div></div>'+expUI(p,q)+tagBox(q,i)+
   (showDirectly ? notesContent : '<details'+(hasAnyNotes?' open':'')+'><summary>＋加入學習／訂正筆記（選填）</summary>'+notesContent+'</details>')+
   cardBlock(p,q)+(S.edit===p.id+':'+i?editPanel(p,q,i,1):'')+'</article>';
@@ -1562,16 +1566,22 @@ const nmUI=(p,rv)=>{
         '<div class="mk"><button class="o '+(n.ok==='o'?'on':'')+'" data-a="nmmark" data-i="'+i+'" data-v="o">我寫對了</button><button class="x '+(n.ok==='x'?'on':'')+'" data-a="nmmark" data-i="'+i+'" data-v="x">我寫錯了</button></div>':'')+'</article>';
   }).join('');
 };
+const emOn=p=>!p.started&&S.em===p.id;
+const emBar=p=>{
+  const on=emOn(p);
+  return'<div class="mk"><button class="'+(on?'pri':'')+'" data-a="em">'+(on?'✓ 完成編輯':'✎ 編輯考卷')+'</button>'+
+    (on&&p.source!=='compose'?'新增第 <input class="num" type="number" min="1" value="'+(Math.max(0,...p.questions.map(q=>q.no))+1)+'"> 題 <button data-a="addq">＋新增題目</button>':'')+'</div>';
+};
 function vPaper(){
   const p=P(),qs=p.questions,L=LET(p);
-  const h='<header><h2>'+nameHtml(p.name)+'</h2><button data-a="home">返回</button></header>'+stepper(p.stage)+(p.started?'':iss(p)+orphUI(p));
+  const h='<header><h2>'+nameHtml(p.name)+'</h2><button data-a="home">返回</button></header>'+stepper(p.stage)+(p.started?'':emBar(p)+(emOn(p)?iss(p)+orphUI(p):''));
   if(p.stage===1)return h+'<p class="hint">正解已隱藏。按「開始作答」後會鎖定檢討、彙整與編輯，作答完按「交卷」解除並進入檢討。</p><div class="mk" style="margin:0 0 8px"><button class="pri" data-a="start"'+(p.started?' disabled':'')+'>開始作答</button><button class="pri" data-a="submit"'+(p.started?'':' disabled')+'>交卷</button>'+(p.started?'<small>作答中：檢討、彙整與編輯已鎖定</small>':'')+'</div>'+qs.map((q,i)=>{
     const ps=po(p,q),first=ps&&(!qs[i-1]||qs[i-1].pid!==q.pid);
-    return(first?'<article class="ps"><small>題組：第 '+ps.from+'–'+ps.to+' 題</small>'+blks(ps.blocks)+(p.started?'':pEb(i)+(S.pedit===p.id+':'+ps.id+':'+i?passagePanel(p,ps,i):''))+'</article>':'')+
-    '<article id="q'+q.no+'">'+ref(q)+blks(q.blocks,'<b>'+q.no+'.</b> ')+wr(p,q)+
+    return(first?'<article class="ps"><small>題組：第 '+ps.from+'–'+ps.to+' 題</small>'+blks(ps.blocks)+(emOn(p)?pEb(i)+(S.pedit===p.id+':'+ps.id+':'+i?passagePanel(p,ps,i):''):'')+'</article>':'')+
+    '<article id="q'+q.no+'">'+ref(q)+blks(q.blocks,'<b>'+q.no+'.</b> ')+(emOn(p)?wr(p,q):'')+
     (q.options.length?q.options.map(o=>'<button class="opt '+(q.mine.includes(o.k)?'sel':'')+'" data-a="pick" data-i="'+i+'" data-k="'+o.k+'"><b>'+o.k+'</b>'+escm(o.v)+'</button>').join(''):
     '<div class="mk">'+L.map(k=>'<button class="opt lt '+(q.mine.includes(k)?'sel':'')+'" data-a="pick" data-i="'+i+'" data-k="'+k+'"><b>'+k+'</b></button>').join('')+'</div>')+
-    (p.started?'':eb(i)+(S.edit===p.id+':'+i?editPanel(p,q,i,0):''))+'</article>';
+    (emOn(p)?eb(i)+sb(p,q,i)+(S.edit===p.id+':'+i?editPanel(p,q,i,0):''):'')+'</article>';
   }).join('')+nmUI(p,0)+(p.started?'<button class="pri" data-a="submit">交卷</button>':'<button class="pri" data-a="st" data-n="2">對答案</button>')+qnavUI(p);
   const c=s=>qs.filter(q=>q.st===s).length,fl=S.filt||'x',nx=c('x'),no=c('o'),nu=qs.filter(q=>!q.cons.length).length;
   const list=qs.map((q,i)=>[q,i]).filter(([q])=>fl==='all'||(fl==='x'?q.st==='x':fl==='o'?q.st==='o':!q.cons.length));
@@ -1716,7 +1726,7 @@ document.addEventListener('click',async e=>{
     case'rsok':{try{await restore(RS);RS=null}catch(err){render();msg(err.message, true);return}break}
     case'home':S.view='list';S.cur=null;break;
     case'sum':S.view='sum';break;
-    case'open':S.cur=d.id;S.view='paper';await loadAssets(P());if(P()&&P().stage===2)loadCardView(P(),true);break;
+    case'open':S.cur=d.id;S.view='paper';S.em=null;await loadAssets(P());if(P()&&P().stage===2)loadCardView(P(),true);break;
     case'del':if(S.delc===d.id){S.papers=S.papers.filter(x=>x.id!==d.id);S.delc=null;pruneCons();gcAssets()}else S.delc=d.id;break;
     case'redo':{const np=resit(S.papers.find(x=>x.id===d.id));S.papers.unshift(np);S.cur=np.id;S.view='paper';await loadAssets(np);break}
     case'bkdir':await pickBackupDir();break;
@@ -1760,7 +1770,7 @@ document.addEventListener('click',async e=>{
       S.subjs=S.subjs.filter(x=>x!==d.g);break}
     case'sort':S.sort=d.v;break;
     case'compose':{const np=compose(d.k);if(!np){msg('沒有符合的題目', true);return}S.papers.unshift(np);S.cur=np.id;S.view='paper';await loadAssets(np);break}
-    case'start':p.started=true;p.stage=1;S.edit=null;break;
+    case'start':p.started=true;p.stage=1;S.edit=null;S.em=null;break;
     case'submit':{p.started=false;if(!p.graded)grade(p);p.stage=2;loadCardView(p,true);break}
     case'ign':p.ignImgs=[...new Set([...(p.ignImgs||[]),d.id])];break;
     case'ignall':{const kp=new Set(p.keyImgs||[]);p.ignImgs=[...new Set([...(p.ignImgs||[]),...orph(p).filter(id=>!kp.has(id))])];break}
@@ -1772,9 +1782,21 @@ document.addEventListener('click',async e=>{
       pTw(p,ps).forEach(([x,z])=>{const y=z.blocks[j];if(y&&y.t===b.t&&(y.id||'')===(b.id||''))z.blocks.splice(j,1);validate(x)});
       break}
     case'edit':{const k=p.id+':'+d.i;S.edit=S.edit===k?null:k;break}
+    case'em':S.em=S.em===p.id?null:p.id;S.edit=null;S.pedit=null;break;
+    case'srcjump':{
+      const t=srcOf(p,q);
+      if(!t){msg('找不到原卷（可能已被刪除）',true);return}
+      const[x,y]=t;
+      if(x.started){msg('原卷作答中，交卷後才能編輯',true);return}
+      S.cur=x.id;S.em=x.id;S.pedit=null;S.edit=x.id+':'+x.questions.indexOf(y);
+      if(x.stage===2)S.filt='all';
+      await loadAssets(x);if(x.stage===2)loadCardView(x,true);
+      render();const el=$('#q'+y.no);if(el)el.scrollIntoView({block:'start'});return;
+    }
     case'filt':S.filt=d.v;break;
     case'rmcon':withSync(p,()=>{q.cons=q.cons.filter(x=>x!==d.k)});break;
     case'pick':{
+      if(!p.started){msg('請先按「開始作答」才能作答',true);return}
       const multi=q.key.length>1||(!q.key&&/多選|複選|不只一個/.test(qtext(q)));
       let s=q.mine?q.mine.split(''):[];
       s=s.includes(d.k)?s.filter(x=>x!==d.k):multi?[...s,d.k]:[d.k];
@@ -1792,7 +1814,9 @@ document.addEventListener('click',async e=>{
       [[p,qq],...twins(p,qq)].forEach(([x,y])=>{(y.exp=y.exp||[]).push({t:'img',id:d.id,html:'',u:1});if(!x.have.includes(d.id))x.have.push(d.id);validate(x)});
       break}
     case'addq':{
-      const n=+d.no;if(p.questions.some(x=>x.no===n))break;
+      const n=+(d.no||t.parentElement.querySelector('input').value);
+      if(!Number.isInteger(n)||n<1){msg('請輸入有效的題號',true);return}
+      if(p.questions.some(x=>x.no===n)){msg('第 '+n+' 題已經存在',true);return}
       const ps=p.passages.find(x=>x.from<=n&&n<=x.to),sp=(p.expSpare||{})[n];
       const nq={no:n,blocks:[],options:[],key:(p.keyAll||{})[n]||'',mine:'',st:'',sub:'',chap:'',cons:[],guess:false,cause:'',why:'',right:'',fix:'',optNotes:{}};
       if(ps)nq.pid=ps.id;
@@ -1807,7 +1831,7 @@ document.addEventListener('click',async e=>{
     case'addopt':{
       const k=[...'ABCDEFGH'].find(x=>!q.options.some(o=>o.k===x));
       if(!k){msg('選項最多 8 個',true);return}
-      q.options.push({k,v:''});q.options.sort((a,b)=>a.k<b.k?-1:1);validate(p);break}
+      q.options.push(...(q.options.length?[{k,v:''}]:[...'ABCD'].map(x=>({k:x,v:''}))));q.options.sort((a,b)=>a.k<b.k?-1:1);validate(p);break}
     case'rmopt':{const o=q.options.pop();if(o)delete q.optNotes[o.k];validate(p);break}
     case'resplit':{
       const j=q.blocks.map(b=>b.t).lastIndexOf('text');
