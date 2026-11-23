@@ -250,6 +250,10 @@ summary .add { float: right; border: 0; background: transparent; }
 }
 
 .board { position: absolute; inset: 0; }
+/* 導航器停靠區上緣的拖曳分隔線：平常是細線，滑過或拖曳時變色，中間一個小握把提示可拖 */
+.board-nav-splitter { position: relative; flex: 0 0 7px; cursor: row-resize; touch-action: none; background: var(--line); transition: background 0.12s ease; }
+.board-nav-splitter::after { content: ""; position: absolute; left: 50%; top: 2px; width: 36px; height: 3px; margin-left: -18px; border-radius: 2px; background: color-mix(in srgb, var(--muted) 70%, transparent); }
+.board-nav-splitter:hover, .board-nav-splitter:active { background: var(--accent-soft); }
 .board-hint { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; color: var(--muted); text-align: center; padding: 24px; }
 .center-editor { position: absolute; inset: 0; z-index: 4; background: var(--panel); display: flex; flex-direction: column; container-type: inline-size; container-name: right-panel; }
 .center-editor-head { padding: 8px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }

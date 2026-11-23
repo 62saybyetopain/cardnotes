@@ -20,9 +20,14 @@ interface Props {
   onBoardsChanged(): void;
   report(e: unknown, prefix?: string): void;
   info?(text: string): void;
+  docked?: boolean; // true＝停靠在白板下方（高度由外層決定）；省略＝舊的浮在白板上的版型
 }
 
 const GRID_THRESHOLD = 8; // 子問題超過這個數量，自動改成網格＋搜尋
+const ZOOM_MIN = 0.5;
+const ZOOM_MAX = 1.5;
+const ZOOM_STEP = 0.1;
+const ZOOM_DEFAULT = 0.8;
 const NEW_NODE_GAP = 40; // 新問題放在母畫布上最右邊子問題的右側，間隔多少
 const HISTORY_MAX = 100;
 const STATUS_LABEL: Record<QuestionStatus, string> = { open: "研究中", splitting: "拆分中", concluded: "已有結論" };
@@ -99,6 +104,30 @@ const CSS = `
 .qrp-rel{display:flex;align-items:center;gap:6px}
 @media (prefers-reduced-motion:reduce){.qnav,.qnav-page,.qnav-card{animation:none!important;transition:none!important}}
 `;
+
+function ZoomIcon({ plus }: { plus: boolean }) {
+  return (
+    <svg
+      width={16}
+      height={20}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      style={{ display: "block" }}
+      aria-hidden
+    >
+      <circle
+        cx={7}
+        cy={7}
+        r={4.5}
+      />
+      <path d="M10.5 10.5L14 14" />
+      <path d={plus ? "M5 7h4M7 5v4" : "M5 7h4"} />
+    </svg>
+  );
+}
 
 const statusLabel = (n: QuestionPageSelf) => (n.status ? STATUS_LABEL[n.status] : "");
 
@@ -597,7 +626,7 @@ function TreeBranch({
   );
 }
 
-export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoard, onSelectCard, onBoardsChanged, report, info }: Props) {
+export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoard, onSelectCard, onBoardsChanged, report, info, docked = false }: Props) {
   const reportRef = useRef(report);
   reportRef.current = report;
   const [navTab, setNavTab] = useState<"path" | "mindmap">("path");
@@ -606,6 +635,7 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
   const pageRef = useRef<QuestionPage | null>(null);
   const [dir, setDir] = useState<"down" | "up" | "side">("side");
   const [view, setView] = useState<"auto" | "row" | "grid">("auto");
+  const [zoom, setZoom] = useState(ZOOM_DEFAULT);
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [added, setAdded] = useState<{ id: string; name: string } | null>(null);
@@ -1092,23 +1122,36 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
       onKeyDown={(e) => {
         if (e.key === "Escape" && navTab === "path") (treeOpen ? setTreeOpen(false) : onClose());
       }}
-      style={{
-        position: "absolute",
-        left: 56, // 讓出左下角的縮放／適應畫面控制項
-        right: 10,
-        bottom: 10,
-        height: navTab === "mindmap" ? (mindmapExpanded ? "86%" : "62%") : "32%",
-        minHeight: navTab === "mindmap" ? 340 : 196,
-        maxHeight: navTab === "mindmap" ? "90%" : "60%",
-        zIndex: 20,
-        display: "flex",
-        flexDirection: "column",
-        background: "var(--panel, #1e293b)",
-        border: "1px solid var(--line, #475569)",
-        borderRadius: 10,
-        boxShadow: "0 6px 24px rgba(0,0,0,0.35)",
-        color: "var(--text)",
-      }}
+      style={
+        docked
+          ? {
+              // 停靠在白板下方：高度與位置由外層的停靠區決定，這裡只負責填滿
+              position: "relative",
+              flex: 1,
+              minHeight: 0,
+              display: "flex",
+              flexDirection: "column",
+              background: "var(--panel, #1e293b)",
+              color: "var(--text)",
+            }
+          : {
+              position: "absolute",
+              left: 56, // 讓出左下角的縮放／適應畫面控制項
+              right: 10,
+              bottom: 10,
+              height: navTab === "mindmap" ? (mindmapExpanded ? "86%" : "62%") : "32%",
+              minHeight: navTab === "mindmap" ? 340 : 196,
+              maxHeight: navTab === "mindmap" ? "90%" : "60%",
+              zIndex: 20,
+              display: "flex",
+              flexDirection: "column",
+              background: "var(--panel, #1e293b)",
+              border: "1px solid var(--line, #475569)",
+              borderRadius: 10,
+              boxShadow: "0 6px 24px rgba(0,0,0,0.35)",
+              color: "var(--text)",
+            }
+      }
     >
       <style>{CSS}</style>
       {/* 原因：視窗太窄時按鈕被擠壓並溢出面板；允許換行，並讓每個按鈕保持完整寬度 */}
@@ -1181,7 +1224,7 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
           ))}
           <strong style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis" }}>{page?.self.name ?? ""}</strong>
         </nav>
-        {navTab === "mindmap" && (
+        {navTab === "mindmap" && !docked && (
           <button
             className="qnav-btn"
             onClick={() => setMindmapExpanded((v) => !v)}
@@ -1209,6 +1252,34 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
             aria-label="搜尋子問題"
             style={{ width: 140, fontSize: 12 }}
           />
+        )}
+        {navTab === "path" && !treeOpen && (
+          <div
+            className="qnav-grp"
+            role="group"
+            aria-label="縮放"
+          >
+            <button
+              type="button"
+              className="qnav-btn"
+              disabled={zoom <= ZOOM_MIN}
+              onClick={() => setZoom((z) => Math.max(ZOOM_MIN, Math.round((z - ZOOM_STEP) * 10) / 10))}
+              title={`縮小（目前 ${Math.round(zoom * 100)}%）`}
+              aria-label="縮小"
+            >
+              <ZoomIcon plus={false} />
+            </button>
+            <button
+              type="button"
+              className="qnav-btn"
+              disabled={zoom >= ZOOM_MAX}
+              onClick={() => setZoom((z) => Math.min(ZOOM_MAX, Math.round((z + ZOOM_STEP) * 10) / 10))}
+              title={`放大（目前 ${Math.round(zoom * 100)}%）`}
+              aria-label="放大"
+            >
+              <ZoomIcon plus />
+            </button>
+          </div>
         )}
         {navTab === "path" && (
           <button className="qnav-btn" onClick={() => setView(effective === "row" ? "grid" : "row")} title="切換橫向卡片／網格" aria-label="切換顯示方式">
@@ -1378,7 +1449,11 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
             {relPanelEl}
           </div>
         ) : (
-          <div key={page.self.board_id} className={`qnav-page ${dir}`}>
+          <div
+            key={page.self.board_id}
+            className={`qnav-page ${dir}`}
+            style={{ zoom }}
+          >
             {page.archived && (
               <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
                 這個問題已封存，只能查看

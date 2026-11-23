@@ -45,7 +45,7 @@ const CSS = `
 .qnav-page.side{animation:qnav-side .15s ease-out}
 .qnav-card{cursor:pointer;transition:border-color .12s,transform .12s}
 .qnav-card:hover,.qnav-card:focus-visible{border-color:var(--accent,#60a5fa)!important;transform:translateY(-1px);outline:none}
-.qnav-btn{background:transparent;border:1px solid var(--line,#475569);color:var(--text);border-radius:6px;padding:2px 8px;cursor:pointer;font-size:12px;line-height:20px}
+.qnav-btn{background:transparent;border:1px solid var(--line,#475569);color:var(--text);border-radius:6px;padding:2px 8px;cursor:pointer;font-size:12px;line-height:20px;white-space:nowrap;flex-shrink:0}
 .qnav-btn:disabled{opacity:.4;cursor:default}
 .qnav-btn[aria-expanded="true"],.qnav-btn[aria-pressed="true"]{border-color:var(--accent,#60a5fa);background:var(--row-hover,rgba(59,130,246,.15))}
 .qnav-grp{display:inline-flex;flex-shrink:0}
@@ -1111,7 +1111,8 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
       }}
     >
       <style>{CSS}</style>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderBottom: "1px solid var(--line, #475569)" }}>
+      {/* 原因：視窗太窄時按鈕被擠壓並溢出面板；允許換行，並讓每個按鈕保持完整寬度 */}
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "4px 6px", padding: "6px 10px", borderBottom: "1px solid var(--line, #475569)" }}>
         <div className="qnav-grp" role="tablist" aria-label="導航器模式">
           <button
             type="button"
@@ -1169,7 +1170,7 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
             </button>
           )}
         </div>
-        <nav aria-label="問題路徑" style={{ display: "flex", alignItems: "center", gap: 2, flex: 1, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" }}>
+        <nav aria-label="問題路徑" style={{ display: "flex", alignItems: "center", gap: 2, flex: "1 1 120px", minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" }}>
           {page?.path.map((p) => (
             <span key={p.id} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
               <button className="qnav-crumb" onClick={() => onSelectBoard(p.id)} title={p.name}>
@@ -1225,7 +1226,15 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
       </div>
       {navTab === "mindmap" ? (
         <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
-          <MindMap boardId="{boardId}" info="{info}" isIpad="{false}" onJumpBoard="{onSelectBoard}" onMutated="{onBoardsChanged}" onSelectCard="{onSelectCard}" report="{report}"/>
+          <MindMap
+            boardId={boardId}
+            info={info}
+            isIpad={false}
+            onJumpBoard={onSelectBoard}
+            onMutated={onBoardsChanged}
+            onSelectCard={onSelectCard}
+            report={report}
+          />
         </div>
       ) : (
       <>

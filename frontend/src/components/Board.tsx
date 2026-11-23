@@ -727,8 +727,52 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   const rf = useReactFlow();
   const wrapRef = useRef<HTMLDivElement>(null);
   const [navOpen, setNavOpen] = useState(false);
+  // ---- 導航器停靠在白板下方：高度可拖曳調整並記住；寬度就是白板（中間區塊）的寬度 ----
+  const NAV_DOCK_MIN = 200;
+  const NAV_DOCK_DEFAULT = 320;
+  const NAV_DOCK_KEY = "cardboard_nav_dock_height";
+  const [navHeight, setNavHeight] = useState<number>(() => {
+    try {
+      const v = Number(localStorage.getItem(NAV_DOCK_KEY));
+      return Number.isFinite(v) && v >= NAV_DOCK_MIN ? v : NAV_DOCK_DEFAULT;
+    } catch {
+      return NAV_DOCK_DEFAULT;
+    }
+  });
+  const navDragRef = useRef<{ startY: number; startH: number; latest: number } | null>(null);
+  const saveNavHeight = (h: number) => {
+    try {
+      localStorage.setItem(NAV_DOCK_KEY, String(Math.round(h)));
+    } catch {
+      // 儲存被限制（例如無痕模式）時，本次有效即可
+    }
+  };
+  // 上限取白板高度的 70%，避免導航器把白板擠到看不見
+  const clampNavHeight = (h: number) => {
+    const total = wrapRef.current?.clientHeight ?? 0;
+    const max = total > 0 ? Math.max(NAV_DOCK_MIN, Math.floor(total * 0.7)) : 900;
+    return Math.min(Math.max(h, NAV_DOCK_MIN), max);
+  };
+  const onNavSplitterDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    navDragRef.current = { startY: e.clientY, startH: navHeight, latest: navHeight };
+  };
+  const onNavSplitterMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = navDragRef.current;
+    if (!d) return;
+    d.latest = clampNavHeight(d.startH + (d.startY - e.clientY));
+    setNavHeight(d.latest);
+  };
+  const onNavSplitterUp = () => {
+    const d = navDragRef.current;
+    navDragRef.current = null;
+    if (d) saveNavHeight(d.latest);
+  };
   const { boards: navBoards, onSelectBoard: navSelectBoard, onBoardsChanged: navBoardsChanged } = props;
   const navAvailable = !!navBoards && !!navSelectBoard && !!navBoardsChanged && getPreferredDriverType() !== "dexie";
+  const navDockOpen = navAvailable && navOpen && active;
+  const navDockSize = `min(${navHeight}px, 70%)`; // 白板底緣與停靠區高度共用同一個值，兩者才會剛好銜接
   const [nodes, setNodes] = useState<AnyFlowNode[]>([]);
   const [links, setLinks] = useState<BoardLink[]>([]);
   const [imageLinks, setImageLinks] = useState<BoardImageLink[]>([]); // 圖片—卡片的純視覺連線，與 links（語意連結）完全分開
@@ -4338,7 +4382,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         </div>
       )}
   
-      <div style={{ position: "absolute", inset: 0, overflow: "hidden" }}>
+      <div style={{ position: "absolute", inset: 0, bottom: navDockOpen ? navDockSize : 0, overflow: "hidden" }}>
       <div
         ref={stageRef}
         className="board-stage"
@@ -4470,20 +4514,51 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         />
       )}
       {navAvailable && (
-        <QuestionNavigator
-          open={navOpen && active}
-          onClose={() => setNavOpen(false)}
-          boardId={boardId}
-          boards={navBoards!}
-          onSelectBoard={navSelectBoard!}
-          onSelectCard={onSelectCard}
-          onBoardsChanged={async () => {
-            await navBoardsChanged!();
-            await questions.reload(); // 導航器改了問題結構（移動、新增）：目前畫布上的問題節點與子問題數要跟上
+        // 停靠區一直掛著（關閉時只是隱藏），導航器內部的分頁、歷史等狀態才不會在收起時被清掉
+        <div
+          className="board-nav-dock"
+          style={{
+            display: navDockOpen ? "flex" : "none",
+            flexDirection: "column",
+            position: "absolute",
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: navDockSize,
+            zIndex: 20,
           }}
-          report={report}
-          info={info}
-        />
+        >
+          <div
+            className="board-nav-splitter"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="拖曳調整導航器高度"
+            title="拖曳調整高度，雙擊還原"
+            onPointerDown={onNavSplitterDown}
+            onPointerMove={onNavSplitterMove}
+            onPointerUp={onNavSplitterUp}
+            onPointerCancel={onNavSplitterUp}
+            onDoubleClick={() => {
+              setNavHeight(NAV_DOCK_DEFAULT);
+              saveNavHeight(NAV_DOCK_DEFAULT);
+            }}
+          />
+          <QuestionNavigator
+            docked
+            open={navOpen && active}
+            onClose={() => setNavOpen(false)}
+            boardId={boardId}
+            boards={navBoards!}
+            onSelectBoard={navSelectBoard!}
+            onSelectCard={onSelectCard}
+            onBoardsChanged={async () => {
+              await navBoardsChanged!();
+              await questions.reload(); // 導航器改了問題結構（移動、新增）：目前畫布上的問題節點與子問題數要跟上
+            }}
+            report={report}
+            info={info}
+          />
+        </div>
       )}
       {!boardId && <div className="board-hint">請先在左側建立或選擇一塊白板</div>}
       {boardId && !loading && cardCount === 0 && (

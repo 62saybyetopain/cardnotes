@@ -20,6 +20,7 @@ interface Props {
   onBoardsChanged(): void;
   report(e: unknown, prefix?: string): void;
   info?(text: string): void;
+  docked?: boolean; // true＝停靠在白板下方（高度由外層決定）；省略＝舊的浮在白板上的版型
 }
 
 const GRID_THRESHOLD = 8; // 子問題超過這個數量，自動改成網格＋搜尋
@@ -45,7 +46,7 @@ const CSS = `
 .qnav-page.side{animation:qnav-side .15s ease-out}
 .qnav-card{cursor:pointer;transition:border-color .12s,transform .12s}
 .qnav-card:hover,.qnav-card:focus-visible{border-color:var(--accent,#60a5fa)!important;transform:translateY(-1px);outline:none}
-.qnav-btn{background:transparent;border:1px solid var(--line,#475569);color:var(--text);border-radius:6px;padding:2px 8px;cursor:pointer;font-size:12px;line-height:20px}
+.qnav-btn{background:transparent;border:1px solid var(--line,#475569);color:var(--text);border-radius:6px;padding:2px 8px;cursor:pointer;font-size:12px;line-height:20px;white-space:nowrap;flex-shrink:0}
 .qnav-btn:disabled{opacity:.4;cursor:default}
 .qnav-btn[aria-expanded="true"],.qnav-btn[aria-pressed="true"]{border-color:var(--accent,#60a5fa);background:var(--row-hover,rgba(59,130,246,.15))}
 .qnav-grp{display:inline-flex;flex-shrink:0}
@@ -597,12 +598,12 @@ function TreeBranch({
   );
 }
 
-export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoard, onSelectCard, onBoardsChanged, report, info }: Props) {
+export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoard, onSelectCard, onBoardsChanged, report, info, docked = false }: Props) {
   const reportRef = useRef(report);
   reportRef.current = report;
   const [navTab, setNavTab] = useState<"path" | "mindmap">("path");
   const [mindmapExpanded, setMindmapExpanded] = useState(false);
-  const [page, setPage] = useState<QuestionPage null |>(null);
+  const [page, setPage] = useState<QuestionPage | null>(null);
   const pageRef = useRef<QuestionPage | null>(null);
   const [dir, setDir] = useState<"down" | "up" | "side">("side");
   const [view, setView] = useState<"auto" | "row" | "grid">("auto");
@@ -1092,26 +1093,40 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
       onKeyDown={(e) => {
         if (e.key === "Escape" && navTab === "path") (treeOpen ? setTreeOpen(false) : onClose());
       }}
-      style={{
-        position: "absolute",
-        left: 56, // 讓出左下角的縮放／適應畫面控制項
-        right: 10,
-        bottom: 10,
-        height: navTab === "mindmap" ? (mindmapExpanded ? "86%" : "62%") : "32%",
-        minHeight: navTab === "mindmap" ? 340 : 196,
-        maxHeight: navTab === "mindmap" ? "90%" : "60%",
-        zIndex: 20,
-        display: "flex",
-        flexDirection: "column",
-        background: "var(--panel, #1e293b)",
-        border: "1px solid var(--line, #475569)",
-        borderRadius: 10,
-        boxShadow: "0 6px 24px rgba(0,0,0,0.35)",
-        color: "var(--text)",
-      }}
+      style={
+        docked
+          ? {
+              // 停靠在白板下方：高度與位置由外層的停靠區決定，這裡只負責填滿
+              position: "relative",
+              flex: 1,
+              minHeight: 0,
+              display: "flex",
+              flexDirection: "column",
+              background: "var(--panel, #1e293b)",
+              color: "var(--text)",
+            }
+          : {
+              position: "absolute",
+              left: 56, // 讓出左下角的縮放／適應畫面控制項
+              right: 10,
+              bottom: 10,
+              height: navTab === "mindmap" ? (mindmapExpanded ? "86%" : "62%") : "32%",
+              minHeight: navTab === "mindmap" ? 340 : 196,
+              maxHeight: navTab === "mindmap" ? "90%" : "60%",
+              zIndex: 20,
+              display: "flex",
+              flexDirection: "column",
+              background: "var(--panel, #1e293b)",
+              border: "1px solid var(--line, #475569)",
+              borderRadius: 10,
+              boxShadow: "0 6px 24px rgba(0,0,0,0.35)",
+              color: "var(--text)",
+            }
+      }
     >
       <style>{CSS}</style>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderBottom: "1px solid var(--line, #475569)" }}>
+      {/* 原因：視窗太窄時按鈕被擠壓並溢出面板；允許換行，並讓每個按鈕保持完整寬度 */}
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "4px 6px", padding: "6px 10px", borderBottom: "1px solid var(--line, #475569)" }}>
         <div className="qnav-grp" role="tablist" aria-label="導航器模式">
           <button
             type="button"
@@ -1169,7 +1184,7 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
             </button>
           )}
         </div>
-        <nav aria-label="問題路徑" style={{ display: "flex", alignItems: "center", gap: 2, flex: 1, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" }}>
+        <nav aria-label="問題路徑" style={{ display: "flex", alignItems: "center", gap: 2, flex: "1 1 120px", minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" }}>
           {page?.path.map((p) => (
             <span key={p.id} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
               <button className="qnav-crumb" onClick={() => onSelectBoard(p.id)} title={p.name}>
@@ -1180,7 +1195,7 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
           ))}
           <strong style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis" }}>{page?.self.name ?? ""}</strong>
         </nav>
-        {navTab === "mindmap" && (
+        {navTab === "mindmap" && !docked && (
           <button
             className="qnav-btn"
             onClick={() => setMindmapExpanded((v) => !v)}
@@ -1225,7 +1240,15 @@ export function QuestionNavigator({ open, onClose, boardId, boards, onSelectBoar
       </div>
       {navTab === "mindmap" ? (
         <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
-          <MindMap boardId="{boardId}" info="{info}" isIpad="{false}" onJumpBoard="{onSelectBoard}" onMutated="{onBoardsChanged}" onSelectCard="{onSelectCard}" report="{report}"/>
+          <MindMap
+            boardId={boardId}
+            info={info}
+            isIpad={false}
+            onJumpBoard={onSelectBoard}
+            onMutated={onBoardsChanged}
+            onSelectCard={onSelectCard}
+            report={report}
+          />
         </div>
       ) : (
       <>

@@ -3033,6 +3033,7 @@ function isAiTrailingProseLine(line: string): boolean {
   const t = line.trim();
   if (!t) return false;
   if (
+    /^[（(][^）)]*(單行|起訖|起迄|起始行|結束行|第\s*\d+\s*行)[^）)]*[）)]$/.test(t) ||
     /^(原因|問題原因|說明|注意|備註|為什麼|驗證方式|下一步|修改說明|目標檔案)\s*[：:]/.test(t) ||
     /^#{1,6}\s+(檢查點|步驟|檔案|修改|\d+\.)/.test(t) ||
     /^(檢查點\s*\d+|【[A-Z0-9一二三四五六七八九十]+】)/.test(t) ||

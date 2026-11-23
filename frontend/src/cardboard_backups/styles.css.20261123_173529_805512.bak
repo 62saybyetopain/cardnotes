@@ -38,6 +38,7 @@ input, textarea, select { font: inherit; color: inherit; background: var(--panel
 .app.left-closed > .left { overflow: hidden; padding: 0; border-right: 0; visibility: hidden; pointer-events: none; min-width: 0; }
 /* 桌面版的收合按鈕在頂欄內，不再浮在內容上；只有獨立（iPad）模式沒有頂欄，才需要為浮動收合按鈕留左邊距 */
 .app.standalone.left-closed .ipad-toolbar,
+.app.standalone.left-closed .daily-head,
 .app.standalone.left-closed .center-editor-head { padding-left: 88px; }
 .app > .left, .app > .right { background: var(--sidebar); overflow: auto; }
 .left-header { display: flex; justify-content: space-between; align-items: center; padding: 6px 4px 10px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
@@ -963,8 +964,8 @@ summary .add { float: right; border: 0; background: transparent; }
 .center-topbar[data-view="cards"] > .icon-btn.primary,
 .center-topbar[data-view="cards"] > .toggle-right { display: none; }
 
-.daily-review { position: absolute; inset: 0; z-index: 3; background: var(--bg); display: flex; flex-direction: column; overflow: hidden; }
-.daily-head { display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.daily-review { position: absolute; inset: 0; z-index: 3; background: var(--bg); display: flex; flex-direction: column; overflow: hidden; container-type: inline-size; container-name: daily-review; }
+.daily-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .daily-nav { display: inline-flex; align-items: center; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
 .daily-nav button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); }
 .daily-nav button:hover { background: var(--accent-soft); color: var(--accent); }
@@ -1073,6 +1074,14 @@ summary .add { float: right; border: 0; background: transparent; }
 .archive-detail-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
 .archive-detail-title { margin: 0; font-size: 15px; color: var(--text); }
 
+@container daily-review (max-width: 820px) {
+  .daily-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(220px, 42%); }
+  .daily-side { border-left: 0; border-top: 1px solid var(--line); }
+  .archive-toolbar { margin-left: 0; width: 100%; }
+  .archive-search { min-width: 0; flex: 1; }
+  .archive-item-head { flex-wrap: wrap; }
+}
+
 /* 文獻庫（僅電腦端）
    @depends-on components/LiteratureLibrary.tsx（class 名稱）
    @depends-on App.tsx（此視圖從左側面板進入，頂欄在 .center-stage 上方，不需要為它留白） */
@@ -1085,5 +1094,63 @@ summary .add { float: right; border: 0; background: transparent; }
 .lit-detail { overflow: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .lit-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); }
 .lit-read { padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); user-select: text; }
+
+/* 心智圖獨立畫布與網頁／iPad 總覽（MindMap.tsx / MindMapOverview.tsx） */
+.center-topbar[data-view="mindmap"] > .icon-btn.primary { display: none; }
+.mindmap-wrap { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--bg); overflow: hidden; outline: none; }
+.mindmap-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 12px; z-index: 6; flex-shrink: 0; }
+.mindmap-tool-group { display: inline-flex; align-items: center; gap: 4px; }
+.mindmap-tool-group button { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 3px 8px; white-space: nowrap; }
+.mindmap-tool-group button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.mindmap-tool-group button:disabled { opacity: 0.42; cursor: not-allowed; }
+.mindmap-tool-sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
+.mindmap-breadcrumb { display: flex; align-items: center; gap: 6px; padding: 4px 12px; background: color-mix(in srgb, var(--panel) 85%, var(--bg)); border-bottom: 1px solid var(--line); font-size: 12px; z-index: 5; flex-shrink: 0; overflow-x: auto; white-space: nowrap; }
+.mindmap-crumb-item { display: inline-flex; align-items: center; gap: 6px; }
+.mindmap-crumb-item button { border: 0; background: transparent; padding: 1px 4px; color: var(--muted); }
+.mindmap-crumb-item button:hover { color: var(--accent); text-decoration: underline; }
+.mindmap-crumb-exit { margin-left: auto; font-size: 11px; padding: 1px 8px; }
+.mindmap-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; touch-action: none; cursor: grab; user-select: none; }
+.mindmap-stage:active { cursor: grabbing; }
+.mindmap-world { position: absolute; left: 0; top: 0; width: 1px; height: 1px; }
+.mindmap-svg { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+.mindmap-edge-label { position: absolute; transform: translate(0, -50%); background: var(--bg); border: 1px solid var(--line); color: var(--muted); font-size: 11px; line-height: 1.3; padding: 1px 7px; border-radius: 999px; white-space: nowrap; cursor: pointer; z-index: 3; transition: opacity 0.16s ease, border-color 0.15s ease; }
+.mindmap-edge-label:hover { border-color: var(--accent); color: var(--text); }
+.mindmap-edge-label input { font-size: 11px; padding: 0 4px; width: 110px; border: 0; background: transparent; outline: none; color: var(--text); }
+/* 原因：.mindmap-world 只有 1px 寬，絕對定位的節點沒指定寬度時會縮到最小，中文變成一字一行；明確用內容寬度，上限仍由 max-width 控制 */
+.mindmap-node { position: absolute; display: inline-flex; align-items: center; gap: 6px; width: max-content; max-width: 280px; min-width: 72px; padding: 6px 10px; border-radius: 8px; cursor: pointer; z-index: 2; transition: opacity 0.16s ease, border-color 0.15s ease, box-shadow 0.15s ease; }
+.mindmap-node.level-root { background: var(--accent-soft); border: 1.5px solid var(--accent); font-weight: 700; font-size: 14px; padding: 8px 14px; border-radius: 10px; color: var(--text); }
+.mindmap-node.level-1 { background: var(--card); border: 1.5px solid var(--line); font-weight: 600; font-size: 13px; border-radius: 9px; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08); }
+.mindmap-node.level-2 { background: var(--panel); border: 1px solid var(--line); font-weight: 500; font-size: 13px; }
+.mindmap-node.level-deep { background: transparent; border: 0; border-bottom: 1.5px solid var(--line); border-radius: 2px; padding: 4px 6px; font-weight: 400; font-size: 13px; }
+.mindmap-node:hover { border-color: var(--accent); }
+.mindmap-node.selected { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mindmap-node.archived { border-style: dashed; }
+.mindmap-node.card-ref.deleted { background: transparent; border: 1.5px dashed var(--danger); color: var(--danger); }
+.mindmap-node.drop-before { box-shadow: 0 -3px 0 0 var(--accent); }
+.mindmap-node.drop-after { box-shadow: 0 3px 0 0 var(--accent); }
+.mindmap-node.drop-inside { outline: 2px dashed var(--accent); background: var(--accent-soft); }
+.mindmap-drag-grip { display: inline-flex; align-items: center; color: var(--muted); cursor: grab; opacity: 0.55; }
+.mindmap-node:hover .mindmap-drag-grip, .mindmap-node.selected .mindmap-drag-grip { opacity: 1; }
+.mindmap-node-icon { display: inline-flex; align-items: center; color: var(--accent); }
+.mindmap-node.card-ref.deleted .mindmap-node-icon { color: var(--danger); }
+.mindmap-node-content { display: flex; flex-direction: column; min-width: 0; }
+.mindmap-node-title { display: flex; align-items: center; gap: 5px; word-break: break-word; line-height: 1.35; }
+.mindmap-node-sub { font-size: 11px; font-weight: 400; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.mindmap-archived-tag { font-size: 10px; font-weight: 500; padding: 0 5px; border-radius: 4px; border: 1px dashed var(--muted); color: var(--muted); white-space: nowrap; }
+.mindmap-node-input { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 5px; padding: 2px 6px; min-width: 140px; max-width: 240px; outline: none; }
+.mindmap-jump-btn { display: inline-flex; align-items: center; justify-content: center; padding: 2px 4px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); color: var(--accent); }
+.mindmap-jump-btn:hover { border-color: var(--accent); background: var(--accent-soft); }
+.mindmap-collapse-pill { font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 999px; background: var(--accent-soft); border: 1px solid var(--accent); color: var(--accent); white-space: nowrap; }
+.mindmap-collapse-btn { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border-radius: 50%; opacity: 0; color: var(--muted); }
+.mindmap-node:hover .mindmap-collapse-btn, .mindmap-node.selected .mindmap-collapse-btn { opacity: 1; }
+.mindmap-empty-hint { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 6px 14px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); font-size: 12px; pointer-events: none; }
+.mindmap-floating-bar { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 15; display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--panel); border: 1px solid var(--accent); border-radius: 10px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25); max-width: 94vw; overflow-x: auto; white-space: nowrap; }
+.mindmap-floating-bar button { font-size: 12px; padding: 4px 9px; min-height: 32px; }
+.mindmap-overview-grid { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.mindmap-overview-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; justify-content: space-between; gap: 12px; min-height: 104px; cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+.mindmap-overview-card:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.mindmap-overview-card.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.mindmap-overview-title { font-weight: 600; font-size: 15px; color: var(--text); word-break: break-word; }
+.mindmap-overview-meta { display: flex; align-items: center; justify-content: space-between; }
 
 
