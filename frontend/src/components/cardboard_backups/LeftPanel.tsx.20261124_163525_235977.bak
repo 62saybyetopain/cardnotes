@@ -26,6 +26,10 @@ interface Props {
   onFilter(f: Filter): void;
   onOpenLiterature(): void;
   literatureOpen?: boolean;
+  onOpenDaily?(): void;
+  dailyOpen?: boolean;
+  onOpenMindmap?(): void;
+  mindmapOpen?: boolean;
   onTagsChanged(): void;
   report(e: unknown, prefix?: string): void;
 }
@@ -50,7 +54,9 @@ type IconName =
   | "merge"
   | "arrow-up-right"
   | "more"
-  | "book";
+  | "book"
+  | "calendar"
+  | "mindmap";
 
 const FOLDER_PATH = "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z";
 
@@ -148,6 +154,22 @@ const ICON_SHAPES: Record<IconName, ReactNode> = {
     <>
       <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
       <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+    </>
+  ),
+  calendar: (
+    <>
+      <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+      <line x1="16" y1="2" x2="16" y2="6" />
+      <line x1="8" y1="2" x2="8" y2="6" />
+      <line x1="3" y1="10" x2="21" y2="10" />
+    </>
+  ),
+  mindmap: (
+    <>
+      <rect x="2" y="9" width="6" height="6" rx="1.5" />
+      <rect x="16" y="3" width="6" height="5" rx="1.5" />
+      <rect x="16" y="16" width="6" height="5" rx="1.5" />
+      <path d="M8 12h4M12 5.5v13M12 5.5h4M12 18.5h4" />
     </>
   ),
 };
@@ -685,6 +707,42 @@ export function LeftPanel(p: Props) {
         </div>
       </section>
 
+      {isDexie && p.onOpenMindmap && (
+        <section>
+          <div className="section-head">
+            <h3>心智圖</h3>
+          </div>
+          <div className={`row nav-row${p.mindmapOpen ? " on" : ""}`}>
+            <button
+              type="button"
+              className="label"
+              onClick={p.onOpenMindmap}
+              title="心智圖總覽與階層畫布"
+            >
+              <Icon name="mindmap"/> 心智圖
+            </button>
+          </div>
+        </section>
+      )}
+
+      {isDexie && p.onOpenDaily && (
+        <section>
+          <div className="section-head">
+            <h3>日誌</h3>
+          </div>
+          <div className={`row nav-row${p.dailyOpen ? " on" : ""}`}>
+            <button
+              type="button"
+              className="label"
+              onClick={p.onOpenDaily}
+              title="今日總結（卡片盲寫對照、靈感日記與雙類總覽）"
+            >
+              <Icon name="calendar"/> 日誌
+            </button>
+          </div>
+        </section>
+      )}
+
       {getPreferredDriverType() !== "dexie" && (
         <section>
           <div className="section-head">
@@ -692,7 +750,7 @@ export function LeftPanel(p: Props) {
           </div>
           <div className={`row nav-row${p.literatureOpen ? " on" : ""}`}>
             <button className="label" onClick={p.onOpenLiterature} title="完整引用的原文資料；卡片可掛文獻作為出處">
-              <Icon name="book" /> 文獻庫
+              <Icon name="book"/> 文獻庫
             </button>
           </div>
         </section>

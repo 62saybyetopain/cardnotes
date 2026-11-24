@@ -1190,6 +1190,7 @@ function BoardTree(props: {
   // 展開狀態只在瀏覽期間有效：開啟白板後會全部收回，所以不另外存起來
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const listRef = useRef<HTMLUListElement>(null);
 
   const toggle = (id: string) =>
     setExpanded((prev) => {
@@ -1210,6 +1211,25 @@ function BoardTree(props: {
   useEffect(() => {
     setPendingId(null);
   }, [props.boardId]);
+
+  // 點擊白板清單外部或按 Esc 時取消待確認選取，避免殘留虛線框
+  useEffect(() => {
+    if (!pendingId) return;
+    const onDown = (e: PointerEvent) => {
+      if (listRef.current && !listRef.current.contains(e.target as Node)) {
+        setPendingId(null);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPendingId(null);
+    };
+    window.addEventListener("pointerdown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [pendingId]);
 
   // 第一次點＝選取；第二次點同一列＝開啟，並把展開的層級全部收回
   const tap = (b: BoardSummary) => {
@@ -1246,11 +1266,15 @@ function BoardTree(props: {
           ) : (
             <span className="twisty" />
           )}
-          <button type="button" className="label" onClick={() => tap(b)}>
+          <button
+            type="button"
+            className="label"
+            aria-selected={b.id === pendingId}
+            onClick={() => tap(b)}
+          >
             <span className="board-name">{b.name}</span>
             {hasKids && !open && <span className="count">子 {n.children.length}</span>}
             <span className="count">{b.card_count}</span>
-
           </button>
           {/* 只有一般白板保留改名／刪除；平板刪除不會處理底下的子白板，所以問題白板不提供 */}
           {!b.question && (
@@ -1269,7 +1293,11 @@ function BoardTree(props: {
     );
   };
 
-  return <ul className="plain board-tree-list">{roots.map((n) => renderNode(n, 0))}</ul>;
+  return (
+    <ul ref={listRef} className="plain board-tree-list">
+      {roots.map((n) => renderNode(n, 0))}
+    </ul>
+  );
 }
 
 function Tree(props: {
