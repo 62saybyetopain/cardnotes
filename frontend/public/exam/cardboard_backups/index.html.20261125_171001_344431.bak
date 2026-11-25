@@ -1940,7 +1940,8 @@ function paperRow(p){
   const st=p.stage>1?'檢討中・錯 '+w:p.started?'作答中':'';
   // data-a="stop"：點下拉選單時不要觸發整列的「開啟考卷」。
   const sel='<select data-a="stop" data-f="psubj" data-id="'+p.id+'" title="移到分類" aria-label="移到分類">'+['',...subjNames()].map(s=>'<option value="'+esc(s)+'"'+((p.subj||'')===s?' selected':'')+'>'+esc(s||'未分類')+'</option>').join('')+'</select>';
-  return'<div class="row" data-a="open" data-id="'+p.id+'"><b>'+nameHtml(p.name)+'</b><span>'+p.questions.length+' 題'+(st?'・'+st:'')+'</span>'+sel+'<div class="ra"><button class="ghost" data-a="redo" data-id="'+p.id+'">再做一次</button><button class="ghost dng'+(S.delc===p.id?' cf':'')+'" data-a="del" data-id="'+p.id+'">'+(S.delc===p.id?'再按一次確認刪除':'刪除')+'</button></div></div>';
+  const blankBtn=p.source!=='compose'?'<button class="ghost" data-a="expblank" data-id="'+p.id+'" title="匯出不含作答與解答的單份空白考卷（.html，可列印）">空白卷</button>':'';
+  return'<div class="row" data-a="open" data-id="'+p.id+'"><b>'+nameHtml(p.name)+'</b><span>'+p.questions.length+' 題'+(st?'・'+st:'')+'</span>'+sel+'<div class="ra">'+blankBtn+'<button class="ghost" data-a="redo" data-id="'+p.id+'">再做一次</button><button class="ghost dng'+(S.delc===p.id?' cf':'')+'" data-a="del" data-id="'+p.id+'">'+(S.delc===p.id?'再按一次確認刪除':'刪除')+'</button></div></div>';
 }
 function subjList(){
   return[...subjNames(),''].map(g=>{
@@ -2396,6 +2397,7 @@ document.addEventListener('click',async e=>{
   if(d.a==='create')return create();
   if(d.a==='cardview'){await loadCardView(p);scrollTo(0,y);return}
   if(d.a==='expblankall'){await exportBlankPack();return}
+  if(d.a==='expblank'){await exportBlankPaper(d.id);return}
   if(d.a==='expbook'){flushSave();await exportMistakeBook();return}
   if(d.a==='book'){S.view='book';BK.page=1;BK.editPt='';await loadBookAssets();render();scrollTo(0,0);return}
   if(d.a==='bkpt'){flushSave();BK.editPt=BK.editPt===d.k?'':d.k;render();scrollTo(0,y);return}
@@ -2494,7 +2496,8 @@ document.addEventListener('click',async e=>{
       break}
     case'addps':{
       if(p.source==='compose'){msg('請到原卷新增題組',true);return}
-      const from=+($('#psf')\vert{}\vert{}{}).value,to=+($('#pst')||{}).value;
+      const from=+($('#psf')||{}).value;
+      const to=+($('#pst')||{}).value;
       if(!Number.isInteger(from)||!Number.isInteger(to)||from<1||from>to){msg('請輸入有效的題組起訖題號（起號不可大於迄號）',true);return}
       const qs=p.questions.filter(x=>x.no>=from&&x.no<=to);
       if(!qs.length){msg('第 '+from+'–'+to+' 題之間找不到任何題目',true);return}

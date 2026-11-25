@@ -1617,64 +1617,6 @@ async function exportBlankPack(){
   }catch(e){msg('匯出空白卷失敗：'+(e&&e.message||e),true)}
   finally{exportBlankPack.busy=false}
 }
-async function exportBlankPaper(paperId){
-  const p=S.papers.find(x=>x.id===paperId);
-  if(!p)return msg('找不到這份考卷',true);
-  if(p.source==='compose')return msg('僅支援匯出原始考卷（不包含重組或重做卷）',true);
-  const idsSet=new Set();
-  [...p.questions,...p.passages].forEach(x=>x.blocks.forEach(b=>{if(b.id)idsSet.add(b.id)}));
-  const{map,lost}=await collectImgMap(idsSet);
-  const renderBlk=(b,pre)=>{
-    if(b.t==='text')return'<p class="stem">'+(pre||'')+escm(b.v)+'</p>';
-    if(b.t==='code')return'<pre>'+esc(b.v)+'</pre>';
-    if(b.id&&map[b.id])return'<img class="fig" src="'+map[b.id]+'" alt="">';
-    if(b.html)return'<div class="tbl">'+safe(b.html)+'</div>';
-    return'<p class="miss">圖片缺失：'+esc((b.id||'').slice(-16))+'</p>';
-  };
-  const renderBlks=(a,pre)=>{let u=pre||'';return a.map(b=>{const h=renderBlk(b,u);if(b.t==='text')u='';return h}).join('')+u};
-  const body=p.questions.map((q,i)=>{
-    const ps=po(p,q),first=ps&&(!p.questions[i-1]||p.questions[i-1].pid!==q.pid);
-    return(first?'<section class="ps"><div class="ps-tag">題組：第 '+ps.from+'–'+ps.to+' 題</div>'+renderBlks(ps.blocks)+'</section>':'')+
-      '<article class="q">'+renderBlks(q.blocks,'<b>'+q.no+'.</b> ')+
-      (q.options.length?'<div class="opts">'+q.options.map(o=>'<div class="opt"><b>('+esc(o.k)+')</b><span>'+escm(o.v)+'</span></div>').join('')+'</div>':'')+
-      '</article>';
-  }).join('');
-  const html='<!doctype html><html lang="zh-Hant" data-theme="light"><head><meta charset="utf-8">'+
-    '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'+
-    '<title>'+esc(p.name)+'（空白考卷）</title>'+
-    '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">'+
-    '<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"><'+'/script>'+
-    '<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"><'+'/script>'+
-    '<style>'+
-    ':root,[data-theme="light"]{--bg:#f8f7f4;--card:#fff;--panel:#f3f2ee;--line:#d6d3cb;--text:#222;--muted:#666;--accent:#1d4ed8} '+
-    '[data-theme="dark"]{--bg:#17181a;--card:#222428;--panel:#1c1e22;--line:#34363a;--text:#e6e6e6;--muted:#9a9ea6;--accent:#6c9bff} '+
-    '*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.65 system-ui,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif} '+
-    '.wrap{max-width:760px;margin:0 auto;padding:16px 16px 48px} '+
-    '.bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-bottom:12px;margin-bottom:16px;border-bottom:1px solid var(--line)} '+
-    '.bar h1{margin:0;font-size:18px;flex:1;min-width:180px} '+
-    'button{font:inherit;font-size:13px;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer} '+
-    'button.pri{background:var(--accent);color:#fff;border-color:var(--accent)} '+
-    '.meta{color:var(--muted);font-size:13px;margin:0 0 14px} '+
-    '.ps{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;padding:12px 14px;margin:14px 0} '+
-    '.ps-tag{font-size:12px;font-weight:700;color:var(--accent);margin-bottom:6px} '+
-    '.q{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px} '+
-    '.stem{white-space:pre-wrap;margin:0 0 8px}pre{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:8px;overflow-x:auto;font:13px/1.5 monospace} '+
-    '.fig{display:block;max-width:100%;margin:8px 0;background:#fff;border-radius:6px;cursor:zoom-in} '+
-    '.tbl{overflow-x:auto;margin:8px 0}table{border-collapse:collapse;width:100%}td,th{border:1px solid var(--line);padding:6px 8px;text-align:left} '+
-    '.opts{display:flex;flex-direction:column;gap:6px;margin-top:8px}.opt{display:flex;gap:8px}.opt b{min-width:2em} '+
-    '.miss{color:#b91c1c;font-size:13px} '+
-    '#lb{position:fixed;inset:0;z-index:9;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;padding:16px;cursor:zoom-out}#lb img{max-width:100%;max-height:100%;background:#fff} '+
-    '@media print{body{background:#fff;color:#000;font-size:11pt;line-height:1.5}.bar{display:none}.wrap{max-width:none;padding:0}.q,.ps{background:#fff;border:0;border-bottom:1px solid #ccc;border-radius:0;padding:10px 0;margin:0;break-inside:avoid}.fig{max-height:80vh}}'+
-    '<'+'/style></head><body><div class="wrap">'+
-    '<div class="bar"><h1>'+esc(p.name)+'</h1><button onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme===\'dark\'?\'light\':\'dark\'">深淺切換</button><button class="pri" onclick="window.print()">列印 / 存成 PDF</button></div>'+
-    '<p class="meta">共 '+p.questions.length+' 題（空白考卷・不含作答與解答）</p>'+body+
-    '</div><script>'+
-    'document.addEventListener("click",e=>{if(e.target.classList&&e.target.classList.contains("fig")){const d=document.createElement("div");d.id="lb";d.innerHTML="<img src=\\""+e.target.src+"\\">";d.onclick=()=>d.remove();document.body.appendChild(d)}});'+
-    'if(window.renderMathInElement){try{renderMathInElement(document.body,{delimiters:[{left:"$$",right:"$$",display:true},{left:"$",right:"$",display:false}],throwOnError:false})}catch(e){}}'+
-    '<'+'/script></body></html>';
-  dlHtml('空白考卷-'+safeFileName(p.name)+'.html',html);
-  msg(lost.length?'已匯出空白考卷，但有 '+lost.length+' 張圖片本機找不到、未包含':'已匯出空白考卷：'+p.name+'（'+p.questions.length+' 題）',lost.length>0);
-}
 
 async function exportMistakeBook(){
   const items=filterBookItems(buildBookItems());
@@ -1962,7 +1904,7 @@ function vList(){
         '<h3>考卷與學習</h3>'+
         '<div class="dash-row">'+
           '<button class="pri" data-a="imp">＋ 匯入考卷</button>'+
-          '<button data-a="expblankall" title="匯出全部原始考卷為 zip（排除重做／抽題卷，保留分類、題目、正解、詳解與圖片，清空作答與個人標籤，供他人合併匯入）">匯出全部空白卷（zip）</button>'+
+          '<button data-a="cmp">組成考卷</button>'+
           '<button data-a="book">錯題本</button>'+
           '<button data-a="ana">分析</button>'+
           '<button data-a="sum">錯題彙整與匯出</button>'+
@@ -1973,6 +1915,7 @@ function vList(){
         '<div class="dash-row">'+
           '<button data-a="bk">匯出備份（zip）</button>'+
           '<label class="btn" style="margin:0">選擇備份檔還原<input type="file" accept=".zip" data-restore hidden></label>'+
+          '<button data-a="expblankall" title="匯出全部原始考卷為 zip（排除重做／抽題卷，保留分類、題目、正解、詳解與圖片，清空作答與個人標籤，供他人合併匯入）">匯出全部空白卷（zip）</button>'+
         '</div>'+
         '<div class="dash-row" style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)">'+
           '<button data-a="bkdir">📁 '+(S.bkDirName?esc(S.bkDirName):'瀏覽指定備份資料夾')+'</button>'+
@@ -2247,7 +2190,7 @@ function vAna(){
   if(!gs.length)return hd+'<p class="empty">還沒有批改過的題目。在作答頁按「對答案」後，這裡會顯示跨考卷的統計。</p>';
   const pct=(w,n)=>n?Math.round(100*w/n):0,fs=gs.map(g=>g.first.q);
   const nw=fs.filter(q=>q.st==='x').length,ng=fs.filter(q=>q.st!=='x'&&q.guess).length;
-  const stillX=gs.filter(g=>g.last.q.st==='x').length,still=gs.filter(weak).length,ever=gs.filter(everWeak).length;
+  const stillX=gs.filter(g=>g.last.q.st==='x').length,still=gs.filter(weak).length;
   const row=(l,r,btn)=>{const wk=r.w+r.g;return'<div class="br"><span title="'+esc(l)+'">'+esc(l)+'</span><progress max="100" value="'+pct(wk,r.n)+'"></progress><b>'+r.w+(r.g?'+'+r.g:'')+'/'+r.n+'（'+pct(wk,r.n)+'%）</b>'+(btn||'')+'</div>'};
   const srt=o=>Object.entries(o).sort((x,y)=>{const[p,q]=[x[1],y[1]],rp=pct(p.w+p.g,p.n),rq=pct(q.w+q.g,q.n);return(S.sort==='rate'?(rq-rp)||(q.n-p.n):((q.w+q.g)-(p.w+p.g))||(rq-rp))});
   const sec=(t,o,fn,max)=>'<h2>'+t+'</h2>'+(Object.keys(o).length?srt(o).slice(0,max||99).map(fn).join(''):'<p class="empty">還沒有資料。</p>');
@@ -2255,9 +2198,6 @@ function vAna(){
   const cs=Object.entries(a.cause).sort((x,y)=>y[1]-x[1]);
   return hd+
   '<p>已批改 '+gs.length+' 題（同一題只算一次）：首次作答錯 '+nw+' 題（'+pct(nw,gs.length)+'%）、猜對 '+ng+' 題；最近一次仍答錯 '+stillX+' 題、猜對 '+(still-stillX)+' 題。</p>'+
-  '<p>組卷：最近弱點 <input class="num" type="number" min="0" data-f="n1" value="'+(S.n1??15)+'"> 題（最近一次仍答錯或猜對，共 '+still+' 題可選）＋ 隨機抽 <input class="num" type="number" min="0" data-f="n2" value="'+(S.n2??10)+'"> 題（曾經錯過或猜對，共 '+ever+' 題）</p>'+
-  '<button class="pri" data-a="compose" data-k=""'+(ever?'':' disabled')+'>組成考卷</button> <span id="msg"></span>'+
-  '<br><label class="ck"><input type="checkbox" data-f="shuf"'+(S.shuf!==false?' checked':'')+'>打亂選項順序（避免記住位置）</label>'+
   '<p><small>比例都以每題「首次作答」計算，重做不重複計入；數字是「錯＋猜對／考過」。排序：</small></p>'+
   '<div class="mk">'+[['cnt','錯題數'],['rate','錯誤率']].map(([v,t])=>'<button class="'+((S.sort||'cnt')===v?'on':'')+'" data-a="sort" data-v="'+v+'">'+t+'</button>').join('')+'</div>'+
   sec('科目',a.s,([k,r])=>row(k,r))+
@@ -2267,7 +2207,19 @@ function vAna(){
   '<h2>同一題反覆錯</h2>'+(rep.length?rep.map(({g,n,w})=>{
     const t=g.canon,ex=(t.blocks.find(b=>b.t==='text')||{v:''}).v.slice(0,36);
     return'<div class="br"><span title="'+esc(g.all[0].p.name+' 第 '+t.no+' 題')+'">'+esc(g.all[0].p.name+' 第 '+t.no+' 題')+'</span><progress max="100" value="'+pct(w,n)+'"></progress><b>錯 '+w+'/'+n+' 次・最近'+(g.last.q.st==='x'?'錯':'對')+'</b></div><small>'+esc(ex)+'…</small>';
-  }).join(''):'<p class="empty">還沒有重做過而且錯過的題目。用上面的按鈕把錯題組成考卷再做一次，就會累積這份紀錄。</p>')+catSec(gs);
+  }).join(''):'<p class="empty">還沒有重做過而且錯過的題目。到首頁「組成考卷」把錯題組成考卷再做一次，就會累積這份紀錄。</p>');
+}
+
+function vCompose(){
+  const hd='<header><h2>組成考卷</h2><button data-a="home">返回</button></header>';
+  const gs=groups();
+  if(!gs.length)return hd+'<p class="empty">還沒有批改過的題目。在作答頁按「對答案」後才能組卷。</p>';
+  const still=gs.filter(weak).length,ever=gs.filter(everWeak).length;
+  return hd+
+  '<p>組卷：最近弱點 <input class="num" type="number" min="0" data-f="n1" value="'+(S.n1??15)+'"> 題（最近一次仍答錯或猜對，共 '+still+' 題可選）＋ 隨機抽 <input class="num" type="number" min="0" data-f="n2" value="'+(S.n2??10)+'"> 題（曾經錯過或猜對，共 '+ever+' 題）</p>'+
+  '<button class="pri" data-a="compose" data-k=""'+(ever?'':' disabled')+'>組成考卷</button> <span id="msg"></span>'+
+  '<br><label class="ck"><input type="checkbox" data-f="shuf"'+(S.shuf!==false?' checked':'')+'>打亂選項順序（避免記住位置）</label>'+
+  catSec(gs);
 }
 
 function renderMath(el){
@@ -2367,7 +2319,7 @@ function vBook(){
 }
 
 function render(){
-  $('#app').innerHTML=S.view==='import'?vImport():S.view==='sum'?vSum():S.view==='ana'?vAna():S.view==='book'?vBook():S.view==='paper'&&P()?vPaper():vList();
+  $('#app').innerHTML=S.view==='import'?vImport():S.view==='sum'?vSum():S.view==='ana'?vAna():S.view==='compose'?vCompose():S.view==='book'?vBook():S.view==='paper'&&P()?vPaper():vList();
   document.querySelectorAll('input[data-ind]').forEach(e=>{e.indeterminate=true});
   // 原因：深淺切換鈕放進每個畫面標題列的最右邊；統一在這裡加，免得五個 view 各寫一份。
   const h=document.querySelector('#app header');
@@ -2470,6 +2422,7 @@ document.addEventListener('click',async e=>{
       S.view='paper';if(n===2&&!p.graded)grade(p);p.stage=n;if(n===2)loadCardView(p,true);break;
     }
     case'ana':S.view='ana';break;
+    case'cmp':S.view='compose';break;
     case'gtog':S.gclose=S.gclose||{};if(S.gclose[d.g])delete S.gclose[d.g];else S.gclose[d.g]=1;break;
     case'subjadd':{
       const n=$('#ns').value.trim();
