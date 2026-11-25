@@ -913,22 +913,10 @@ function show(t){
 const getAsset=async id=>MEM[id]||await aGet(id).catch(()=>null);
 
 /* ---- card app bridge ---- */
-let EXT={chaps:{}};
 const cn=()=>{try{return window.opener&&window.opener.__cardnoteApi||null}catch(e){return null}};
 const tagList=async api=>{const r=await api.listTags();return Array.isArray(r)?r:(r.tags||r.items||[])};
 const isLoc=t=>t.axis==='location'||t.axis==='domain';
 const same=(a,b)=>String(a).trim().toLowerCase()===String(b).trim().toLowerCase();
-
-async function loadExt(){
-  const api=cn();if(!api)return;
-  try{
-    const tags=await tagList(api),roots=tags.filter(t=>isLoc(t)&&!t.parent_id);
-    // 原因：科目只來自考卷自己的資料；卡片軟體的櫃子是另一套分類（筆記主題），拿來當建議會讓人選到後寫進科目樹，之後寫卡時又依同名重用，把考卷的卡歸進不相干的櫃子。
-    EXT={chaps:{}};
-    roots.forEach(r=>{EXT.chaps[r.name]=tags.filter(t=>isLoc(t)&&t.parent_id===r.id).map(t=>t.name)});
-    render();
-  }catch(e){}
-}
 
 async function pushToCardnote(cards,ctx){
   const api=cn();if(!api)throw Error('請從卡片軟體左側欄開啟本頁（需與卡片軟體同源）');
@@ -1061,7 +1049,7 @@ body=body.split('![](exam-asset:'+id+')').join('![](media:'+mid+')');
     if(REV===r0){rep.push('已中止：本機紀錄存檔失敗（原因見提示），這張之後的卡片都沒有處理');out.e++;break}
     }catch(e){out.e++;rep.push('失敗：'+c.title+'：'+(e&&e.message||e))}
   }
-  save();loadExt();
+  save();
   if(window.opener){
     try{window.opener.dispatchEvent(new CustomEvent("cardnote:refresh"))}catch(e){}
     try{window.opener.postMessage({type:"CARDNOTE_EXAM_SYNC"},"*")}catch(e){}
@@ -1112,14 +1100,78 @@ async function sink(s){
 }
 
 /* ---------- import UI (Batch folder & ZIP support) ---------- */
+const paperImgIds=p=>{
+  const s=new Set(),add=bl=>(bl||[]).forEach(b=>{if(b&&b.id)s.add(b.id)});
+  (p.questions||[]).forEach(q=>{add(q.blocks);add(q.exp)});
+  (p.passages||[]).forEach(ps=>add(ps.blocks));
+  (p.nm||[]).forEach(n=>{add(n.blocks);add(n.exp)});
+  Object.values(p.expSpare||{}).forEach(sp=>add(sp&&sp.exp));
+  (p.keyImgs||[]).forEach(id=>{if(id)s.add(id)});
+  return s;
+};
+function materializeBlankPaper(rawP,rawImgs,name,ik,pid){
+  if(!rawP||!Array.isArray(rawP.questions)||!rawP.questions.length)throw Error('空白考卷缺少題目資料');
+  const idMap={},used=new Set(),scoped={};
+  for(const oldId of paperImgIds(rawP)){
+    const raw=oldId.includes('__')?oldId.slice(oldId.indexOf('__')+2):oldId;
+    let mapped=pid+'__'+raw,k=1;
+    while(used.has(mapped))mapped=pid+'__'+(++k)+'_'+raw;
+    used.add(mapped);idMap[oldId]=mapped;
+    if(rawImgs&&rawImgs[oldId])scoped[mapped]=rawImgs[oldId];
+  }
+  const rBlks=bl=>(bl||[]).map(b=>b.t==='text'||b.t==='code'?{t:b.t,v:String(b.v||'')}:{t:b.t,id:b.id?(idMap[b.id]||b.id):'',html:b.html||''});
+  const expSpare={};
+  Object.entries(rawP.expSpare||{}).forEach(([no,sp])=>{
+    if(sp&&Array.isArray(sp.exp)&&sp.exp.length)expSpare[no]={exp:rBlks(sp.exp),inf:!!sp.inf,gap:Array.isArray(sp.gap)?[...sp.gap]:undefined,lead:!!sp.lead};
+  });
+  const p={
+    id:pid,name,impKey:ik,subj:rawP.subj||'',created:new Date().toISOString(),stage:1,graded:false,
+    source:rawP.source&&rawP.source!=='compose'?rawP.source:'mineru',
+    keyMax:rawP.keyMax||0,keyAll:rawP.keyAll?JSON.parse(JSON.stringify(rawP.keyAll)):{},expSpare,
+    have:Object.keys(scoped),
+    keyImgs:(rawP.keyImgs||[]).map(id=>idMap[id]).filter(id=>id&&scoped[id]),
+    eqImgs:[],ignImgs:[],
+    passages:(rawP.passages||[]).map(ps=>({id:ps.id,from:ps.from,to:ps.to,blocks:rBlks(ps.blocks)})),
+    nm:(rawP.nm||[]).map(n=>({no:n.no,sec:n.sec||'',ins:Array.isArray(n.ins)?[...n.ins]:[],blocks:rBlks(n.blocks),exp:rBlks(n.exp),mine:'',ok:''})),
+    questions:rawP.questions.map(q=>{
+      const r={no:q.no,blocks:rBlks(q.blocks),options:(q.options||[]).map(o=>({k:String(o.k||''),v:String(o.v||'')})),key:String(q.key||''),mine:'',st:'',sub:'',chap:'',cons:[],guess:false,cause:'',why:'',right:'',fix:'',optNotes:{}};
+      if(q.pid)r.pid=q.pid;
+      if(Array.isArray(q.exp)&&q.exp.length){r.exp=rBlks(q.exp);if(q.expInf)r.expInf=true;if(Array.isArray(q.expGap))r.expGap=[...q.expGap];if(q.expLead)r.expLead=true}
+      return r;
+    })
+  };
+  validate(p);
+  return{p,scoped};
+}
+
 async function collect(list,open){
-  const items=[],zips=[];
+  const items=[],zips=[],packUnits=[];
   for(const f of list){
     if(/\.zip$/i.test(f.name)){
       // 原因：選檔時不展開 zip（JSZip 會把整個 zip 讀進記憶體，50 份同時展開會撐爆分頁）；只記下檔案，匯入時（open=true）一份一份展開、處理完就釋放。
       if(!open){zips.push(f);continue}
       if(!window.JSZip)throw Error('JSZip 載入失敗，請改選解壓後的檔案');
       const z=await JSZip.loadAsync(f);
+      const packEntry=z.file('exam-blank-pack.json');
+      if(packEntry){
+        let pack;
+        try{pack=JSON.parse(await packEntry.async('string'))}
+        catch(e){throw Error('空白考卷包損毀（exam-blank-pack.json 無法解析）：'+(e&&e.message||e))}
+        if(!pack||pack.schema!=='exam-review.blank-pack/v1'||!Array.isArray(pack.papers))throw Error('空白考卷包格式不正確（缺少有效的 exam-review.blank-pack/v1 結構）');
+        if(!pack.papers.length)throw Error('這份空白考卷包裡面沒有任何考卷');
+        const allImgs={};
+        for(const e of Object.values(z.files)){
+          if(!e.dir&&e.name.startsWith('images/'))allImgs[e.name.slice(7)]=await e.async('blob');
+        }
+        const packSubjs=Array.isArray(pack.subjs)?pack.subjs.filter(x=>typeof x==='string'&&x&&x!=='未分類'):[];
+        for(const rawP of pack.papers){
+          const imgs={};
+          for(const id of paperImgIds(rawP))if(allImgs[id])imgs[id]=allImgs[id];
+          packUnits.push({name:rawP.name||'未命名考卷',subj:rawP.subj||'',impKey:rawP.impKey||rawP.name||'未命名考卷',blankPaper:rawP,images:imgs,packSubjs});
+        }
+        continue;
+      }
+      if(z.file('exam.json'))throw Error('這是完整資料備份檔（含作答與錯題），請回首頁用「選擇備份檔還原」匯入');
       const zipPkg=f.name.replace(/\.zip$/i,'');
       for(const e of Object.values(z.files)){
         if(!e.dir)items.push({name:e.name.split('/').pop(),relPath:e.name,blob:await e.async('blob'),pkg:zipPkg});
@@ -1155,7 +1207,7 @@ async function collect(list,open){
   anchors.forEach(a=>{const k=dirOf(a);if(!best[k]||rank(a)<rank(best[k]))best[k]=a});
   anchors.splice(0,anchors.length,...Object.values(best));
   const lazy=zips.map(f=>({name:f.name.replace(/\.zip$/i,''),lazyZip:f}));
-  if(!anchors.length&&lazy.length)return lazy;
+  if(!anchors.length&&(lazy.length||packUnits.length))return [...packUnits,...lazy];
   if(!anchors.length){
     // 回退至傳統純文字處理
     const b={name:items[0]?items[0].name.replace(/\.\w+$/,''):'未命名考卷',images:{},text:null,json:null,key:''};
@@ -1196,7 +1248,7 @@ async function collect(list,open){
     }
     bundles.push(b);
   }
-  return [...bundles,...lazy];
+  return [...packUnits,...bundles,...lazy];
 }
 
 async function create(){
@@ -1205,7 +1257,7 @@ async function create(){
   const bundles=PENDING;
   const nm=$('#nm').value.trim();
   // 原因：(1)一份失敗不該中止整批，成功的要照樣存檔並顯示，失敗的逐份大聲列出；(2)不再改動 PENDING（圖片鍵改存在副本），重試才不會疊上第二層前綴；(3)先確認解析成功再寫圖，並確認圖片真的寫入成功，失敗就不加入該份考卷。
-  const made=[],failed=[],skipped=[];
+  const made=[],failed=[],skipped=[],packSubjOrder=[];
   // 原因：批次選母資料夾會把已匯入過的年份再匯一次；用匯入時的資料夾名稱（impKey）比對略過，並明說略過了哪些。只比匯入來的考卷（重做、抽題卷不算）。
   // 不含科目：單份匯入時選的是考卷資料夾本身，沒有上一層，匯入當下 subj 是空的，事後才手動移進分類；鍵若含科目，批次永遠對不上。
   // @depends-on impKey＝資料夾名稱：這裡的舊卷退回寫法（x.name）、下面的 ik、p.impKey 三處必須一致。
@@ -1218,15 +1270,22 @@ async function create(){
   for(const src of units){
     const isSingle=bundles.length===1&&units.length===1;
     const name=(isSingle&&nm)||src.name||'未命名考卷';
-    const ik=src.name||'未命名考卷'; // 原因：用資料夾原名而非 name，單份匯入時自訂的考卷名稱不會影響比對。
+    const ik=src.impKey||src.name||'未命名考卷'; // 原因：用資料夾原名而非 name，單份匯入時自訂的考卷名稱不會影響比對。
     // 原因：單份匯入是使用者明確選的，不擋；只擋批次（多資料夾或多 zip）。
-    if(!isSingle&&have.has(ik)){skipped.push((src.subj?src.subj+'／':'')+name);continue}
-    const key=src.key||'';
-    const pid=uid(),scoped={};
-    for(const raw in src.images)scoped[pid+'__'+raw]=src.images[raw];
+    if((!isSingle||src.blankPaper)&&have.has(ik)){skipped.push((src.subj?src.subj+'／':'')+name);continue}
+    const pid=uid();
     try{
-      const p=importBundle({...src,images:scoped,key},name,pid);
-      p.subj=src.subj||'';p.impKey=ik;
+      let p,scoped;
+      if(src.blankPaper){
+        ({p,scoped}=materializeBlankPaper(src.blankPaper,src.images,name,ik,pid));
+        (src.packSubjs||[]).forEach(s=>{if(!packSubjOrder.includes(s))packSubjOrder.push(s)});
+      }else{
+        const key=src.key||'';
+        scoped={};
+        for(const raw in src.images)scoped[pid+'__'+raw]=src.images[raw];
+        p=importBundle({...src,images:scoped,key},name,pid);
+        p.subj=src.subj||'';p.impKey=ik;
+      }
       // 原因：同一份考卷的圖片放在同一個 transaction 寫入，減少 50 份匯入時的交易開銷，且中途失敗不會留下半套孤兒圖。
       const entries=Object.entries(scoped);
       if(entries.length)await tx('assets','readwrite',s=>{for(const [id,blob] of entries)s.put(blob,id)});
@@ -1238,6 +1297,7 @@ async function create(){
   const prevPapers=[...S.papers],prevCur=S.cur,prevView=S.view,prevSubjs=[...S.subjs];
   S.papers.unshift(...made);
   // 原因：批次遇到的新科目接在分類清單最後；存檔失敗時下面一併還原，不留下沒有考卷的空分類。
+  packSubjOrder.forEach(s=>{if(s&&made.some(x=>x.subj===s)&&!S.subjs.includes(s))S.subjs.push(s)});
   made.forEach(x=>{if(x.subj&&!S.subjs.includes(x.subj))S.subjs.push(x.subj)});
   const one=made.length===1&&!failed.length&&!skipped.length; // 原因：有略過時留在清單頁，略過訊息才不會被考卷頁的 4 秒提示條蓋掉。
   S.cur=one?made[0].id:null;S.view=one?'paper':'list';
@@ -1292,10 +1352,16 @@ async function restore(file){
 }
 
 async function runAutoBackup(force){
-  if(!DIR_HANDLE)return;
+  if(!DIR_HANDLE||runAutoBackup.busy)return false;
+  runAutoBackup.busy=true;
   try{
     const perm=await DIR_HANDLE.queryPermission({mode:'readwrite'});
-    if(perm!=='granted'){DIR_NEED_PERM=true;render();return}
+    if(perm!=='granted'){
+      DIR_NEED_PERM=true;
+      if(BK_TIMER){clearInterval(BK_TIMER);BK_TIMER=null}
+      render();
+      return false;
+    }
     DIR_NEED_PERM=false;
     const re=/^exam-backup-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.zip$/;
     const existing=[];
@@ -1303,7 +1369,7 @@ async function runAutoBackup(force){
       if(h.kind==='file'&&re.test(name))existing.push(name);
     }
     existing.sort();
-    if(!force&&existing.length>=3&&S.bkLastRev===REV)return;
+    if(!force&&existing.length>=3&&S.bkLastRev===REV)return true;
 
     const pad=n=>String(n).padStart(2,'0'),now=new Date();
     const fn=`exam-backup-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}.zip`;
@@ -1322,10 +1388,12 @@ async function runAutoBackup(force){
     S.bkLastTime=now.toLocaleTimeString('zh-TW',{hour12:false});
     await save();
     render();
+    return true;
   }catch(e){
     console.error('Auto backup failed',e);
     msg('定時備份失敗：'+(e&&e.message||e),true);
-  }
+    return false;
+  }finally{runAutoBackup.busy=false}
 }
 
 function scheduleAutoBackup(){
@@ -1344,9 +1412,8 @@ async function pickBackupDir(){
     S.bkDirName=h.name;S.bkOn=true;
     await tx('kv','readwrite',s=>s.put(h,'bk_dir'));
     await save();
-    scheduleAutoBackup();
-    await runAutoBackup(true);
-    msg('已綁定資料夾「'+h.name+'」並完成首次備份');
+    scheduleAutoBackup();render();
+    if(await runAutoBackup(true))msg('已綁定資料夾「'+h.name+'」並完成首次備份');
   }catch(e){
     if(e.name!=='AbortError')msg('選取資料夾失敗：'+(e&&e.message||e),true);
   }
@@ -1358,8 +1425,10 @@ async function restoreBackupPerm(){
   try{
     const p=await DIR_HANDLE.requestPermission({mode:'readwrite'});
     if(p==='granted'){
-      DIR_NEED_PERM=false;scheduleAutoBackup();await runAutoBackup(true);render();
-      msg('已恢復「'+(S.bkDirName||DIR_HANDLE.name)+'」備份權限並執行備份');
+      DIR_NEED_PERM=false;S.bkOn=true;
+      await save();
+      scheduleAutoBackup();render();
+      if(await runAutoBackup(true))msg('已恢復「'+(S.bkDirName||DIR_HANDLE.name)+'」備份權限並執行備份');
     }else{msg('未取得資料夾寫入權限',true)}
   }catch(e){msg('權限恢復失敗：'+(e&&e.message||e),true)}
 }
@@ -1496,6 +1565,54 @@ function groupForQuick(items,tree){
   });
 }
 
+async function exportBlankPack(){
+  if(exportBlankPack.busy)return;
+  const originals=S.papers.filter(p=>p.source!=='compose');
+  if(!originals.length)return msg('目前沒有可匯出的原始考卷（重做與抽題卷不包含在空白卷中）',true);
+  if(!window.JSZip)return msg('JSZip 載入失敗，無法匯出空白卷。請確認網路連線與檔頭的 script 網址。',true);
+  exportBlankPack.busy=true;
+  try{
+    const z=new JSZip(),zipped=new Map(),lost=[],papers=[];
+    const cBlks=bl=>(bl||[]).map(b=>b.t==='text'||b.t==='code'?{t:b.t,v:b.v}:{t:b.t,id:b.id||'',html:b.html||''});
+    for(const p of originals){
+      const packed=new Set();
+      for(const id of paperImgIds(p)){
+        if(!zipped.has(id)){
+          const b=await getAsset(id);
+          zipped.set(id,!!b);
+          if(b)z.file('images/'+id,b);
+        }
+        if(zipped.get(id))packed.add(id);
+        else lost.push(p.name+'：'+id.slice(-24));
+      }
+      const expSpare={};
+      Object.entries(p.expSpare||{}).forEach(([no,sp])=>{
+        if(sp&&Array.isArray(sp.exp)&&sp.exp.length)expSpare[no]={exp:cBlks(sp.exp),inf:!!sp.inf,gap:Array.isArray(sp.gap)?[...sp.gap]:undefined,lead:!!sp.lead};
+      });
+      papers.push({
+        name:p.name,impKey:p.impKey||p.name,subj:p.subj||'',source:p.source||'mineru',
+        keyMax:p.keyMax||0,keyAll:p.keyAll?JSON.parse(JSON.stringify(p.keyAll)):{},expSpare,
+        have:[...packed],keyImgs:(p.keyImgs||[]).filter(id=>packed.has(id)),
+        passages:(p.passages||[]).map(ps=>({id:ps.id,from:ps.from,to:ps.to,blocks:cBlks(ps.blocks)})),
+        nm:(p.nm||[]).map(n=>({no:n.no,sec:n.sec||'',ins:Array.isArray(n.ins)?[...n.ins]:[],blocks:cBlks(n.blocks),exp:cBlks(n.exp)})),
+        questions:(p.questions||[]).map(q=>{
+          const r={no:q.no,blocks:cBlks(q.blocks),options:(q.options||[]).map(o=>({k:o.k,v:o.v})),key:q.key||''};
+          if(q.pid)r.pid=q.pid;
+          if(q.exp&&q.exp.length){r.exp=cBlks(q.exp);if(q.expInf)r.expInf=true;if(Array.isArray(q.expGap))r.expGap=[...q.expGap];if(q.expLead)r.expLead=true}
+          return r;
+        })
+      });
+    }
+    const subjs=S.subjs.filter(s=>papers.some(p=>p.subj===s));
+    z.file('exam-blank-pack.json',JSON.stringify({schema:'exam-review.blank-pack/v1',exportedAt:new Date().toISOString(),subjs,papers}));
+    const blob=await z.generateAsync({type:'blob'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);a.download='exam-blank-papers-'+new Date().toISOString().slice(0,10)+'.zip';
+    document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+    msg(lost.length?'已匯出 '+papers.length+' 份空白考卷，但有 '+lost.length+' 張圖片本機找不到、未包含（例：'+lost.slice(0,3).join('、')+'）':'已匯出全部 '+papers.length+' 份空白考卷（排除重組卷，可交由他人「匯入考卷 → zip」合併匯入）',lost.length>0);
+  }catch(e){msg('匯出空白卷失敗：'+(e&&e.message||e),true)}
+  finally{exportBlankPack.busy=false}
+}
 async function exportBlankPaper(paperId){
   const p=S.papers.find(x=>x.id===paperId);
   if(!p)return msg('找不到這份考卷',true);
@@ -1819,8 +1936,7 @@ function paperRow(p){
   const st=p.stage>1?'檢討中・錯 '+w:p.started?'作答中':'';
   // data-a="stop"：點下拉選單時不要觸發整列的「開啟考卷」。
   const sel='<select data-a="stop" data-f="psubj" data-id="'+p.id+'" title="移到分類" aria-label="移到分類">'+['',...subjNames()].map(s=>'<option value="'+esc(s)+'"'+((p.subj||'')===s?' selected':'')+'>'+esc(s||'未分類')+'</option>').join('')+'</select>';
-  const blankBtn=p.source!=='compose'?'<button class="ghost" data-a="expblank" data-id="'+p.id+'" title="匯出不含作答與解答的空白考卷（.html，可列印）">空白卷</button>':'';
-  return'<div class="row" data-a="open" data-id="'+p.id+'"><b>'+nameHtml(p.name)+'</b><span>'+p.questions.length+' 題'+(st?'・'+st:'')+'</span>'+sel+'<div class="ra">'+blankBtn+'<button class="ghost" data-a="redo" data-id="'+p.id+'">再做一次</button><button class="ghost dng'+(S.delc===p.id?' cf':'')+'" data-a="del" data-id="'+p.id+'">'+(S.delc===p.id?'再按一次確認刪除':'刪除')+'</button></div></div>';
+  return'<div class="row" data-a="open" data-id="'+p.id+'"><b>'+nameHtml(p.name)+'</b><span>'+p.questions.length+' 題'+(st?'・'+st:'')+'</span>'+sel+'<div class="ra"><button class="ghost" data-a="redo" data-id="'+p.id+'">再做一次</button><button class="ghost dng'+(S.delc===p.id?' cf':'')+'" data-a="del" data-id="'+p.id+'">'+(S.delc===p.id?'再按一次確認刪除':'刪除')+'</button></div></div>';
 }
 function subjList(){
   return[...subjNames(),''].map(g=>{
@@ -1832,12 +1948,17 @@ function subjList(){
   }).join('');
 }
 function vList(){
+  const bkNeedAuth=S.bkOn&&(!DIR_HANDLE||DIR_NEED_PERM);
+  const bkCtrl=bkNeedAuth
+    ?'<button class="pri" data-a="bkperm" style="background:var(--warn);border-color:var(--warn);color:#fff">⚠️ '+(DIR_HANDLE?'恢復授權並繼續定時備份':'重新指定資料夾並啟動')+'</button><button data-a="bkstop">停止</button>'
+    :'<button data-a="bktoggle" class="'+(S.bkOn?'on pri':'')+'">'+(S.bkOn?'定時備份中（點擊停止）':'啟動定時備份')+'</button>';
   const topDashboard=
     '<div class="dash-board">'+
       '<div class="dash-sec">'+
         '<h3>考卷與學習</h3>'+
         '<div class="dash-row">'+
           '<button class="pri" data-a="imp">＋ 匯入考卷</button>'+
+          '<button data-a="expblankall" title="匯出全部原始考卷為 zip（排除重做／抽題卷，保留分類、題目、正解、詳解與圖片，清空作答與個人標籤，供他人合併匯入）">匯出全部空白卷（zip）</button>'+
           '<button data-a="book">錯題本</button>'+
           '<button data-a="ana">分析</button>'+
           '<button data-a="sum">錯題彙整與匯出</button>'+
@@ -1852,10 +1973,9 @@ function vList(){
         '<div class="dash-row" style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)">'+
           '<button data-a="bkdir">📁 '+(S.bkDirName?esc(S.bkDirName):'瀏覽指定備份資料夾')+'</button>'+
           '<span>每 <input class="num" type="number" min="1" data-f="bkmin" value="'+(S.bkMin||15)+'"> 分鐘</span>'+
-          '<button data-a="bktoggle" class="'+(S.bkOn?'on pri':'')+'">'+(S.bkOn?'定時備份中（點擊停止）':'啟動定時備份')+'</button>'+
+          bkCtrl+
         '</div>'+
-        (DIR_NEED_PERM&&S.bkDirName?'<div style="margin-top:8px"><button class="pri" data-a="bkperm" style="background:var(--warn);border-color:var(--warn);color:#fff">⚠️ 點擊恢復「'+esc(S.bkDirName)+'」寫入授權並備份</button></div>':'')+
-        '<div class="hint" style="font-size:12px;margin-top:6px">循環保留最新 3 份（格式：年月日_時分秒.zip）'+(S.bkLastTime?'・上次自動備份：'+S.bkLastTime:'')+'</div>'+
+        '<div class="hint" style="font-size:12px;margin-top:6px">'+(bkNeedAuth?'重整頁面後瀏覽器會暫停資料夾寫入權限，點擊上方按鈕即可恢復・':'')+'循環保留最新 3 份（格式：年月日_時分秒.zip）'+(S.bkLastTime?'・上次自動備份：'+S.bkLastTime:'')+'</div>'+
       '</div>'+
     '</div>';
 
@@ -1870,7 +1990,7 @@ const vImport=()=>'<header><h2>匯入考卷</h2><button data-a="home">返回</bu
 '<label>選擇匯入方式（一個考卷資料夾＝一份考卷，內含 layout.json 或 full.md 與圖片）</label>'+
 '<div class="mk"><label class="btn">單份：選一個考卷資料夾<input type="file" webkitdirectory data-pick="single" hidden></label>'+
 '<label class="btn">批次：選母資料夾（每個子資料夾一份）<input type="file" webkitdirectory data-pick="batch" hidden></label>'+
-'<label class="btn">zip：MinerU 壓縮檔（可多選）<input type="file" multiple accept=".zip" data-pick="zip" hidden></label></div>'+
+'<label class="btn">zip：MinerU 壓縮檔／空白考卷包（可多選）<input type="file" multiple accept=".zip" data-pick="zip" hidden></label></div>'+
 '<p class="hint" id="sel">尚未選擇檔案</p>'+
 '<button class="pri" data-a="create">建立並開始作答</button> <span id="msg"></span>';
 
@@ -1931,7 +2051,7 @@ function editPanel(p,q,i,k){
 // 原因：datalist 依欄位目前文字過濾，填了「商業概論」就看不到其他科目，要改選得先刪字。改成輸入框（手打）旁加一顆下拉鈕，永遠列出科目樹的全部科目；兩者都走同一個 data-f="sub"，寫入路徑不變。占位項 disabled，不會被選成「清空科目」。
 const tagBox=(q,i)=>'<div class="tg"><div class="mk"><input class="grow" data-f="sub" data-i="'+i+'" value="'+esc(q.sub)+'" placeholder="科目（手動輸入，或點右邊選擇）">'+
   '<select class="pk" data-f="sub" data-i="'+i+'" title="列出所有科目" aria-label="選擇科目"><option value="" disabled selected hidden>▾</option>'+(S.tree.length?S.tree.map(s=>'<option value="'+esc(s.n)+'">'+(s.n===q.sub?'✓ ':'')+esc(s.n)+'</option>').join(''):'<option value="" disabled>（尚無已建立科目，請先於左側輸入）</option>')+'</select></div>'+
-  '<input list="ch'+i+'" data-f="chap" data-i="'+i+'" value="'+esc(q.chap)+'" '+(q.sub?'':'disabled ')+'placeholder="'+(q.sub?'章節':'先選科目，才能填章節')+'">'+dl('ch'+i,[...chapsOf(q.sub),...(EXT.chaps[q.sub]||[])])+
+  '<input list="ch'+i+'" data-f="chap" data-i="'+i+'" value="'+esc(q.chap)+'" '+(q.sub?'':'disabled ')+'placeholder="'+(q.sub?'章節':'先選科目，才能填章節')+'">'+dl('ch'+i,chapsOf(q.sub))+
   (q.cons.length?'<div class="mk">'+q.cons.map(k=>'<button class="chip" data-a="rmcon" data-i="'+i+'" data-k="'+esc(k)+'">'+esc(k)+' ✕</button>').join('')+'</div>':'')+
   '<input list="cn'+i+'" data-f="con" data-i="'+i+'" value="" '+(q.chap?'':'disabled ')+'placeholder="'+(q.chap?'＋概念（知識點），Enter 加入':'先選章節，才能加概念')+'">'+dl('cn'+i,consOf(q.sub,q.chap).filter(k=>!q.cons.includes(k)))+'</div>';
 
@@ -2266,7 +2386,7 @@ document.addEventListener('click',async e=>{
   if(d.a==='sink')return sink(d.s);
   if(d.a==='create')return create();
   if(d.a==='cardview'){await loadCardView(p);scrollTo(0,y);return}
-  if(d.a==='expblank'){await exportBlankPaper(d.id);return}
+  if(d.a==='expblankall'){await exportBlankPack();return}
   if(d.a==='expbook'){flushSave();await exportMistakeBook();return}
   if(d.a==='book'){S.view='book';BK.page=1;BK.editPt='';await loadBookAssets();render();scrollTo(0,0);return}
   if(d.a==='bkpt'){flushSave();BK.editPt=BK.editPt===d.k?'':d.k;render();scrollTo(0,y);return}
@@ -2307,17 +2427,21 @@ document.addEventListener('click',async e=>{
     case'open':S.cur=d.id;S.view='paper';S.em=null;await loadAssets(P());if(P()&&P().stage===2)loadCardView(P(),true);break;
     case'del':if(S.delc===d.id){S.papers=S.papers.filter(x=>x.id!==d.id);S.delc=null;pruneCons();gcAssets()}else S.delc=d.id;break;
     case'redo':{const np=resit(S.papers.find(x=>x.id===d.id));S.papers.unshift(np);S.cur=np.id;S.view='paper';await loadAssets(np);break}
-    case'bkdir':await pickBackupDir();break;
-    case'bkperm':await restoreBackupPerm();break;
+    case'bkdir':await pickBackupDir();return;
+    case'bkperm':await restoreBackupPerm();return;
+    case'bkstop':
+      S.bkOn=false;if(BK_TIMER){clearInterval(BK_TIMER);BK_TIMER=null}
+      await save();render();return;
     case'bktoggle':
       if(!S.bkOn){
         if(!DIR_HANDLE)await pickBackupDir();
         else if(DIR_NEED_PERM)await restoreBackupPerm();
-        else{S.bkOn=true;save();scheduleAutoBackup();await runAutoBackup(true);render()}
+        else{S.bkOn=true;await save();scheduleAutoBackup();render();await runAutoBackup(true)}
       }else{
-        S.bkOn=false;if(BK_TIMER){clearInterval(BK_TIMER);BK_TIMER=null}save();render();
+        S.bkOn=false;if(BK_TIMER){clearInterval(BK_TIMER);BK_TIMER=null}
+        await save();render();
       }
-      break;
+      return;
     case'ren':S.ren={t:d.t,sub:d.sub,o:d.o};break;
     case'rcx':S.ren=null;break;
     case'rok':{const r=S.ren;renameTag(r.t,r.sub,r.o,$('#rn').value);S.ren=null;break}
@@ -2588,7 +2712,7 @@ window.ExamReview={buildCards,SINKS,IMPORTERS,render,state:()=>S,pushToCardnote}
 // 原因：handler 或 render 丟例外時畫面不更新、使用者看不到任何訊息；至少讓它大聲報錯。
 addEventListener('error',e=>msg('未預期的錯誤：'+(e.message||e),true));
 addEventListener('unhandledrejection',e=>msg('未預期的錯誤：'+((e.reason&&e.reason.message)||e.reason),true));
-load().then(async()=>{if(location.hash==='#import')S.view='import';await initAutoBackup();render();loadExt()});
+load().then(async()=>{if(location.hash==='#import')S.view='import';await initAutoBackup();render()});
 render();
 </script>
 </body>
