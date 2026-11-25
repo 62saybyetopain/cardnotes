@@ -2494,7 +2494,8 @@ document.addEventListener('click',async e=>{
       break}
     case'addps':{
       if(p.source==='compose'){msg('請到原卷新增題組',true);return}
-      const from=+($('#psf')\vert{}\vert{}{}).value,to=+($('#pst')||{}).value;
+      const from=+($('#psf')||{}).value;
+      const to=+($('#pst')||{}).value;
       if(!Number.isInteger(from)||!Number.isInteger(to)||from<1||from>to){msg('請輸入有效的題組起訖題號（起號不可大於迄號）',true);return}
       const qs=p.questions.filter(x=>x.no>=from&&x.no<=to);
       if(!qs.length){msg('第 '+from+'–'+to+' 題之間找不到任何題目',true);return}
