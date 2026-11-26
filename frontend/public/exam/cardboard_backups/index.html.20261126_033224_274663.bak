@@ -13,8 +13,8 @@ document.documentElement.setAttribute('data-theme',t)})();
 </script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js" onload="window.renderMath&&renderMath()"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js" onerror="window._katexErr=1"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js" onload="window.renderMath&&renderMath()" onerror="window._katexErr=1"></script>
 <style>
 /* 原因：色彩 token 沿用卡片軟體（深色為預設、淺色用 data-theme="light"），讓兩個網頁看起來是同一套；舊變數名稱留作別名，因為程式裡的行內樣式（提示條、msg）還在用。 */
 :root,[data-theme="dark"]{--bg:#17181a;--panel:#1f2023;--line:#34363a;--text:#e6e6e6;--muted:#9a9ea6;--accent:#6c9bff;--accent-soft:#24304a;--danger:#ff7b6b;--warn:#e0b24f;--card:#26272b;--sidebar:#1f2023;--ok:#34d399;--code-bg:rgba(15,23,42,.55);color-scheme:dark}
@@ -630,8 +630,8 @@ const ICON={
   moon:'<svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>'
 };
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-// 原因：會計題的「$50」「$13,500」是貨幣，但 KaTeX 自動排版把任兩個 $ 當成算式的頭尾，中間整段中文被排成不換行的算式（字型變大、橫向溢出），$ 本身也消失。貨幣的 $ 後面是數字、再接非算式字元；把它包進獨立的 <span>，就成為單獨的文字節點，KaTeX 找不到配對。「$2x^{2}$」「$50$」數字後面接算式字元，不會被誤判。
-const escm=s=>esc(s).replace(/\$(?=\d[\d,]*(?:\.\d+)?(?![\d,.A-Za-z\\^_{}=+*\/<>|$-]))/g,()=>'<span>$</span>');
+// 原因：會計題的「$50」「$13,500」是貨幣，但 KaTeX 自動排版把任兩個 $ 當成算式的頭尾，中間整段中文被排成不換行的算式（字型變大、橫向溢出），$ 本身也消失。貨幣的 $ 後面是數字、再接非算式字元；把它包進獨立的 <span>，就成為單獨的文字節點，KaTeX 找不到配對。「$2x^{2}$」「$50(\sqrt{3}+1)$」「$50$」數字後面接算式字元（含括號），不會被誤判。
+const escm=s=>esc(s).replace(/\$(?=\d[\d,]*(?:\.\d+)?(?![\d,.A-Za-z\\^_{}=+*\/<>|()[\]$-]))/g,()=>'<span>$</span>');
 const P=()=>S.papers.find(p=>p.id===S.cur);
 const norm=s=>[...String(s).toUpperCase().replace(/\s/g,'')].sort().join('');
 const cid=(p,q)=>'exam:'+p.id+':q'+q.no;
@@ -1904,7 +1904,7 @@ function vList(){
         '<h3>考卷與學習</h3>'+
         '<div class="dash-row">'+
           '<button class="pri" data-a="imp">＋ 匯入考卷</button>'+
-          '<button data-a="expblankall" title="匯出全部原始考卷為 zip（排除重做／抽題卷，保留分類、題目、正解、詳解與圖片，清空作答與個人標籤，供他人合併匯入）">匯出全部空白卷（zip）</button>'+
+          '<button data-a="cmp">組成考卷</button>'+
           '<button data-a="book">錯題本</button>'+
           '<button data-a="ana">分析</button>'+
           '<button data-a="sum">錯題彙整與匯出</button>'+
@@ -1915,6 +1915,7 @@ function vList(){
         '<div class="dash-row">'+
           '<button data-a="bk">匯出備份（zip）</button>'+
           '<label class="btn" style="margin:0">選擇備份檔還原<input type="file" accept=".zip" data-restore hidden></label>'+
+          '<button data-a="expblankall" title="匯出全部原始考卷為 zip（排除重做／抽題卷，保留分類、題目、正解、詳解與圖片，清空作答與個人標籤，供他人合併匯入）">匯出全部空白卷（zip）</button>'+
         '</div>'+
         '<div class="dash-row" style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)">'+
           '<button data-a="bkdir">📁 '+(S.bkDirName?esc(S.bkDirName):'瀏覽指定備份資料夾')+'</button>'+
@@ -2144,13 +2145,20 @@ function vSum(){
 
 // 原因：原本科目、章節、概念各自獨立，勾了章節會把其他科目整科排除，也抽不到沒分章節的題。改成科目與章節是一棵樹（勾科目＝整科，勾章節＝只抽那幾章），並用一行白話寫出目前條件與符合題數。
 const SEP='│';
-const cat=()=>S.cat||(S.cat={y:[],l:[],k:[],n:10,all:false});
+const cat=()=>S.cat||(S.cat={c:[],y:[],l:[],k:[],n:10,all:false});
 const yearOf=p=>(String(p.name).match(/(\d{2,4})\s*(?:學年度|年度|學年|年)/)||[])[1]||'';
 const leafOf=g=>(g.canon.sub||'')+SEP+(g.canon.chap||'');
-const catHit=(g,f,skip)=>(skip==='y'||!f.y.length||f.y.includes(yearOf(g.all[0].p)))&&
+const catOf=g=>g.all[0].p.subj||'';
+const catHit=(g,f,skip)=>(skip==='c'||!f.c.length||f.c.includes(catOf(g)))&&
+  (skip==='y'||!f.y.length||f.y.includes(yearOf(g.all[0].p)))&&
   (skip==='l'||!f.l.length||f.l.includes(leafOf(g)))&&
   (skip==='k'||!f.k.length||g.canon.cons.some(x=>f.k.includes(x)));
-const catLabel=c=>[...c.y.map(y=>(y||'無')+'年度'),...new Set(c.l.map(x=>x.split(SEP)[0]||'未標科目')),...c.k].join('、').slice(0,24)||'全部';
+const catPrune=()=>{
+  const c=cat(),ok=groups().filter(g=>!c.c.length||c.c.includes(catOf(g)));
+  const lf=new Set(ok.map(leafOf)),kk=new Set(ok.flatMap(g=>g.canon.cons)),yy=new Set(ok.map(g=>yearOf(g.all[0].p)));
+  c.l=c.l.filter(x=>lf.has(x));c.k=c.k.filter(x=>kk.has(x));c.y=c.y.filter(x=>yy.has(x));
+};
+const catLabel=c=>[...c.c.map(x=>x||'未分類'),...c.y.map(y=>(y||'無')+'年度'),...new Set(c.l.map(x=>x.split(SEP)[0]||'未標科目')),...c.k].join('、').slice(0,24)||'全部';
 function catLeaves(gs){
   // 科目、章節依「彙整」樹的順序排，沒在樹裡的（例如未標科目、未分章節）排最後。
   const order=S.tree.map(s=>s.n),m={},rk=(o,x)=>o.indexOf(x)<0?999:o.indexOf(x);
@@ -2163,7 +2171,8 @@ function catLeaves(gs){
 function catSec(gs){
   const c=cat(),pool=gs.filter(g=>c.all||everWeak(g)),hit=pool.filter(g=>catHit(g,c));
   const n=(d,fn)=>pool.filter(g=>catHit(g,c,d)&&fn(g)).length;
-  const lv=catLeaves(gs),yrs=[...new Set(gs.map(g=>yearOf(g.all[0].p)))].sort(),cons=[...new Set(gs.flatMap(g=>g.canon.cons))];
+  const gv=gs.filter(g=>!c.c.length||c.c.includes(catOf(g))),cats=[...subjNames(),''].filter(s=>gs.some(g=>catOf(g)===s));
+  const lv=catLeaves(gv),yrs=[...new Set(gv.map(g=>yearOf(g.all[0].p)))].sort(),cons=[...new Set(gv.flatMap(g=>g.canon.cons))];
   const chk=(d,v,label,k)=>'<label class="ck"><input type="checkbox" data-f="cat" data-d="'+d+'" data-v="'+esc(v)+'"'+(c[d].includes(v)?' checked':'')+'>'+esc(label)+' <small>'+k+'</small></label>';
   const tree=lv.map(({s,cs})=>{
     const ks=cs.map(x=>s+SEP+x),sel=ks.filter(k=>c.l.includes(k)).length,part=sel>0&&sel<ks.length;
@@ -2171,12 +2180,13 @@ function catSec(gs){
       '<div class="cat-c">'+cs.map((x,i)=>chk('l',ks[i],x||'（未分章節）',n('l',g=>leafOf(g)===ks[i]))).join('')+'</div></div>';
   }).join('');
   const sc=lv.map(({s,cs})=>{const sel=cs.filter(x=>c.l.includes(s+SEP+x));return sel.length?(s||'未標科目')+(sel.length===cs.length?'（整科）':'：'+sel.map(x=>x||'未分章節').join('、')):''}).filter(Boolean);
-  const rule='年度：'+(c.y.length?c.y.map(y=>(y||'無')+' 年度').join('或'):'不限')+'　科目章節：'+(sc.length?sc.join('；'):'不限')+'　概念：'+(c.k.length?c.k.join('或'):'不限');
+  const rule='分類：'+(c.c.length?c.c.map(x=>x||'未分類').join('或'):'不限')+'　年度：'+(c.y.length?c.y.map(y=>(y||'無')+' 年度').join('或'):'不限')+'　科目章節：'+(sc.length?sc.join('；'):'不限')+'　概念：'+(c.k.length?c.k.join('或'):'不限');
   return'<h2>依類別抽題組卷</h2>'+
   '<p><small>勾選要練習的類別，系統從符合的題目中隨機抽題。年度、科目章節、概念三組條件要同時成立；同一組裡勾多個，符合其中一個即可；整組都沒勾＝不限。數字是在其他條件下符合的題數。</small></p>'+
   '<p><b>抽題範圍</b></p><div class="mk">'+[[false,'只抽錯過或猜對過的',gs.filter(everWeak).length],[true,'全部題目（含一直答對的）',gs.length]].map(([v,t,k])=>'<button class="'+(c.all===v?'on':'')+'" data-a="catpool" data-v="'+v+'">'+t+' '+k+'</button>').join('')+'</div>'+
-  '<p><b>年度</b></p><div class="mk">'+yrs.map(y=>chk('y',y,y?y+' 年度':'（無年度）',n('y',g=>yearOf(g.all[0].p)===y))).join('')+'</div>'+
-  '<p><b>科目與章節</b> <small>勾科目＝整科；展開勾章節＝只抽那幾章</small></p>'+(tree||'<small>還沒有標科目</small>')+
+  '<p><b>分類</b> <small>考卷清單裡的分類，先選這個；沒勾＝不限</small></p><div class="mk">'+cats.map(s=>chk('c',s,s||'未分類',n('c',g=>catOf(g)===s))).join('')+'</div>'+
+  '<p><b>細分：科目與章節</b> <small>選填。只有同一分類裡混了不同科目的考卷才需要；沒標科目的題目在「（未標科目）」，不勾就不受影響</small></p>'+(tree||'<small>還沒有標科目</small>')+
+  '<details'+(c.y.length?' open':'')+'><summary>年度（選填）</summary><div class="mk">'+yrs.map(y=>chk('y',y,y?y+' 年度':'（無年度）',n('y',g=>yearOf(g.all[0].p)===y))).join('')+'</div></details>'+
   (cons.length?'<p><b>概念</b></p><div class="mk">'+cons.map(k=>chk('k',k,k,n('k',g=>g.canon.cons.includes(k)))).join('')+'</div>':'')+
   '<p class="hint">目前條件：'+esc(rule)+'</p>'+
   '<p>抽 <input class="num" type="number" min="1" data-f="catn" value="'+c.n+'"> 題　<small>符合 '+hit.length+' 題'+(hit.length&&hit.length<c.n?'，題數不足，會全部抽出':'')+'</small></p>'+
@@ -2189,7 +2199,7 @@ function vAna(){
   if(!gs.length)return hd+'<p class="empty">還沒有批改過的題目。在作答頁按「對答案」後，這裡會顯示跨考卷的統計。</p>';
   const pct=(w,n)=>n?Math.round(100*w/n):0,fs=gs.map(g=>g.first.q);
   const nw=fs.filter(q=>q.st==='x').length,ng=fs.filter(q=>q.st!=='x'&&q.guess).length;
-  const stillX=gs.filter(g=>g.last.q.st==='x').length,still=gs.filter(weak).length,ever=gs.filter(everWeak).length;
+  const stillX=gs.filter(g=>g.last.q.st==='x').length,still=gs.filter(weak).length;
   const row=(l,r,btn)=>{const wk=r.w+r.g;return'<div class="br"><span title="'+esc(l)+'">'+esc(l)+'</span><progress max="100" value="'+pct(wk,r.n)+'"></progress><b>'+r.w+(r.g?'+'+r.g:'')+'/'+r.n+'（'+pct(wk,r.n)+'%）</b>'+(btn||'')+'</div>'};
   const srt=o=>Object.entries(o).sort((x,y)=>{const[p,q]=[x[1],y[1]],rp=pct(p.w+p.g,p.n),rq=pct(q.w+q.g,q.n);return(S.sort==='rate'?(rq-rp)||(q.n-p.n):((q.w+q.g)-(p.w+p.g))||(rq-rp))});
   const sec=(t,o,fn,max)=>'<h2>'+t+'</h2>'+(Object.keys(o).length?srt(o).slice(0,max||99).map(fn).join(''):'<p class="empty">還沒有資料。</p>');
@@ -2197,9 +2207,6 @@ function vAna(){
   const cs=Object.entries(a.cause).sort((x,y)=>y[1]-x[1]);
   return hd+
   '<p>已批改 '+gs.length+' 題（同一題只算一次）：首次作答錯 '+nw+' 題（'+pct(nw,gs.length)+'%）、猜對 '+ng+' 題；最近一次仍答錯 '+stillX+' 題、猜對 '+(still-stillX)+' 題。</p>'+
-  '<p>組卷：最近弱點 <input class="num" type="number" min="0" data-f="n1" value="'+(S.n1??15)+'"> 題（最近一次仍答錯或猜對，共 '+still+' 題可選）＋ 隨機抽 <input class="num" type="number" min="0" data-f="n2" value="'+(S.n2??10)+'"> 題（曾經錯過或猜對，共 '+ever+' 題）</p>'+
-  '<button class="pri" data-a="compose" data-k=""'+(ever?'':' disabled')+'>組成考卷</button> <span id="msg"></span>'+
-  '<br><label class="ck"><input type="checkbox" data-f="shuf"'+(S.shuf!==false?' checked':'')+'>打亂選項順序（避免記住位置）</label>'+
   '<p><small>比例都以每題「首次作答」計算，重做不重複計入；數字是「錯＋猜對／考過」。排序：</small></p>'+
   '<div class="mk">'+[['cnt','錯題數'],['rate','錯誤率']].map(([v,t])=>'<button class="'+((S.sort||'cnt')===v?'on':'')+'" data-a="sort" data-v="'+v+'">'+t+'</button>').join('')+'</div>'+
   sec('科目',a.s,([k,r])=>row(k,r))+
@@ -2209,12 +2216,28 @@ function vAna(){
   '<h2>同一題反覆錯</h2>'+(rep.length?rep.map(({g,n,w})=>{
     const t=g.canon,ex=(t.blocks.find(b=>b.t==='text')||{v:''}).v.slice(0,36);
     return'<div class="br"><span title="'+esc(g.all[0].p.name+' 第 '+t.no+' 題')+'">'+esc(g.all[0].p.name+' 第 '+t.no+' 題')+'</span><progress max="100" value="'+pct(w,n)+'"></progress><b>錯 '+w+'/'+n+' 次・最近'+(g.last.q.st==='x'?'錯':'對')+'</b></div><small>'+esc(ex)+'…</small>';
-  }).join(''):'<p class="empty">還沒有重做過而且錯過的題目。用上面的按鈕把錯題組成考卷再做一次，就會累積這份紀錄。</p>')+catSec(gs);
+  }).join(''):'<p class="empty">還沒有重做過而且錯過的題目。到首頁「組成考卷」把錯題組成考卷再做一次，就會累積這份紀錄。</p>');
+}
+
+function vCompose(){
+  const hd='<header><h2>組成考卷</h2><button data-a="home">返回</button></header>';
+  const gs=groups();
+  if(!gs.length)return hd+'<p class="empty">還沒有批改過的題目。在作答頁按「對答案」後才能組卷。</p>';
+  const still=gs.filter(weak).length,ever=gs.filter(everWeak).length;
+  return hd+
+  '<p>組卷：最近弱點 <input class="num" type="number" min="0" data-f="n1" value="'+(S.n1??15)+'"> 題（最近一次仍答錯或猜對，共 '+still+' 題可選）＋ 隨機抽 <input class="num" type="number" min="0" data-f="n2" value="'+(S.n2??10)+'"> 題（曾經錯過或猜對，共 '+ever+' 題）</p>'+
+  '<button class="pri" data-a="compose" data-k=""'+(ever?'':' disabled')+'>組成考卷</button> <span id="msg"></span>'+
+  '<br><label class="ck"><input type="checkbox" data-f="shuf"'+(S.shuf!==false?' checked':'')+'>打亂選項順序（避免記住位置）</label>'+
+  catSec(gs);
 }
 
 function renderMath(el){
-  if(!window.renderMathInElement)return;
-  try{renderMathInElement(el||document.getElementById('app'),{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false,strict:false})}catch(e){console.warn('KaTeX',e)}
+  const root=el||document.getElementById('app');
+  if(!window.renderMathInElement){
+    if(window._katexErr&&root&&/\$[^$\n]+\$|\\\(|\\\[/.test(root.textContent||''))msg('數學公式套件（KaTeX）載入失敗，目前無法顯示根號與算式，請檢查網路連線或確認未封鎖 cdnjs.cloudflare.com',true);
+    return;
+  }
+  try{renderMathInElement(root,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false},{left:'\\[',right:'\\]',display:true}],throwOnError:false,strict:false})}catch(e){console.warn('KaTeX',e)}
 }
 function vBook(){
   const hd='<header><h2>錯題本</h2><div class="mk"><button data-a="ana">分析</button><button data-a="home">返回</button></div></header>';
@@ -2309,7 +2332,7 @@ function vBook(){
 }
 
 function render(){
-  $('#app').innerHTML=S.view==='import'?vImport():S.view==='sum'?vSum():S.view==='ana'?vAna():S.view==='book'?vBook():S.view==='paper'&&P()?vPaper():vList();
+  $('#app').innerHTML=S.view==='import'?vImport():S.view==='sum'?vSum():S.view==='ana'?vAna():S.view==='compose'?vCompose():S.view==='book'?vBook():S.view==='paper'&&P()?vPaper():vList();
   document.querySelectorAll('input[data-ind]').forEach(e=>{e.indeterminate=true});
   // 原因：深淺切換鈕放進每個畫面標題列的最右邊；統一在這裡加，免得五個 view 各寫一份。
   const h=document.querySelector('#app header');
@@ -2397,7 +2420,7 @@ document.addEventListener('click',async e=>{
     case'rcx':S.ren=null;break;
     case'rok':{const r=S.ren;renameTag(r.t,r.sub,r.o,$('#rn').value);S.ren=null;break}
     case'catpool':cat().all=d.v==='true';break;
-    case'catclear':{const c=cat();c.y=[];c.l=[];c.k=[];break}
+    case'catclear':{const c=cat();c.c=[];c.y=[];c.l=[];c.k=[];break}
     case'catcompose':{
       // 原因：題目由類別條件自動隨機抽，不逐題自選；組成後依考卷時間與題號排序。
       const c=cat(),pool=groups().filter(g=>(c.all||everWeak(g))&&catHit(g,c));
@@ -2412,6 +2435,7 @@ document.addEventListener('click',async e=>{
       S.view='paper';if(n===2&&!p.graded)grade(p);p.stage=n;if(n===2)loadCardView(p,true);break;
     }
     case'ana':S.view='ana';break;
+    case'cmp':S.view='compose';break;
     case'gtog':S.gclose=S.gclose||{};if(S.gclose[d.g])delete S.gclose[d.g];else S.gclose[d.g]=1;break;
     case'subjadd':{
       const n=$('#ns').value.trim();
@@ -2671,10 +2695,10 @@ document.addEventListener('change',async e=>{
   if(f==='pt')S.points[t.dataset.g]=t.value;
   else if(f==='psubj'){const x=S.papers.find(z=>z.id===t.dataset.id);if(!x)return msg('找不到這份考卷，沒有移動',true);x.subj=t.value}
   else if(f==='th')S.th=Math.max(1,+t.value||3);
-  else if(f==='cat'){const a=cat()[t.dataset.d],v=t.dataset.v,i=a.indexOf(v);if(t.checked&&i<0)a.push(v);else if(!t.checked&&i>=0)a.splice(i,1)}
+  else if(f==='cat'){const a=cat()[t.dataset.d],v=t.dataset.v,i=a.indexOf(v);if(t.checked&&i<0)a.push(v);else if(!t.checked&&i>=0)a.splice(i,1);if(t.dataset.d==='c')catPrune()}
   else if(f==='catsub'){
     // 勾科目＝把它底下全部章節一起勾起來或取消；半選狀態點一下＝全選。
-    const c=cat(),s=t.dataset.v,ks=catLeaves(groups()).filter(x=>x.s===s).flatMap(x=>x.cs.map(ch=>s+SEP+ch));
+    const c=cat(),s=t.dataset.v,ks=catLeaves(groups().filter(g=>!c.c.length||c.c.includes(catOf(g)))).filter(x=>x.s===s).flatMap(x=>x.cs.map(ch=>s+SEP+ch));
     c.l=t.checked?[...new Set([...c.l,...ks])]:c.l.filter(k=>!ks.includes(k));
   }
   else if(f==='catn')cat().n=Math.max(1,Math.floor(+t.value)||1);
