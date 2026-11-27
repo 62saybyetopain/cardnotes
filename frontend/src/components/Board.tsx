@@ -1,4 +1,5 @@
 // @depends-on ../api.ts (createBoardNote / patchBoardNote / deleteBoardNote：便利貼三個方法，driver.ts、httpDriver.ts、indexedDbDriver.ts 必須同步)
+// @depends-on ../App.tsx (刪除便利貼時若 selectedCardId 為 "note:<id>"，必須呼叫 onSelectCard(null) 清除上層選取，避免 RightPanel 重開內容分頁時以已刪除的 noteId 查詢白板並報錯)
 // @depends-on ./ImageNode.tsx + ../api.ts (createBoardImage / patchBoardImage / deleteBoardImage / putBoardImageLink / deleteBoardImageLink / listBoards / createBoard) + backend boards.py、db.py::BOARD_IMAGES_DDL、types.ts::BoardImage：白板圖片節點 id 一律是 "img:<image_id>"，所有以 "group:"／"note:"／"lit:"／"q:" 排除非卡片節點的判斷都要一併排除 "img:"；圖片連線（imageLinks）純視覺，邊 id 為 "imglink:…"，不可進 links／LinkEditorModal
 // @depends-on ./QuestionNode.tsx (useBoardQuestions 的 paneExtras：右鍵「貼上圖片」併入同一個選單)
 // @depends-on backend media.py::cleanup_media（已把 board_images.media_id 算作被引用）、cards.py::sync_export／sync_overwrite（備份還原帶 board_images／board_image_links）：兩處都不能漏，否則清理與還原會讓圖片消失
@@ -1733,6 +1734,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       const nodeId = `note:${nid}`;
       setNodes((ns) => ns.filter((n) => n.id !== nodeId));
       saved.current.delete(nodeId);
+      if (selectedRef.current === nodeId) onSelectCard(null);
     } catch (e) {
       report(e, "刪除便利貼失敗");
     }
@@ -3078,6 +3080,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       if (removedNotes.size) {
         setNodes((ns) => ns.filter((n) => !removedNotes.has(n.id)));
         removedNotes.forEach((id) => saved.current.delete(id));
+        if (selectedRef.current && removedNotes.has(selectedRef.current)) onSelectCard(null);
       }
     }
 
@@ -3126,7 +3129,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         onCountChanged();
       }
     }
-  }, [askQuestionDelete, boardId, onCountChanged, report]);
+  }, [askQuestionDelete, boardId, onCountChanged, onSelectCard, report]);
 
   useEffect(() => {
     if (!active) return;

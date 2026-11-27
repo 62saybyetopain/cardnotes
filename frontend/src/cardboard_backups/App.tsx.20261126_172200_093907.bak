@@ -30,7 +30,7 @@ import { useNotify } from "./notify";
 import type { BoardLink, BoardSummary, CardDetail, CardSummary, RelationType, Tag } from "./types";
 
 const VIEW_KEY = "cardboard:view";
-type ViewMode = "board" | "graph" | "cards" | "daily" | "literature";
+type ViewMode = "board" | "graph" | "cards" | "daily" | "literature" | "mindmap";
 
 // 還原重新整理前的白板、視圖與篩選；欄位型別不符一律丟棄，退回預設
 function loadSavedView(): { boardId: string | null; viewMode: ViewMode; filter: Filter } {
@@ -44,7 +44,8 @@ function loadSavedView(): { boardId: string | null; viewMode: ViewMode; filter: 
       v.viewMode === "graph" ||
       v.viewMode === "cards" ||
       v.viewMode === "daily" ||
-      v.viewMode === "literature"
+      v.viewMode === "literature" ||
+      v.viewMode === "mindmap"
     )
       view.viewMode = v.viewMode;
     const f = v.filter;
@@ -625,6 +626,11 @@ export default function App() {
             setCenterEditing(false);
           }}
           dailyOpen={viewMode === "daily"}
+          onOpenMindmap={() => {
+            setViewMode("mindmap");
+            setCenterEditing(false);
+          }}
+          mindmapOpen={viewMode === "mindmap"}
           onFilter={(f) => {
             setFilter(f);
             setViewMode("cards");

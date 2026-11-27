@@ -9,7 +9,7 @@
 // @depends-on ../styles.css (.react-flow__node-boardGroup.drop-target：拖曳卡片時「放開後會歸入」的亮框樣式，class 由 setDropTargets 掛在節點上)
 // @depends-on ../App.tsx (toolsSlot：右上工具列的 .tools-slide 容器，null 時不渲染「定位／自動對齊」)
 // @depends-on ../styles.css (.tools-slide button / .on：這兩顆按鈕的外觀由容器樣式決定，此處不寫 inline style)
-// @depends-on ./Editor.tsx (CodeReplaceModal, parseMultiFileAiPatches, extractCodeBlocks, applyCodePatches, BoardReplaceFileItem：白板多檔案定位直接開啟取代視窗並批次寫入卡片與綁定檔案，不開編輯器)
+// @depends-on ./Editor.tsx (CodeReplaceModal, parseAiPatchPairs, findUniqueRange, alignIndent, extractCodeBlocks, applyCodePatches, stripOuterFence, BoardReplaceFileItem：白板純代碼比對多檔案定位直接開啟取代視窗並批次寫入卡片與綁定檔案，不開編輯器)
 // @depends-on ../App.tsx (selectedCardId 有兩條寫入路徑：onNodeClick→onOpenCard，與 onSelectionChange→onSelectCard；Board 以 nodes 的 selected 為準去重；onOpenCard 支援 options.smartPasteText)
 // @depends-on ../api.ts (addLiteratureToBoard / patchBoardLiterature / removeLiteratureFromBoard) 與 backend boards.py::BOARD_LITERATURE_SELECT、db.py::BOARD_LITERATURE_DDL、types.ts::BoardLiterature：白板文獻節點是「參照」，只存 literature_id＋座標＋大小；節點 id 一律是 "lit:<literature_id>"，所有以 "group:"／"note:" 排除非卡片節點的判斷都要一併排除 "lit:"
 // @depends-on ./RightPanel.tsx (NoteEditorPane 儲存後經 App.onNoteChanged 呼叫 BoardHandle.updateNote；便利貼節點 data 的 text／color 必須與它寫入資料庫的值一致)
@@ -85,10 +85,13 @@ import {
 import { isSymmetricRelation } from "../lib/relations";
 import { CardNode, type CardFlowNode } from "./CardNode";
 import {
+  alignIndent,
   applyCodePatches,
   CodeReplaceModal,
   extractCodeBlocks,
-  parseMultiFileAiPatches,
+  findUniqueRange,
+  parseAiPatchPairs,
+  stripOuterFence,
   type BoardReplaceFileItem,
 } from "./Editor";
 import { FloatingEdge } from "./FloatingEdge";
@@ -724,8 +727,52 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
   const rf = useReactFlow();
   const wrapRef = useRef<HTMLDivElement>(null);
   const [navOpen, setNavOpen] = useState(false);
+  // ---- 導航器停靠在白板下方：高度可拖曳調整並記住；寬度就是白板（中間區塊）的寬度 ----
+  const NAV_DOCK_MIN = 200;
+  const NAV_DOCK_DEFAULT = 320;
+  const NAV_DOCK_KEY = "cardboard_nav_dock_height";
+  const [navHeight, setNavHeight] = useState<number>(() => {
+    try {
+      const v = Number(localStorage.getItem(NAV_DOCK_KEY));
+      return Number.isFinite(v) && v >= NAV_DOCK_MIN ? v : NAV_DOCK_DEFAULT;
+    } catch {
+      return NAV_DOCK_DEFAULT;
+    }
+  });
+  const navDragRef = useRef<{ startY: number; startH: number; latest: number } | null>(null);
+  const saveNavHeight = (h: number) => {
+    try {
+      localStorage.setItem(NAV_DOCK_KEY, String(Math.round(h)));
+    } catch {
+      // 儲存被限制（例如無痕模式）時，本次有效即可
+    }
+  };
+  // 上限取白板高度的 70%，避免導航器把白板擠到看不見
+  const clampNavHeight = (h: number) => {
+    const total = wrapRef.current?.clientHeight ?? 0;
+    const max = total > 0 ? Math.max(NAV_DOCK_MIN, Math.floor(total * 0.7)) : 900;
+    return Math.min(Math.max(h, NAV_DOCK_MIN), max);
+  };
+  const onNavSplitterDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    navDragRef.current = { startY: e.clientY, startH: navHeight, latest: navHeight };
+  };
+  const onNavSplitterMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = navDragRef.current;
+    if (!d) return;
+    d.latest = clampNavHeight(d.startH + (d.startY - e.clientY));
+    setNavHeight(d.latest);
+  };
+  const onNavSplitterUp = () => {
+    const d = navDragRef.current;
+    navDragRef.current = null;
+    if (d) saveNavHeight(d.latest);
+  };
   const { boards: navBoards, onSelectBoard: navSelectBoard, onBoardsChanged: navBoardsChanged } = props;
   const navAvailable = !!navBoards && !!navSelectBoard && !!navBoardsChanged && getPreferredDriverType() !== "dexie";
+  const navDockOpen = navAvailable && navOpen && active;
+  const navDockSize = `min(${navHeight}px, 70%)`; // 白板底緣與停靠區高度共用同一個值，兩者才會剛好銜接
   const [nodes, setNodes] = useState<AnyFlowNode[]>([]);
   const [links, setLinks] = useState<BoardLink[]>([]);
   const [imageLinks, setImageLinks] = useState<BoardImageLink[]>([]); // 圖片—卡片的純視覺連線，與 links（語意連結）完全分開
@@ -777,92 +824,104 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
       return;
     }
 
-    const matchCardByFileName = (fileName: string): { card?: CardFlowNode; error?: string } => {
-      const want = (fileName.split(/[\\/]/).pop() ?? fileName).trim().toLowerCase();
-      const byTitle = allCards.filter((c) => {
-        const t = (c.data.title || "").trim();
-        const base = (t.split(/[\\/]/).pop() ?? t).trim().toLowerCase();
-        return base === want;
-      });
-      if (byTitle.length === 1) return { card: byTitle[0] };
-      if (byTitle.length > 1) {
-        return { error: `檔案「${fileName}」在目前白板匹配到多張同名卡片，無法唯一對應` };
+    // 純代碼比對路由：完全不依賴自然語言標題或檔名，直接以定位代碼精準匹配白板所有卡片的代碼塊
+    let pairs = parseAiPatchPairs(raw);
+    if (pairs.length === 0) {
+      const cleanRaw = stripOuterFence(raw);
+      if (!cleanRaw.trim()) {
+        report(new Error("請先貼上有效的代碼段落或修改指令"), "定位失敗");
+        return;
       }
-      const byBlockLabel = allCards.filter((c) =>
-        extractCodeBlocks(c.data.body || "").some(
-          (b) => (b.label.split(/[\\/]/).pop() ?? b.label).trim().toLowerCase() === want,
-        ),
-      );
-      if (byBlockLabel.length === 1) return { card: byBlockLabel[0] };
-      if (byBlockLabel.length > 1) {
-        return { error: `檔案「${fileName}」在目前白板匹配到多張包含同名代碼塊的卡片，無法唯一對應` };
-      }
-      return { error: `檔案「${fileName}」在目前白板找不到對應卡片` };
-    };
+      pairs = [{ findText: cleanRaw, replaceText: "" }];
+    }
 
-    const matchCardBySnippet = (snippet: string): { card?: CardFlowNode; error?: string } => {
-      const normSnip = snippet.replace(/\r\n/g, "\n").replace(/\u00A0/g, " ").trim();
-      const nonEmptySnip = normSnip.split("\n").map((l) => l.trim()).filter(Boolean);
-      if (nonEmptySnip.length === 0) return { error: "定位代碼片段為空" };
-      const hits = allCards.filter((c) => {
-        const body = (c.data.body || "").replace(/\r\n/g, "\n").replace(/\u00A0/g, " ");
-        if (body.includes(normSnip)) return true;
-        const nonEmptyBody = body.split("\n").map((l) => l.trim()).filter(Boolean);
-        if (nonEmptySnip.length > nonEmptyBody.length) return false;
-        for (let i = 0; i <= nonEmptyBody.length - nonEmptySnip.length; i++) {
-          let ok = true;
-          for (let j = 0; j < nonEmptySnip.length; j++) {
-            if (nonEmptyBody[i + j] !== nonEmptySnip[j]) {
-              ok = false;
-              break;
-            }
-          }
-          if (ok) return true;
-        }
-        return false;
-      });
-      if (hits.length === 1) return { card: hits[0] };
-      if (hits.length > 1) {
-        return {
-          error: `未標示檔名的定位代碼同時符合多張卡片（${hits.map((h) => h.data.title || "（無標題）").join("、")}），請註明檔名`,
-        };
-      }
-      return { error: "當前白板內找不到包含此定位代碼的卡片" };
-    };
+    const candidates = allCards.flatMap((card) =>
+      extractCodeBlocks(card.data.body || "").map((b) => ({
+        card,
+        blockIndex: b.index,
+        blockLabel: b.label,
+        workingCode: b.content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\u00A0/g, " "),
+      })),
+    );
+    if (candidates.length === 0) {
+      report(new Error("目前白板內的卡片中沒有任何代碼塊可供比對"), "定位失敗");
+      return;
+    }
 
-    const parsedGroups = parseMultiFileAiPatches(raw);
-    const resolvedTargets: { fileName: string | null; card: CardFlowNode; pairs: { findText: string; replaceText: string }[] }[] = [];
+    const targetMap = new Map<
+      string,
+      {
+        card: CardFlowNode;
+        blockIndex: number;
+        blockLabel: string;
+        pairs: { findText: string; replaceText: string }[];
+      }
+    >();
     const batchErrors: string[] = [];
 
-    if (parsedGroups.length > 0) {
-      for (const grp of parsedGroups) {
-        const res = grp.fileName
-          ? matchCardByFileName(grp.fileName)
-          : matchCardBySnippet(grp.pairs[0]?.findText ?? "");
-        if (res.error || !res.card) {
-          batchErrors.push(`• ${res.error || "找不到對應卡片"}`);
-        } else {
-          resolvedTargets.push({ fileName: grp.fileName, card: res.card, pairs: grp.pairs });
-        }
+    for (let i = 0; i < pairs.length; i++) {
+      const p = pairs[i];
+      const cleanFind = stripOuterFence(p.findText);
+      const cleanReplace = stripOuterFence(p.replaceText);
+      const firstLinePreview = cleanFind.split("\n")[0]?.trim().slice(0, 60) || "（空白）";
+      if (!cleanFind.trim()) {
+        batchErrors.push(`• 第 ${i + 1} 組定位代碼為空白`);
+        continue;
       }
-    } else {
-      // 純代碼片段（無【尋找這段代碼】標記）
-      const fileMatch = /([a-zA-Z0-9_.-]+\.(?:tsx|ts|jsx|js|py|sql|css|scss|html|json|md|yaml|yml|toml|rs|go))/i.exec(raw);
-      const res = fileMatch ? matchCardByFileName(fileMatch[1]) : matchCardBySnippet(raw);
-      if (res.error || !res.card) {
-        batchErrors.push(`• ${res.error || "在當前白板的卡片中找不到吻合的內容或代碼"}`);
+
+      const okHits: typeof candidates = [];
+      const ambiguousHits: typeof candidates = [];
+      for (const cand of candidates) {
+        const loc = findUniqueRange(cand.workingCode, cleanFind);
+        if (loc.status === "ok") okHits.push(cand);
+        else if (loc.status === "ambiguous") ambiguousHits.push(cand);
+      }
+
+      if (ambiguousHits.length > 0) {
+        const names = ambiguousHits.map((h) => `「${h.card.data.title || "（無標題）"}」`).join("、");
+        batchErrors.push(`• 第 ${i + 1} 組定位代碼在卡片 ${names} 內出現多處重複匹配，無法唯一鎖定，請補充前後 1～2 行上下文`);
+      } else if (okHits.length === 0) {
+        batchErrors.push(`• 第 ${i + 1} 組定位代碼在目前白板找不到任何匹配的卡片（首行：${firstLinePreview}）`);
+      } else if (okHits.length > 1) {
+        const names = okHits
+          .map((h) => `「${h.card.data.title || "（無標題）"}」${h.blockLabel ? `（${h.blockLabel}）` : ""}`)
+          .join("、");
+        batchErrors.push(`• 第 ${i + 1} 組定位代碼同時符合多張卡片／代碼塊（${names}），無法唯一判定，請補充前後 1～2 行上下文`);
       } else {
-        resolvedTargets.push({
-          fileName: fileMatch ? fileMatch[1] : null,
-          card: res.card,
-          pairs: [{ findText: raw, replaceText: "" }],
-        });
+        const hit = okHits[0];
+        const loc = findUniqueRange(hit.workingCode, cleanFind);
+        if (loc.status === "ok") {
+          const matchedSource = hit.workingCode.slice(loc.start, loc.end);
+          hit.workingCode =
+            hit.workingCode.slice(0, loc.start) + alignIndent(matchedSource, cleanReplace) + hit.workingCode.slice(loc.end);
+        }
+        const key = `${hit.card.id}::${hit.blockIndex}`;
+        let grp = targetMap.get(key);
+        if (!grp) {
+          grp = {
+            card: hit.card,
+            blockIndex: hit.blockIndex,
+            blockLabel: hit.blockLabel,
+            pairs: [],
+          };
+          targetMap.set(key, grp);
+        }
+        grp.pairs.push(p);
       }
+    }
+
+    const resolvedTargets = Array.from(targetMap.values());
+    if (batchErrors.length > 0 || resolvedTargets.length === 0) {
+      report(
+        new Error(`以下項目不符合定位條件，已拒絕整批定位：\n${batchErrors.join("\n")}`),
+        "拒絕定位",
+      );
+      return;
     }
 
     setLocatingBusy(true);
     try {
-      // 針對已匹配到的卡片取得最新 CardDetail，驗證每張卡片都必須已連動本機檔案（file_path）
+      // 針對已由代碼命中的卡片取得最新 CardDetail，驗證每張卡片都必須已連動本機檔案（file_path）
       const uniqueCardIds = Array.from(new Set(resolvedTargets.map((t) => t.card.id)));
       const detailEntries = await Promise.all(
         uniqueCardIds.map(async (cid) => [cid, await api.getCard(cid)] as const),
@@ -875,23 +934,27 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         if (!detail) continue;
         const cardTitle = (detail.title || t.card.data.title || "（無標題）").trim();
         if (!detail.file_path || !detail.file_path.trim()) {
-          const suffix = t.fileName && t.fileName !== cardTitle ? `（目標檔案：${t.fileName}）` : "";
-          batchErrors.push(`• 卡片「${cardTitle}」${suffix}尚未連動本機檔案`);
+          batchErrors.push(`• 卡片「${cardTitle}」尚未連動本機檔案`);
           continue;
         }
         const boundBaseName = (detail.file_path.split(/[\\/]/).pop() ?? detail.file_path).trim();
-        const wantName = (t.fileName || boundBaseName).trim();
         const blocks = extractCodeBlocks(detail.body);
-        const matchedBlock =
-          blocks.find((b) => {
-            const lbl = (b.label.split(/[\\/]/).pop() ?? b.label).trim().toLowerCase();
-            return lbl === wantName.toLowerCase() || lbl === boundBaseName.toLowerCase();
-          }) ?? (blocks.length === 1 ? blocks[0] : null);
+        const matchedBlock = blocks.find((b) => b.index === t.blockIndex) ?? null;
+        const blockBaseLabel = matchedBlock
+          ? (matchedBlock.label.split(/[\\/]/).pop() ?? matchedBlock.label).trim()
+          : "";
+
+        if (blocks.length > 1 && blockBaseLabel.toLowerCase() !== boundBaseName.toLowerCase()) {
+          batchErrors.push(
+            `• 卡片「${cardTitle}」內命中的代碼塊標籤（${matchedBlock?.info || "未標記"}）與連動檔案「${boundBaseName}」不一致，寫入檔案時無法對應`,
+          );
+          continue;
+        }
 
         fileItems.push({
           cardId: detail.id,
           cardTitle,
-          fileName: wantName,
+          fileName: boundBaseName,
           filePath: detail.file_path,
           cardBody: detail.body,
           updatedAt: detail.updated_at,
@@ -3974,14 +4037,15 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
               貼上 AI 回覆並自動定位檔案
             </h4>
             <div className="muted" style={{ fontSize: 12, margin: "6px 0 10px" }}>
-              貼上 AI 輸出的單檔或多檔修改指令（目標卡片均須已連動本機檔案），通過檢查後將直接開啟取代視窗並寫入檔案，無需開啟編輯器。
+              貼上 AI 輸出的單檔或多檔修改指令（目標卡片均須已連動本機檔案），系統將直接依定位代碼比對白板卡片，通過後開啟取代視窗並寫入檔案。
             </div>
             <textarea
               rows={8}
               value={locateText}
               onChange={(e) => setLocateText(e.target.value)}
-              placeholder="在此貼上 AI 回覆全文（包含【尋找這段代碼】或檔名）..."
+              placeholder="在此貼上單檔或多檔修改指令（不限標題寫法，直接依定位代碼匹配卡片）..."
               autoFocus
+              disabled={locatingBusy}
               style={{
                 width: "100%",
                 boxSizing: "border-box",
@@ -4008,7 +4072,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
                 onClick={() => void handleLocateCard()}
                 disabled={locatingBusy || !locateText.trim()}
               >
-                {locatingBusy ? "檢查連動中…" : "檢查連動並開啟取代"}
+                {locatingBusy ? "比對代碼與連動中…" : "比對定位並開啟取代"}
               </button>
             </div>
           </div>
@@ -4318,7 +4382,7 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         </div>
       )}
   
-      <div style={{ position: "absolute", inset: 0, overflow: "hidden" }}>
+      <div style={{ position: "absolute", inset: 0, bottom: navDockOpen ? navDockSize : 0, overflow: "hidden" }}>
       <div
         ref={stageRef}
         className="board-stage"
@@ -4450,18 +4514,51 @@ function BoardInner(props: Props & { innerRef: Ref<BoardHandle> }) {
         />
       )}
       {navAvailable && (
-        <QuestionNavigator
-          open={navOpen && active}
-          onClose={() => setNavOpen(false)}
-          boardId={boardId}
-          boards={navBoards!}
-          onSelectBoard={navSelectBoard!}
-          onBoardsChanged={async () => {
-            await navBoardsChanged!();
-            await questions.reload(); // 導航器改了問題結構（移動、新增）：目前畫布上的問題節點與子問題數要跟上
+        // 停靠區一直掛著（關閉時只是隱藏），導航器內部的分頁、歷史等狀態才不會在收起時被清掉
+        <div
+          className="board-nav-dock"
+          style={{
+            display: navDockOpen ? "flex" : "none",
+            flexDirection: "column",
+            position: "absolute",
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: navDockSize,
+            zIndex: 20,
           }}
-          report={report}
-        />
+        >
+          <div
+            className="board-nav-splitter"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="拖曳調整導航器高度"
+            title="拖曳調整高度，雙擊還原"
+            onPointerDown={onNavSplitterDown}
+            onPointerMove={onNavSplitterMove}
+            onPointerUp={onNavSplitterUp}
+            onPointerCancel={onNavSplitterUp}
+            onDoubleClick={() => {
+              setNavHeight(NAV_DOCK_DEFAULT);
+              saveNavHeight(NAV_DOCK_DEFAULT);
+            }}
+          />
+          <QuestionNavigator
+            docked
+            open={navOpen && active}
+            onClose={() => setNavOpen(false)}
+            boardId={boardId}
+            boards={navBoards!}
+            onSelectBoard={navSelectBoard!}
+            onSelectCard={onSelectCard}
+            onBoardsChanged={async () => {
+              await navBoardsChanged!();
+              await questions.reload(); // 導航器改了問題結構（移動、新增）：目前畫布上的問題節點與子問題數要跟上
+            }}
+            report={report}
+            info={info}
+          />
+        </div>
       )}
       {!boardId && <div className="board-hint">請先在左側建立或選擇一塊白板</div>}
       {boardId && !loading && cardCount === 0 && (

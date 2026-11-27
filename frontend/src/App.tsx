@@ -1,6 +1,7 @@
 // @depends-on ./components/Markdown.tsx (CardOpenProvider, notifyCardDeleted, notifyCardTitleUpdated)
 // @depends-on ./components/Editor.tsx (onReturnToBoard：經 RightPanel.tsx 的 CardEditorPane → ContentTab 傳入 Editor；只有中央編輯器傳，值必須與「← 返回」按鈕同一個 closeCenterEditor，兩條退出路徑才一致)
 // @depends-on ./components/RightPanel.tsx (Filter：loadSavedView 逐欄位白名單還原，Filter 新增欄位時要同步改，否則重整後該欄位會被丟掉)
+// @depends-on ./components/RightPanel.tsx (NoteEditorPane 以 boardId＋noteId 查白板的 notes；靈感筆記 "note:<id>" 只屬於一塊白板，切換 boardId 必須經 changeBoard 清掉 selected 的 note: 選取，否則會拿舊白板的 noteId 查新白板並誤報找不到)
 // @depends-on ./lib/device.ts (initDeviceEnvironment)
 // @depends-on ./components/IPadCardView.tsx (IPadCardView)
 // @depends-on ./components/IPadCardView.tsx (卡片冊顯示內文時 body 優先於 snippet：onSaved 更新 ipadCardList 必須同時寫 body 與 snippet；只改 snippet 會讓有 body 的項目〔listCards 分支〕顯示舊內文，沒有 body 的項目〔白板分支，snippet 即全文〕則被截成 160 字)
@@ -593,6 +594,11 @@ export default function App() {
     if (mode === "board") setFilter({});
   };
 
+  const changeBoard = (id: string | null) => {
+    if (id !== boardId) setSelected((cur) => (cur?.startsWith("note:") ? null : cur));
+    setBoardId(id);
+  };
+
   return (
     <CardOpenProvider onOpenCard={openCardPreview}>
       <div
@@ -613,7 +619,7 @@ export default function App() {
           onToggleTheme={toggleTheme}
           onToggleCollapse={toggleLeft}
           onSelectBoard={(id) => {
-            setBoardId(id);
+            changeBoard(id);
             setViewMode("board");
             setCenterEditing(false);
             setFilter({});
@@ -796,7 +802,7 @@ export default function App() {
               onToggleRight={() => setRightOpen((o) => !o)}
               onSelectCard={showCardInContent}
               onJumpBoardToCards={(targetBoardId) => {
-                setBoardId(targetBoardId);
+                changeBoard(targetBoardId);
                 setFilter({});
                 setViewMode("cards");
                 setCenterEditing(false);
@@ -815,7 +821,7 @@ export default function App() {
                 toolsSlot={toolsSlot}
                 boards={boards}
                 onSelectBoard={(id) => {
-                  setBoardId(id);
+                  changeBoard(id);
                   setViewMode("board");
                   setCenterEditing(false);
                   setFilter({});
@@ -996,7 +1002,7 @@ export default function App() {
             onLiteratureChanged={onLiteratureChanged}
             onTagsChanged={onTagsChanged}
             onOpenBoard={(id) => {
-              setBoardId(id);
+              changeBoard(id);
               setViewMode("board");
               setCenterEditing(false);
             }}

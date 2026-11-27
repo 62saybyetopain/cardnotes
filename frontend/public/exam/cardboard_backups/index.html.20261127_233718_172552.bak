@@ -193,7 +193,7 @@ details.ch>summary{color:var(--text)}
 .bk-rule{padding:8px 10px;margin:6px 0 10px;border-radius:8px;background:color-mix(in srgb,var(--accent) 10%,var(--panel));border-left:4px solid var(--accent);font-size:15px;line-height:1.7}
 .bk-rule b{display:block;font-size:12px;color:var(--accent);margin-bottom:2px}
 .bk-note{margin:6px 0;padding:8px 10px;border-radius:8px;background:var(--panel);border:1px solid var(--line);font-size:13px;white-space:pre-wrap}
-.bk-optnote{display:block;margin-top:4px;font-size:12px;color:var(--muted)}
+.bk-optnote{display:block;margin-top:4px;font-size:12px;color:var(--muted)}.bk-star{padding:1px 8px;font-size:12px;border-radius:10px}.bk-star.on{color:var(--warn);border-color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,var(--card));font-weight:600}.bk-done.on{color:var(--ok);border-color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,var(--card))}
 .mask{position:relative;cursor:pointer;border-radius:6px;padding:10px 12px;margin:4px 0;background:color-mix(in srgb,var(--line) 75%,var(--panel));border:1px dashed var(--line);min-height:44px;transition:background .15s,border-color .15s}
 .mask>.mi{display:block;transition:opacity .15s}
 .mask:not(.rev)>.mi{opacity:0;pointer-events:none;user-select:none}
@@ -536,6 +536,9 @@ function importBundle(b,name,paperId){
 const S={papers:[],points:{},tree:[],subjs:[],th:3,url:'',cf:'',cardMap:{},mediaMap:{},cur:null,view:'list',bkMin:15,bkOn:false,bkLastRev:0,bkLastTime:'',bkDirName:''};
 const CAUSES=['概念不清','記憶缺漏','題意誤讀','選項陷阱','粗心','計算錯誤'];
 let PENDING=null;const U={},MEM={},CARDV={};
+const SNAP_EL=document.getElementById('book-snapshot');
+const SNAP=SNAP_EL?JSON.parse(SNAP_EL.textContent):null;
+const BOOK_ONLY=!!SNAP;
 let DIR_HANDLE=null,DIR_NEED_PERM=false,BK_TIMER=null;
 
 // 原因：作答／檢討頁沒有 #msg，錯誤會被吞；錯誤另外顯示在固定提示條（點一下關閉），任何頁面與捲動位置都看得到。
@@ -570,7 +573,7 @@ const aGet=id=>tx('assets','readonly',s=>s.get(id));
 
 let LOADED=false,REV=0;
 // 原因：save() 每次整包覆蓋。(1)載入沒成功就存，會用空資料蓋掉舊資料；(2)另一個分頁已寫入較新版本時再存，會蓋掉對方的作答。兩者都拒絕並大聲報錯。
-const save=()=>{
+const save=()=>{if(BOOK_ONLY)return Promise.resolve();
   if(!LOADED){msg('資料尚未成功載入，已拒絕儲存以免覆蓋舊資料，請重新整理',true);return Promise.resolve()}
   return db.then(d=>new Promise((res,rej)=>{
     const t=d.transaction('kv','readwrite'),s=t.objectStore('kv'),g=s.get('state');
@@ -604,8 +607,8 @@ function fix(){
   });
   if(n)msg('已修正 '+n+' 題「沒作答卻被判錯」的紀錄，這些題不再計入統計',false);
 }
-async function load(){try{const v=await tx('kv','readonly',s=>s.get('state'));if(v){Object.assign(S,v);REV=v.rev||0;fix()}LOADED=true;try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}}catch(e){reportDbErr(e);}}
-async function loadAssets(p){
+async function load(){if(BOOK_ONLY){Object.assign(S,SNAP.state);Object.assign(BK,SNAP.init);Object.assign(U,SNAP.imgs);S.view='book';LOADED=true;fix();return}try{const v=await tx('kv','readonly',s=>s.get('state'));if(v){Object.assign(S,v);REV=v.rev||0;fix()}LOADED=true;try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}}catch(e){reportDbErr(e);}}
+async function loadAssets(p){if(BOOK_ONLY)return;
   const ids=new Set();[...p.questions,...p.passages,...(p.nm||[])].forEach(x=>[...x.blocks,...(x.exp||[])].forEach(b=>{if(b.id)ids.add(b.id)}));
   orph(p).forEach(id=>ids.add(id)); // 原因：未使用的圖也要先載入，補圖面板才有縮圖可看。
   for(const id of ids){
@@ -630,8 +633,8 @@ const ICON={
   moon:'<svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>'
 };
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-// 原因：會計題的「$50」「$13,500」是貨幣，但 KaTeX 自動排版把任兩個 $ 當成算式的頭尾，中間整段中文被排成不換行的算式（字型變大、橫向溢出），$ 本身也消失。貨幣的 $ 後面是數字、再接非算式字元；把它包進獨立的 <span>，就成為單獨的文字節點，KaTeX 找不到配對。「$2x^{2}$」「$50$」數字後面接算式字元，不會被誤判。
-const escm=s=>esc(s).replace(/\$(?=\d[\d,]*(?:\.\d+)?(?![\d,.A-Za-z\\^_{}=+*\/<>|$-]))/g,()=>'<span>$</span>');
+// 原因：會計題的「$50」「$13,500」是貨幣，但 KaTeX 自動排版把任兩個 $ 當成算式的頭尾，中間整段中文被排成不換行的算式（字型變大、橫向溢出），$ 本身也消失。貨幣的 $ 後面是數字、再接非算式字元；把它包進獨立的 <span>，就成為單獨的文字節點，KaTeX 找不到配對。「$2x^{2}$」「$50(\sqrt{3}+1)$」「$50$」數字後面接算式字元（含括號），不會被誤判。
+const escm=s=>esc(s).replace(/\$(?![^$\n]*\\[A-Za-z])(?=\d[\d,]*(?:\.\d+)?(?![\d,.A-Za-z\\^_{}=+*\/<>|()[\]$-]))/g,()=>'<span>$</span>');
 const P=()=>S.papers.find(p=>p.id===S.cur);
 const norm=s=>[...String(s).toUpperCase().replace(/\s/g,'')].sort().join('');
 const cid=(p,q)=>'exam:'+p.id+':q'+q.no;
@@ -703,7 +706,7 @@ function syncEdit(p,q,f,v){
     q.key=ks.sort().join('');delete q.manual;
     tw.forEach(([x,y])=>{y.key=orig.map(ol=>{const m=y.options.find(z=>oo(z)===ol);return m?m.k:ol}).sort().join('');delete y.manual});
   }
-  new Set([p,...tw.map(a=>a[0])]).forEach(x=>{validate(x);if(f==='key'&&(x===p||x.graded))grade(x)});
+  new Set([p,...tw.map(a=>a[0])]).forEach(x=>{validate(x);if(f==='key'&&(x===p||x.graded))regrade(x)});
 }
 const tagsOf=q=>JSON.stringify([q.sub,q.chap,q.cons]);
 // 原因：概念在樹裡只有一個家；沒有任何題目還在用、也沒寫常錯重點的，留著會讓它卡在舊章節，換章節後無法在新章節重建。空章節與空科目一併清理。
@@ -763,15 +766,27 @@ function agg(){
 }
 const weak=g=>g.last.q.st==='x'||!!g.last.q.guess;
 const everWeak=g=>g.att.some(x=>x.q.st==='x'||x.q.guess);
+const starOf=g=>g.all.some(x=>x.q.star);
+const errN=g=>g.att.filter(x=>x.q.st==='x'||x.q.guess).length;
+const errRate=g=>errN(g)/g.att.length;
+const rankPick=arr=>arr.sort((x,y)=>(starOf(y)-starOf(x))||(errN(y)-errN(x))||(errRate(y)-errRate(x)));
+function relapse(p,qs){
+  const wk=new Set(qs.filter(q=>q.st==='x').map(q=>qidOf(p,q)));
+  if(!wk.size)return;
+  groups().forEach(g=>{
+    if(!wk.has(g.id)||!g.all.some(x=>x.q.mastered))return;
+    g.all.forEach(x=>{delete x.q.mastered;x.q.star=true;x.q.relapsed=true});
+  });
+}
+function regrade(p){
+  const was=new Map(p.questions.map(q=>[q,q.st]));
+  grade(p);
+  relapse(p,p.questions.filter(q=>was.get(q)!=='x'));
+}
 function pick(k){
-  const n1=S.n1??15,n2=S.n2??10,gs=groups().filter(g=>!k||g.canon.cons.includes(k)),tOf=p=>(p.gradedAt||p.created||'').slice(0,10);
-  const wPool=gs.filter(weak);
-  for(let i=wPool.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[wPool[i],wPool[j]]=[wPool[j],wPool[i]]}
-  const a=wPool.sort((x,y)=>tOf(y.last.p).localeCompare(tOf(x.last.p))).slice(0,n1);
-  const rest=gs.filter(g=>everWeak(g)&&!a.includes(g));
-  for(let i=rest.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[rest[i],rest[j]]=[rest[j],rest[i]]}
-  const b=n2>0?rest.slice(0,n2+Math.max(0,n1-a.length)):[];
-  return[...a,...b].sort((x,y)=>{const u=x.all[0].p.created,v=y.all[0].p.created;return u===v?x.canon.no-y.canon.no:u<v?-1:1});
+  const n=S.n1??25,pool=groups().filter(g=>(!k||g.canon.cons.includes(k))&&everWeak(g));
+  for(let i=pool.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[pool[i],pool[j]]=[pool[j],pool[i]]}
+  return rankPick(pool).slice(0,n).sort((x,y)=>{const u=x.all[0].p.created,v=y.all[0].p.created;return u===v?x.canon.no-y.canon.no:u<v?-1:1});
 }
 const cleanPaperName=s=>String(s||'未命名考卷').replace(/^(?:重做・)+/,'').replace(/(?:・\d{1,2}[\/月]\d{1,2}日?)+$/,'').trim();
 const compose=k=>{const picks=pick(k);return picks.length?build(picks,'錯題重做・'+(k||'全部')):null};
@@ -1458,7 +1473,7 @@ async function gcAssets(){
   }catch(e){}
 }
 
-const BK={scope:'weak',sub:'',mode:'quick',dir:'rule',keyOnly:true,mask:true,page:1,per:10,editPt:''};
+const BK={pile:'todo',fStar:false,fRep:false,cat:'',mode:'quick',dir:'rule',keyOnly:true,mask:true,page:1,per:10,editPt:'',q:''};
 const stemCue=bl=>{
   const s=(bl||[]).filter(b=>b.t==='text'||b.t==='code').map(b=>b.v).join(' ').replace(/\s+/g,' ').trim();
   if(!s||s.length<=90)return s;
@@ -1485,6 +1500,7 @@ function dlHtml(filename,html){
 async function collectImgMap(idsSet){
   const map={},lost=[];
   for(const id of idsSet){
+    if(BOOK_ONLY){if(U[id])map[id]=U[id];else lost.push(id);continue}
     const b=await getAsset(id);
     if(!b){lost.push(id);continue}
     try{map[id]=await blobToDataUrl(b)}catch(e){lost.push(id)}
@@ -1494,7 +1510,7 @@ async function collectImgMap(idsSet){
 function buildBookItems(){
   const items=[];
   groups().forEach(g=>{
-    if(!everWeak(g))return;
+    if(!everWeak(g)&&!g.all.some(x=>x.q.star))return;
     const t=g.canon,o=g.all[0],p=o.p,ps=po(p,t);
     const oo=x=>x.o||x.k,toOrig=(qq,ks)=>[...ks].map(k=>{const m=qq.options.find(z=>z.k===k);return m?oo(m):k});
     const canonKeyOf=ol=>{const m=t.options.find(z=>oo(z)===ol);return m?m.k:ol};
@@ -1514,9 +1530,10 @@ function buildBookItems(){
     const nw=g.att.filter(x=>x.q.st==='x').length;
     const ng=g.att.filter(x=>x.q.st!=='x'&&x.q.guess).length;
     items.push({
-      id:g.id,ref:o.p.name+' 第 '+t.no+' 題',
+      id:g.id,ref:o.p.name+' 第 '+t.no+' 題',cat:p.subj||'',
       sub:t.sub||'',chap:t.chap||'',cons:[...t.cons],
-      isWeak:weak(g),wrongN:nw,guessN:ng,attN:g.att.length,
+      isWeak:weak(g),isStar:g.all.some(x=>x.q.star),wrongN:nw,guessN:ng,attN:g.att.length,
+      isDone:g.all.some(x=>x.q.mastered),isRelapsed:g.all.some(x=>x.q.relapsed),ts:g.last.p.gradedAt||g.last.p.created||'',
       lastSt:lastQ.st,lastGuess:!!lastQ.guess,
       passage:ps?ps.blocks:null,blocks:t.blocks,
       options:t.options.map(x=>({
@@ -1530,13 +1547,18 @@ function buildBookItems(){
   });
   return items;
 }
+const bkBlk=bl=>(bl||[]).map(b=>b.t==='tbl'?tblText(b.html||''):b.v||'').join(' ');
+const bkHay=it=>[it.ref,it.cat,it.sub,it.chap,it.cons.join(' '),it.cons.map(k=>S.points[k]||'').join(' '),bkBlk(it.passage),bkBlk(it.blocks),it.options.map(o=>o.v+' '+o.note).join(' '),it.cause,it.why,it.right,it.fix,it.appendNote].join('\n').toLowerCase();
+const pileOf=it=>it.isDone?'done':(it.isWeak||it.isRelapsed)?'todo':'ok';
 function filterBookItems(all){
+  const terms=String(BK.q||'').toLowerCase().split(/\s+/).filter(Boolean);
   return all.filter(it=>{
-    if(BK.scope==='weak'&&!it.isWeak)return false;
-    if(BK.scope==='rep'&&it.wrongN<2)return false;
-    if(BK.sub&&((it.sub||'（未標科目）')!==BK.sub))return false;
+    if(BK.fStar&&!it.isStar)return false;
+    if(BK.fRep&&it.wrongN<2)return false;
+    if(BK.cat&&((it.cat||'（未分類）')!==BK.cat))return false;
+    if(terms.length){const h=bkHay(it);if(!terms.every(w=>h.includes(w)))return false}
     return true;
-  });
+  }).sort((a,b)=>a.ts<b.ts?1:a.ts>b.ts?-1:0);
 }
 async function loadBookAssets(){
   const idsSet=new Set();
@@ -1618,249 +1640,51 @@ async function exportBlankPack(){
   finally{exportBlankPack.busy=false}
 }
 
+const KCDN='https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/';
+const KBOOT="(function(){function d(id){var b=atob(document.getElementById(id).textContent.trim()),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return new TextDecoder().decode(u)};['katex-js','katex-ar-js'].forEach(function(id){var s=document.createElement('script');s.textContent=d(id);document.head.appendChild(s)})})();";
+async function katexParts(root){
+  if(root.querySelector('#katex-css'))return;
+  const get=async(u,bin)=>{const r=await fetch(u);if(!r.ok)throw Error('無法下載數學公式套件（'+u.split('/').pop()+'），匯出需要網路連線');return bin?new Uint8Array(await r.arrayBuffer()):r.text()};
+  const b64=u8=>{let s='';for(let i=0;i<u8.length;i+=0x8000)s+=String.fromCharCode.apply(null,u8.subarray(i,i+0x8000));return btoa(s)};
+  let css=await get(KCDN+'katex.min.css');
+  const fonts=[...new Set([...css.matchAll(/url\(fonts\/([^)]+?)\.woff2\)/g)].map(m=>m[1]))];
+  for(const f of fonts){
+    const data=b64(await get(KCDN+'fonts/'+f+'.woff2',true));
+    css=css.split('url(fonts/'+f+'.woff2)').join('url(data:font/woff2;base64,'+data+')');
+  }
+  css=css.replace(/,url\(fonts\/[^)]+\) format\("(?:woff|truetype)"\)/g,'');
+  const js=await get(KCDN+'katex.min.js'),ar=await get(KCDN+'contrib/auto-render.min.js');
+  root.querySelectorAll('script[src*="cdnjs"],link[href*="cdnjs"]').forEach(n=>n.remove());
+  root.querySelector('head').insertAdjacentHTML('beforeend',
+    '<style id="katex-css">'+css+'</style>'+
+    '<script id="katex-js" type="text/plain">'+b64(new TextEncoder().encode(js))+'<'+'/script>'+
+    '<script id="katex-ar-js" type="text/plain">'+b64(new TextEncoder().encode(ar))+'<'+'/script>'+
+    '<script>'+KBOOT+'<'+'/script>');
+}
 async function exportMistakeBook(){
-  const items=filterBookItems(buildBookItems());
-  if(!items.length)return msg('目前篩選下沒有可匯出的錯題或猜對題',true);
+  const items=buildBookItems();
+  if(!items.length)return msg('目前沒有可匯出的錯題或猜對題',true);
   const idsSet=new Set();
   items.forEach(it=>{
     (it.passage||[]).forEach(b=>{if(b.id)idsSet.add(b.id)});
     it.blocks.forEach(b=>{if(b.id)idsSet.add(b.id)});
   });
   const{map,lost}=await collectImgMap(idsSet);
-  const pts={};
-  items.forEach(it=>it.cons.forEach(k=>{const v=(S.points[k]||'').trim();if(v)pts[k]=v}));
-  const payload={
-    title:'錯題本'+(BK.sub?'・'+BK.sub:''),
-    exportedAt:new Date().toLocaleDateString('zh-TW'),
-    init:{mode:BK.mode,dir:BK.dir,keyOnly:BK.keyOnly,mask:BK.mask,per:BK.per},
-    tree:S.tree,points:pts,items,imgs:map
+  const snap={
+    state:{papers:S.papers,points:S.points,tree:S.tree,subjs:S.subjs,shuf:S.shuf,n1:S.n1,n2:S.n2,th:S.th},
+    init:{mode:BK.mode,dir:BK.dir,keyOnly:BK.keyOnly,mask:BK.mask,per:BK.per,pile:BK.pile,fStar:BK.fStar,fRep:BK.fRep,cat:BK.cat,q:BK.q},
+    imgs:map
   };
-  const scriptBody=`
-const D=JSON.parse(document.getElementById('book-data').textContent);
-const ST={mode:D.init.mode||'quick',dir:D.init.dir||'rule',keyOnly:D.init.keyOnly!==false,mask:D.init.mask!==false,scope:'all',sub:'',page:1,per:D.init.per||10};
-const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const escm=${escm.toString()};
-const stemCue=${stemCue.toString()};
-const safe=h=>h.replace(/<(?!\\/?(?:table|thead|tbody|tr|td|th)\\b)[^>]*>/gi,'').replace(/<(table|thead|tbody|tr|td|th)\\b([^>]*)>/gi,(m,t,a)=>'<'+t+(a.match(/(?:row|col)span="\\d+"/g)||[]).map(x=>' '+x).join('')+'>');
-const blk=(b,pre)=>{
-  if(b.t==='text')return'<p class="stem">'+(pre||'')+escm(b.v)+'</p>';
-  if(b.t==='code')return'<pre>'+esc(b.v)+'</pre>';
-  if(b.id&&D.imgs[b.id])return'<img class="fig" data-a="zoom" src="'+D.imgs[b.id]+'" alt="">';
-  if(b.html)return'<div class="tbl">'+safe(b.html)+'</div>';
-  return'<p class="miss">圖片缺失：'+esc((b.id||'').slice(-16))+'</p>';
-};
-const blks=(a,pre)=>{let u=pre||'';return(a||[]).map(b=>{const h=blk(b,u);if(b.t==='text')u='';return h}).join('')+u};
-const maskBox=(html,hint,forceHide)=>{
-  const rev=forceHide?'':(ST.mask?'':' rev');
-  return'<div class="mask'+rev+'" data-a="peek" data-hint="'+esc(hint||'點擊顯示')+'"><span class="mi">'+html+'</span></div>';
-};
-const filtered=()=>D.items.filter(it=>{
-  if(ST.scope==='weak'&&!it.isWeak)return false;
-  if(ST.scope==='rep'&&it.wrongN<2)return false;
-  if(ST.sub&&(it.sub||'（未標科目）')!==ST.sub)return false;
-  return true;
-});
-function groupQuick(items){
-  const so=(D.tree||[]).map(s=>s.n),rk=(a,x)=>{const i=a.indexOf(x);return i<0?9999:i},sm={};
-  items.forEach(it=>{
-    const s=it.sub||'（未標科目）',c=it.chap||'（未分章節）',cs=it.cons.length?it.cons:['（未標概念）'];
-    sm[s]=sm[s]||{};sm[s][c]=sm[s][c]||{};
-    cs.forEach(k=>{(sm[s][c][k]=sm[s][c][k]||[]).push(it)});
-  });
-  return Object.keys(sm).sort((a,b)=>rk(so,a)-rk(so,b)).map(s=>{
-    const tn=(D.tree||[]).find(x=>x.n===s),co=tn?tn.c.map(x=>x.n):[];
-    return{s,chaps:Object.keys(sm[s]).sort((a,b)=>rk(co,a)-rk(co,b)).map(c=>{
-      const cn=tn?tn.c.find(x=>x.n===c):null,ko=cn?cn.k:[];
-      return{c,cons:Object.keys(sm[s][c]).sort((a,b)=>rk(ko,a)-rk(ko,b)).map(k=>({k,items:sm[s][c][k]}))};
-    })};
-  });
-}
-function renderQuick(items){
-  if(!items.length)return'<p class="empty">目前篩選下沒有錯題。</p>';
-  const qItem=it=>{
-    const cue=stemCue(it.blocks);
-    const firstImg=(it.blocks||[]).find(b=>b.id&&D.imgs[b.id]);
-    const cueHtml=cue
-      ?'<p class="bk-cue">'+escm(cue)+(firstImg?' <span class="badge">含圖</span>':'')+'</p>'
-      :(firstImg?'<img class="fig bk-thumb" data-a="zoom" src="'+D.imgs[firstImg.id]+'" alt="">':'<p class="bk-cue"><small>（圖表或無文字題幹，請展開原題檢視）</small></p>');
-    const keyOpts=it.options.filter(o=>o.isKey);
-    const ansLine=keyOpts.length
-      ?'<div><b>✓ 正解：</b>'+keyOpts.map(o=>'<b>('+esc(o.k)+')</b> '+escm(o.v)).join('；')+'</div>'
-      :(it.key?'<div><b>✓ 正解：</b>'+esc(it.key)+'</div>':'');
-    const ruleLine=it.fix?'<div><b>下次判斷：</b>'+esc(it.fix)+'</div>'
-      :(it.right?'<div><b>正確理由：</b>'+esc(it.right)+'</div>'
-      :(it.why?'<div><b>為何選錯：</b>'+esc(it.why)+'</div>'
-      :'<small>（尚未填寫判斷句或訂正筆記）</small>'));
-    const optsHtml=it.options.map(o=>'<div class="opt '+(o.isKey?'k':o.isWrongPick?'m':'')+'"><b>'+esc(o.k)+'</b><div class="ov">'+escm(o.v)+(o.note?'<span class="optnote">筆記：'+esc(o.note)+'</span>':'')+'</div></div>').join('');
-    const extraNotes=[it.why&&'<div><b>為何選錯：</b>'+esc(it.why)+'</div>',it.right&&'<div><b>正確理由：</b>'+esc(it.right)+'</div>',it.appendNote&&'<div><b>重做補充：</b>'+esc(it.appendNote)+'</div>'].filter(Boolean).join('');
-    const origHtml='<details class="bk-orig"><summary>展開原題與選項</summary>'+(it.passage?'<details><summary>展開題組文章</summary>'+blks(it.passage)+'</details>':'')+blks(it.blocks)+optsHtml+(extraNotes?'<div class="note">'+extraNotes+'</div>':'')+'</details>';
-    return'<div class="qitem"><div class="qmeta">'+(it.cause?'<span class="badge wn">'+esc(it.cause)+'</span>':'')+'<span class="ref">'+esc(it.ref)+'</span>'+(it.isWeak?'<span class="badge ng">目前弱點</span>':'<span class="badge ok">已練對</span>')+'</div>'+cueHtml+maskBox(ansLine+ruleLine,'點擊顯示正解與判斷規則')+origHtml+'</div>';
-  };
-  return groupQuick(items).map(sg=>'<details open class="sj"><summary><b>'+esc(sg.s)+'</b></summary>'+
-    sg.chaps.map(cg=>'<details open class="ch"><summary>'+esc(cg.c)+'</summary>'+
-      cg.cons.map(kg=>{
-        const wN=kg.items.reduce((a,x)=>a+x.wrongN,0),gN=kg.items.reduce((a,x)=>a+x.guessN,0);
-        const pt=kg.k==='（未標概念）'?'':(D.points[kg.k]||'').trim();
-        return'<div class="con-box"><div class="con-hd"><b>'+esc(kg.k)+'</b> <span class="badge ng">錯 '+wN+(gN?'・猜 '+gN:'')+'</span></div>'+
-          (pt?'<div class="rule"><b>常錯重點</b>'+maskBox(esc(pt),'點擊顯示常錯重點')+'</div>':'')+
-          '<details class="bk-qlist"'+(pt?'':' open')+'><summary>'+(pt?'相關錯題 '+kg.items.length+' 題（點擊展開考點對照與原題）':'相關錯題 '+kg.items.length+' 題')+'</summary>'+kg.items.map(qItem).join('')+'</details></div>';
-      }).join('')+'</details>').join('')+'</details>').join('');
-}
-function renderQuickLegacy(items){
-  if(!items.length)return'<p class="empty">目前篩選下沒有錯題。</p>';
-  return groupQuick(items).map(sg=>'<details open class="sj"><summary><b>'+esc(sg.s)+'</b></summary>'+
-    sg.chaps.map(cg=>'<details open class="ch"><summary>'+esc(cg.c)+'</summary>'+
-      cg.cons.map(kg=>{
-        const wN=kg.items.reduce((a,x)=>a+x.wrongN,0),gN=kg.items.reduce((a,x)=>a+x.guessN,0),pt=D.points[kg.k];
-        return'<div class="con-box"><div class="con-hd"><b>'+esc(kg.k)+'</b> <span class="badge ng">錯 '+wN+(gN?'・猜 '+gN:'')+'</span></div>'+
-          (pt?'<div class="rule"><b>常錯重點</b>'+maskBox(esc(pt),'點擊顯示常錯重點')+'</div>':'')+
-          kg.items.map(it=>{
-            const core=it.fix?esc(it.fix):(it.right?'<small>（未填判斷句，顯示正確理由）</small><br>'+esc(it.right):it.why?'<small>（未填判斷句，顯示錯因筆記）</small><br>'+esc(it.why):'<small>（尚未填寫「下次怎麼判斷」，建議切換到精簡錯題卡檢視題目）</small>');
-            return'<div class="qitem"><div class="qmeta">'+(it.cause?'<span class="badge wn">'+esc(it.cause)+'</span>':'')+'<span class="ref">'+esc(it.ref)+'</span>'+(it.isWeak?'<span class="badge ng">目前弱點</span>':'<span class="badge ok">已練對</span>')+'</div>'+maskBox(core,'點擊顯示判斷規則')+'</div>';
-          }).join('')+'</div>';
-      }).join('')+'</details>').join('')+'</details>').join('');
-}
-function renderCard(it,idx){
-  const isQuiz=ST.dir==='quiz';
-  const keyOpts=it.options.filter(o=>o.isKey||o.isWrongPick||o.note);
-  const dimCnt=it.options.length-keyOpts.length;
-  const optsHtml=it.options.map(o=>{
-    const cls=(o.isKey?'k':o.isWrongPick?'m':'')+(!isQuiz&&!(o.isKey||o.isWrongPick||o.note)?' dim':'');
-    return'<div class="opt '+cls+'"><b>'+esc(o.k)+'</b><div class="ov">'+escm(o.v)+(o.note?'<span class="optnote">筆記：'+esc(o.note)+'</span>':'')+'</div></div>';
-  }).join('');
-  const notes=[
-    it.fix&&'<div><b>下次判斷：</b>'+esc(it.fix)+'</div>',
-    it.why&&'<div><b>為何選錯：</b>'+esc(it.why)+'</div>',
-    it.right&&'<div><b>正確理由：</b>'+esc(it.right)+'</div>',
-    it.appendNote&&'<div><b>重做補充：</b>'+esc(it.appendNote)+'</div>'
-  ].filter(Boolean).join('');
-  const head='<div class="c-hd"><span class="ref">#'+idx+'・'+esc(it.ref)+'</span>'+
-    '<span class="badge '+(it.isWeak?'ng':'ok')+'">'+(it.isWeak?(it.lastSt==='x'?'最近答錯':'最近猜對'):'已練對')+'（錯 '+it.wrongN+(it.guessN?'・猜 '+it.guessN:'')+'/'+it.attN+'）</span>'+
-    (it.cause?'<span class="badge wn">'+esc(it.cause)+'</span>':'')+
-    (it.sub?'<span class="badge">'+esc(it.sub)+(it.chap?' / '+esc(it.chap):'')+'</span>':'')+
-    it.cons.map(k=>'<span class="badge">'+esc(k)+'</span>').join('')+'</div>';
-  const body=(it.passage?'<details><summary>展開題組文章</summary>'+blks(it.passage)+'</details>':'')+blks(it.blocks)+optsHtml+
-    (!isQuiz&&dimCnt>0?'<button class="ghost expand" data-a="optall">＋ 顯示其餘 '+dimCnt+' 個無關選項</button>':'');
-  if(isQuiz){
-    const ansHtml='<div><b>正解：'+esc(it.key||'無')+'</b>（最近作答：'+esc(it.lastMine||'未答')+'）</div>'+(notes||'<small>尚未填寫文字訂正筆記</small>');
-    return'<article class="card bk-quiz">'+head+body+'<div class="ans-wrap">'+maskBox(ansHtml,'點擊掀開正解與解析',true)+'</div></article>';
-  }
-  const topRule=it.fix?'<div class="rule"><b>下次怎麼判斷</b>'+maskBox(esc(it.fix),'點擊顯示判斷句')+'</div>':'';
-  const restNotes=[it.why&&'<div><b>為何選錯：</b>'+esc(it.why)+'</div>',it.right&&'<div><b>正確理由：</b>'+esc(it.right)+'</div>',it.appendNote&&'<div><b>重做補充：</b>'+esc(it.appendNote)+'</div>'].filter(Boolean).join('');
-  const botAns='<div class="note"><b>正解：'+esc(it.key||'無')+'</b>（最近作答：'+esc(it.lastMine||'未答')+'）'+(restNotes?maskBox(restNotes,'點擊顯示詳細解析'):'')+'</div>';
-  return'<article class="card">'+head+topRule+body+botAns+'</article>';
-}
-function renderCards(items){
-  if(!items.length)return'<p class="empty">目前篩選下沒有錯題。</p>';
-  const per=ST.per===0?items.length:ST.per,pages=Math.max(1,Math.ceil(items.length/per));
-  if(ST.page>pages)ST.page=pages;
-  const start=(ST.page-1)*per,slice=items.slice(start,start+per);
-  const pg=pages>1?'<div class="pg"><button data-a="page" data-v="'+(ST.page-1)+'"'+(ST.page<=1?' disabled':'')+'>← 上一頁</button><span>第 '+ST.page+' / '+pages+' 頁（共 '+items.length+' 題）</span><button data-a="page" data-v="'+(ST.page+1)+'"'+(ST.page>=pages?' disabled':'')+'>下一頁 →</button></div>':'';
-  return pg+'<div class="'+(ST.keyOnly&&ST.dir==='rule'?'key-only':'')+'">'+slice.map((it,i)=>renderCard(it,start+i+1)).join('')+'</div>'+pg;
-}
-function render(){
-  const subs=[...new Set(D.items.map(it=>it.sub||'（未標科目）'))];
-  const hasMastered=D.items.some(it=>!it.isWeak),hasRep=D.items.some(it=>it.wrongN>=2);
-  const items=filtered();
-  const ctrl='<div class="bar">'+
-    '<div class="row"><button class="'+(ST.mode==='quick'?'on':'')+'" data-a="mode" data-v="quick">速覽模式（概念重點）</button><button class="'+(ST.mode==='card'?'on':'')+'" data-a="mode" data-v="card">精簡錯題卡</button></div>'+
-    '<div class="row">'+
-      (subs.length>1?'<select data-f="sub"><option value="">全部科目（'+D.items.length+'）</option>'+subs.map(s=>'<option value="'+esc(s)+'"'+(ST.sub===s?' selected':'')+'>'+esc(s)+'</option>').join('')+'</select>':'')+
-      (hasMastered||hasRep?'<select data-f="scope"><option value="all"'+(ST.scope==='all'?' selected':'')+'>全部收錄</option><option value="weak"'+(ST.scope==='weak'?' selected':'')+'>目前弱點</option>'+(hasRep?'<option value="rep"'+(ST.scope==='rep'?' selected':'')+'>反覆錯 ≥ 2 次</option>':'')+'</select>':'')+
-      (ST.mode==='card'?'<select data-f="per">'+[[5,'每頁 5 題'],[10,'每頁 10 題'],[20,'每頁 20 題'],[0,'不分頁']].map(([n,t])=>'<option value="'+n+'"'+(ST.per===n?' selected':'')+'>'+t+'</option>').join('')+'</select>':'')+
-    '</div>'+
-    (ST.mode==='card'?'<div class="row"><button class="'+(ST.dir==='rule'?'on':'')+'" data-a="dir" data-v="rule">複習重點型（先結論）</button><button class="'+(ST.dir==='quiz'?'on':'')+'" data-a="dir" data-v="quiz">自測回憶型（先題目）</button>'+(ST.dir==='rule'?'<label class="ck"><input type="checkbox" data-f="keyOnly"'+(ST.keyOnly?' checked':'')+'>只看關鍵選項</label>':'')+'</div>':'')+
-    '<div class="row">'+
-      (ST.mode==='card'&&ST.dir==='quiz'?'':'<button class="'+(ST.mask?'on':'')+'" data-a="mask">遮字練習：'+(ST.mask?'開':'關')+'</button>')+
-      '<button data-a="revall" data-v="0">本頁全遮</button><button data-a="revall" data-v="1">本頁全開</button>'+
-      (ST.mode==='quick'?'<button data-a="qall" data-v="1">展開全部題目</button><button data-a="qall" data-v="0">收合全部題目</button>':'')+
-      '<span class="cnt">顯示 '+items.length+' 題</span>'+
-    '</div></div>';
-  document.getElementById('app').innerHTML='<header><h1>'+esc(D.title)+'</h1><small>'+esc(D.exportedAt)+'</small><button data-a="theme">深淺切換</button></header>'+ctrl+(ST.mode==='quick'?renderQuick(items):renderCards(items));
-  if(window.renderMathInElement){try{renderMathInElement(document.getElementById('app'),{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false})}catch(e){}}
-}
-document.addEventListener('click',e=>{
-  const t=e.target.closest('[data-a]');if(!t)return;
-  const a=t.dataset.a,v=t.dataset.v;
-  if(a==='zoom'){const d=document.createElement('div');d.id='lb';d.innerHTML='<img src="'+t.src+'">';d.onclick=()=>d.remove();document.body.appendChild(d);return}
-  if(a==='peek'){
-    if(window.getSelection&&String(window.getSelection()))return;
-    const rev=t.classList.toggle('rev');
-    const qz=t.closest('.bk-quiz');if(qz)qz.classList.toggle('revealed',rev);
-    return;
-  }
-  if(a==='optall'){const c=t.closest('.card');if(c)c.classList.add('show-all');return}
-  if(a==='qall'){const on=v==='1';document.querySelectorAll('.bk-qlist').forEach(x=>{x.open=on});return}
-  if(a==='revall'){
-    const on=v==='1';
-    document.querySelectorAll('.mask').forEach(m=>m.classList.toggle('rev',on));
-    document.querySelectorAll('.bk-quiz').forEach(c=>c.classList.toggle('revealed',on));
-    return;
-  }
-  if(a==='theme'){const nt=document.documentElement.dataset.theme==='light'?'dark':'light';document.documentElement.dataset.theme=nt;try{localStorage.setItem('book-theme',nt)}catch(err){}return}
-  if(a==='mode'){ST.mode=v;ST.page=1}
-  else if(a==='dir'){ST.dir=v;ST.page=1}
-  else if(a==='mask'){ST.mask=!ST.mask}
-  else if(a==='page'){ST.page=Math.max(1,+v||1);render();scrollTo(0,0);return}
-  render();
-});
-document.addEventListener('change',e=>{
-  const f=e.target.dataset&&e.target.dataset.f;if(!f)return;
-  if(f==='sub'){ST.sub=e.target.value;ST.page=1}
-  else if(f==='scope'){ST.scope=e.target.value;ST.page=1}
-  else if(f==='per'){ST.per=+e.target.value;ST.page=1}
-  else if(f==='keyOnly'){ST.keyOnly=e.target.checked}
-  render();
-});
-try{const sv=localStorage.getItem('book-theme');if(sv==='light'||sv==='dark')document.documentElement.dataset.theme=sv}catch(e){}
-render();
-`;
-  const html='<!doctype html><html lang="zh-Hant" data-theme="'+themeNow()+'"><head><meta charset="utf-8">'+
-    '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'+
-    '<title>'+esc(payload.title)+'</title>'+
-    '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">'+
-    '<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"><'+'/script>'+
-    '<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"><'+'/script>'+
-    '<style>'+
-    ':root,[data-theme="dark"]{--bg:#17181a;--panel:#1f2023;--card:#26272b;--line:#34363a;--text:#e6e6e6;--muted:#9a9ea6;--accent:#6c9bff;--accent-soft:#24304a;--danger:#ff7b6b;--warn:#e0b24f;--ok:#34d399;color-scheme:dark} '+
-    '[data-theme="light"]{--bg:#ebe9e3;--panel:#f5f3ee;--card:#faf8f4;--line:#cfccc2;--text:#2c2a26;--muted:#625f58;--accent:#1d4ed8;--accent-soft:#d8e2f6;--danger:#b91c1c;--warn:#92400e;--ok:#15803d;color-scheme:light} '+
-    '*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 system-ui,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)} '+
-    '#app{max-width:700px;margin:0 auto;padding:14px 14px 64px} '+
-    'header{display:flex;align-items:center;gap:8px;padding-bottom:10px;margin-bottom:12px;border-bottom:1px solid var(--line)}header h1{margin:0;font-size:17px;color:var(--accent);flex:1}header small{color:var(--muted)} '+
-    'button,select{font:inherit;font-size:13px;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 11px;cursor:pointer} '+
-    'button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}button:disabled{opacity:.45;cursor:not-allowed}button.ghost{border:0;background:transparent;color:var(--muted);padding:4px 6px} '+
-    '.bar{display:flex;flex-direction:column;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:14px}.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.cnt{margin-left:auto;font-size:12px;color:var(--muted)}.ck{display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer} '+
-    '.card{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:12px;padding:14px;margin:0 0 12px} '+
-    '.c-hd{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;margin-bottom:8px}.ref{font-size:12px;color:var(--muted)}.c-hd .ref{flex:0 0 100%;font-size:13px;font-weight:600;color:var(--text)} '+
-    '.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;border:1px solid var(--line);color:var(--muted)} '+
-    '.badge.ng{color:var(--danger);border-color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,var(--card))} '+
-    '.badge.wn{color:var(--warn);border-color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,var(--card))} '+
-    '.badge.ok{color:var(--ok);border-color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,var(--card))} '+
-    '.rule{padding:8px 10px;margin:6px 0 10px;border-radius:8px;background:color-mix(in srgb,var(--accent) 10%,var(--panel));border-left:4px solid var(--accent);font-size:15px;line-height:1.7}.rule b{display:block;font-size:12px;color:var(--accent);margin-bottom:2px} '+
-    '.stem{white-space:pre-wrap;margin:0 0 8px}pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px;overflow-x:auto;font:12px/1.5 monospace} '+
-    '.fig{display:block;max-width:100%;margin:8px 0;background:#fff;border-radius:6px;cursor:zoom-in}.tbl{overflow-x:auto;margin:8px 0}table{border-collapse:collapse;width:100%}td,th{border:1px solid var(--line);padding:6px 8px;text-align:left} '+
-    '.opt{display:flex;gap:10px;margin:5px 0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.opt b{min-width:1.2em}.ov{flex:1} '+
-    '.opt.k{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,var(--card))}.opt.m{border-color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,var(--card))} '+
-    '.card .opt.k::after,.card .opt.m::after,.bk-orig .opt.k::after,.bk-orig .opt.m::after{margin-left:auto;align-self:flex-start;font-size:11px;font-weight:700;white-space:nowrap}.card .opt.k::after,.bk-orig .opt.k::after{content:"✓ 正解";color:var(--ok)}.card .opt.m::after,.bk-orig .opt.m::after{content:"✗ 我選的";color:var(--danger)} '+
-    '.optnote{display:block;margin-top:4px;font-size:12px;color:var(--muted)}.note{margin-top:8px;padding:8px 10px;background:var(--panel);border:1px solid var(--line);border-radius:8px;font-size:13px;white-space:pre-wrap}.ans-wrap{margin-top:8px} '+
-    '.mask{position:relative;cursor:pointer;border-radius:8px;padding:10px 12px;margin:4px 0;background:color-mix(in srgb,var(--line) 80%,var(--panel));border:1px dashed var(--line);min-height:44px;transition:background .15s} '+
-    '.mask>.mi{display:block;transition:opacity .15s}.mask:not(.rev)>.mi{opacity:0;pointer-events:none;user-select:none} '+
-    '.mask:not(.rev)::after{content:attr(data-hint);position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px;font-weight:600} '+
-    '.mask.rev{background:transparent;border-color:transparent;padding:4px 0;min-height:0} '+
-    '.bk-quiz:not(.revealed) .opt.k,.bk-quiz:not(.revealed) .opt.m{border-color:var(--line);background:var(--panel)}.bk-quiz:not(.revealed) .optnote{display:none}.bk-quiz:not(.revealed) .opt.k::after,.bk-quiz:not(.revealed) .opt.m::after{content:none} '+
-    '.key-only .card:not(.show-all) .opt.dim{display:none}.card.show-all .expand{display:none} '+
-    'details{margin:6px 0}summary{cursor:pointer;color:var(--muted)}details.sj{margin:12px 0;padding-top:6px;border-top:1px solid var(--line)}details.sj>summary{font-size:16px;color:var(--text)} '+
-    'details.ch{margin:6px 0 6px 10px;padding-left:10px;border-left:2px solid var(--accent)}details.ch>summary{color:var(--text);font-weight:600} '+
-    '.con-box{margin:8px 0 12px}.con-hd{display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:15px}.qitem{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:6px 0}.qmeta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:4px}.bk-cue{margin:4px 0 6px;font-size:14px;line-height:1.55;color:var(--text)}.bk-thumb{max-height:120px;object-fit:contain}.bk-qlist{margin:4px 0 0}.bk-qlist>summary{font-size:12px;color:var(--muted)}.bk-orig{margin:6px 0 0;padding-top:6px;border-top:1px dashed var(--line)}.bk-orig>summary{font-size:12px;color:var(--accent)} '+
-    '.pg{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:10px 0;padding:8px 12px;background:var(--card);border:1px solid var(--line);border-radius:10px;font-size:13px}.pg:last-child{position:sticky;bottom:calc(8px + env(safe-area-inset-bottom,0px));z-index:3;box-shadow:0 4px 16px rgba(0,0,0,.25)} '+
-    '.empty,.miss{color:var(--muted);padding:12px 0}.miss{color:var(--danger)} '+
-    '#lb{position:fixed;inset:0;z-index:9;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;padding:16px;cursor:zoom-out}#lb img{max-width:100%;max-height:100%;background:#fff} '+
-    '@media (pointer:coarse){button,select{min-height:40px}.stem{font-size:16px}}'+
-    '<'+'/style></head><body><div id="app"></div>'+
-    '<script id="book-data" type="application/json">'+safeJson(payload)+'<'+'/script>'+
-    '<script>'+scriptBody+'<'+'/script></body></html>';
-  dlHtml('錯題本-'+(BK.sub?safeFileName(BK.sub)+'-':'')+new Date().toISOString().slice(0,10)+'.html',html);
-  msg(lost.length?'已匯出錯題本（'+items.length+' 題），但有 '+lost.length+' 張圖片本機找不到、未包含':'已匯出獨立錯題本網頁（'+items.length+' 題）',lost.length>0);
+  const root=document.documentElement.cloneNode(true);
+  root.querySelectorAll('#toast,#lb').forEach(n=>n.remove());
+  const app=root.querySelector('#app');
+  app.innerHTML='';
+  root.querySelectorAll('#book-snapshot').forEach(n=>n.remove());
+  try{await katexParts(root)}catch(e){return msg(e.message,true)}
+  app.insertAdjacentHTML('afterend','<script id="book-snapshot" type="application/json">'+safeJson(snap)+'<'+'/script>');
+  const html='<!doctype html>\n'+root.outerHTML;
+  dlHtml('錯題本-'+(BK.cat?safeFileName(BK.cat)+'-':'')+new Date().toISOString().slice(0,10)+'.html',html);
+  msg(lost.length?'已匯出錯題本（'+items.length+' 題），但有 '+lost.length+' 張圖片本機找不到、未包含':'已匯出獨立錯題本（'+items.length+' 題，與網頁版相同功能，唯讀）',lost.length>0);
 }
 
 /* ---------- views ---------- */
@@ -2064,10 +1888,11 @@ function rev(p,q,i){
   const notesContent=isMod?modFields:normalFields;
 
   return'<article id="q'+q.no+'" class="'+(w?'ng':'')+'">'+(ps?'<details'+(S.pedit===p.id+':'+ps.id+':'+i?' open':'')+'><summary>題組文章</summary>'+blks(ps.blocks)+pEb(i)+(S.pedit===p.id+':'+ps.id+':'+i?passagePanel(p,ps,i):'')+'</details>':'')+ref(q)+blks(q.blocks,'<b>'+q.no+'.</b> ')+wr(p,q)+
-  q.options.map(o=>'<div class="opt '+(q.key.includes(o.k)?'k':q.mine.includes(o.k)?'m':'')+'"><b>'+o.k+'</b>'+escm(o.v)+'</div>').join('')+
+  q.options.map(o=>'<div class="opt '+(q.key.includes(o.k)?'k':q.mine.includes(o.k)?'m':'')+'"><b>'+o.k+'</b><span style="flex:1;min-width:0">'+escm(o.v)+'</span></div>').join('')+
   '<div class="mk vrow">'+stBadge(q,i)+
   '<span class="vs">我的 <b>'+esc(q.mine||'—')+'</b>・正解 <b>'+esc(q.key||'無')+'</b></span>'+
   '<div class="vr">'+(S.skip&&S.skip[k]?'<em class="nd" title="這題不會寫入卡片軟體">不匯出</em>':'')+
+  '<label class="tgl" title="重點題：可在錯題本或檢討頁篩選出來"><input type="checkbox" data-f="star" data-i="'+i+'"'+(q.star?' checked':'')+'>⭐ 重點</label>'+
   '<label class="tgl" title="猜對的題目，仍會算進弱點與組卷"><input type="checkbox" data-f="guess" data-i="'+i+'"'+(q.guess?' checked':'')+'>猜的</label>'+
   '<details class="more"><summary class="'+(S.edit===p.id+':'+i?'on':'')+'" aria-label="更多">⋯</summary><div class="more-menu">'+eb(i)+sb(p,q,i)+stMenu(q,i)+
   '<label class="ck"><input type="checkbox" data-f="skip" data-i="'+i+'"'+(S.skip&&S.skip[k]?' checked':'')+'>不匯出成卡片</label></div></details></div></div>'+expUI(p,q)+tagBox(q,i)+
@@ -2111,16 +1936,16 @@ function vPaper(){
     const ps=po(p,q),first=ps&&(!qs[i-1]||qs[i-1].pid!==q.pid);
     return(first?'<article class="ps"><small>題組：第 '+ps.from+'–'+ps.to+' 題</small>'+blks(ps.blocks)+(emOn(p)?pEb(i)+(S.pedit===p.id+':'+ps.id+':'+i?passagePanel(p,ps,i):''):'')+'</article>':'')+
     '<article id="q'+q.no+'">'+ref(q)+blks(q.blocks,'<b>'+q.no+'.</b> ')+(emOn(p)?wr(p,q):'')+
-    (q.options.length?q.options.map(o=>'<button class="opt '+(q.mine.includes(o.k)?'sel':'')+'" data-a="pick" data-i="'+i+'" data-k="'+o.k+'"><b>'+o.k+'</b>'+escm(o.v)+'</button>').join(''):
+    (q.options.length?q.options.map(o=>'<button class="opt '+(q.mine.includes(o.k)?'sel':'')+'" data-a="pick" data-i="'+i+'" data-k="'+o.k+'"><b>'+o.k+'</b><span style="flex:1;min-width:0">'+escm(o.v)+'</span></button>').join(''):
     '<div class="mk">'+L.map(k=>'<button class="opt lt '+(q.mine.includes(k)?'sel':'')+'" data-a="pick" data-i="'+i+'" data-k="'+k+'"><b>'+k+'</b></button>').join('')+'</div>')+
     (emOn(p)?eb(i)+sb(p,q,i)+(S.edit===p.id+':'+i?editPanel(p,q,i,0):''):'')+'</article>';
   }).join('')+nmUI(p,0)+(p.started?'<button class="pri" data-a="submit">交卷</button>':'<button class="pri" data-a="st" data-n="2">對答案</button>')+qnavUI(p);
-  const c=s=>qs.filter(q=>q.st===s).length,fl=S.filt||'x',nx=c('x'),no=c('o'),nu=qs.filter(q=>!q.cons.length).length;
-  const list=qs.map((q,i)=>[q,i]).filter(([q])=>fl==='all'||(fl==='x'?q.st==='x':fl==='o'?q.st==='o':!q.cons.length));
+  const c=s=>qs.filter(q=>q.st===s).length,fl=S.filt||'x',nx=c('x'),no=c('o'),nu=qs.filter(q=>!q.cons.length).length,ns=qs.filter(q=>q.star).length;
+  const list=qs.map((q,i)=>[q,i]).filter(([q])=>fl==='all'||(fl==='x'?q.st==='x':fl==='o'?q.st==='o':fl==='star'?!!q.star:!q.cons.length));
   return h+keyImgUI(p)+dl('causes',CAUSES)+
   // 原因：沒作答的題不計入統計，要明說，免得又被當成「全對」或「全錯」而沒發現。
   (qs.some(q=>!q.mine&&!q.st)?'<p class="wr">有 '+qs.filter(q=>!q.mine&&!q.st).length+' 題沒作答，不會計入統計；要算錯請手動改判為錯（在該題的 ⋯ 選單）。</p>':'')+
-  '<p>對 '+no+'・錯 '+nx+'・未判 '+c('')+'</p><div class="mk">'+[['x','錯題 '+nx],['o','答對 '+no],['all','全部 '+qs.length],['u','未標概念 '+nu]].map(([v,t])=>'<button class="'+(fl===v?'on':'')+'" data-a="filt" data-v="'+v+'">'+t+'</button>').join('')+(qs.some(q=>S.cardMap[qidOf(p,q)])?'<button data-a="cardview">對照卡片軟體端</button>':'')+'</div>'+
+  '<p>對 '+no+'・錯 '+nx+'・未判 '+c('')+'</p><div class="mk">'+[['x','錯題 '+nx],['o','答對 '+no],['all','全部 '+qs.length],['u','未標概念 '+nu],['star','⭐ 重點 '+ns]].map(([v,t])=>'<button class="'+(fl===v?'on':'')+'" data-a="filt" data-v="'+v+'">'+t+'</button>').join('')+(qs.some(q=>S.cardMap[qidOf(p,q)])?'<button data-a="cardview">對照卡片軟體端</button>':'')+'</div>'+
   '<p class="hint">每一題都要標單元／概念（含答對的），彙整才算得出錯率。每題各自標記，不會連動到其他題。 <button class="ghost" data-a="cleartags">'+(S.delc==='t'+p.id?'再按一次確認清除（其他考卷的同一題也會一起清掉）':'清除本卷所有標籤（其他考卷的同一題也會一起清掉）')+'</button></p>'+
   (list.length?list.map(([q,i])=>rev(p,q,i)).join(''):'<p class="empty">這個篩選下沒有題目。</p>')+nmUI(p,1)+'<button class="pri" data-a="st" data-n="3">前往彙整</button>'+qnavUI(p);
 }
@@ -2189,7 +2014,7 @@ function catSec(gs){
   '<details'+(c.y.length?' open':'')+'><summary>年度（選填）</summary><div class="mk">'+yrs.map(y=>chk('y',y,y?y+' 年度':'（無年度）',n('y',g=>yearOf(g.all[0].p)===y))).join('')+'</div></details>'+
   (cons.length?'<p><b>概念</b></p><div class="mk">'+cons.map(k=>chk('k',k,k,n('k',g=>g.canon.cons.includes(k)))).join('')+'</div>':'')+
   '<p class="hint">目前條件：'+esc(rule)+'</p>'+
-  '<p>抽 <input class="num" type="number" min="1" data-f="catn" value="'+c.n+'"> 題　<small>符合 '+hit.length+' 題'+(hit.length&&hit.length<c.n?'，題數不足，會全部抽出':'')+'</small></p>'+
+  '<p>抽 <input class="num" type="number" min="1" data-f="catn" value="'+c.n+'"> 題　<small>符合 '+hit.length+' 題（⭐ '+hit.filter(starOf).length+' 題，會優先抽）'+(hit.length&&hit.length<c.n?'，題數不足，會全部抽出':'')+'</small></p>'+
   '<div class="mk"><button class="pri" data-a="catcompose"'+(hit.length?'':' disabled')+'>組成考卷（'+Math.min(c.n,hit.length)+' 題）</button><button data-a="catclear">清除勾選</button></div>';
 }
 
@@ -2225,36 +2050,80 @@ function vCompose(){
   if(!gs.length)return hd+'<p class="empty">還沒有批改過的題目。在作答頁按「對答案」後才能組卷。</p>';
   const still=gs.filter(weak).length,ever=gs.filter(everWeak).length;
   return hd+
-  '<p>組卷：最近弱點 <input class="num" type="number" min="0" data-f="n1" value="'+(S.n1??15)+'"> 題（最近一次仍答錯或猜對，共 '+still+' 題可選）＋ 隨機抽 <input class="num" type="number" min="0" data-f="n2" value="'+(S.n2??10)+'"> 題（曾經錯過或猜對，共 '+ever+' 題）</p>'+
+  '<p>抽題數 <input class="num" type="number" min="1" data-f="n1" value="'+(S.n1??25)+'"> 題　<small>順序：⭐ 重點優先，不夠再依錯／猜次數、錯誤率由高到低補。可抽範圍 '+ever+' 題（其中 ⭐ '+gs.filter(x=>everWeak(x)&&starOf(x)).length+' 題）</small></p>'+
   '<button class="pri" data-a="compose" data-k=""'+(ever?'':' disabled')+'>組成考卷</button> <span id="msg"></span>'+
   '<br><label class="ck"><input type="checkbox" data-f="shuf"'+(S.shuf!==false?' checked':'')+'>打亂選項順序（避免記住位置）</label>'+
   catSec(gs);
 }
 
 function renderMath(el){
-  if(!window.renderMathInElement)return;
-  try{renderMathInElement(el||document.getElementById('app'),{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false,strict:false})}catch(e){console.warn('KaTeX',e)}
+  const root=el||document.getElementById('app');
+  if(!window.renderMathInElement){
+    if(window._katexErr&&root&&/\$[^$\n]+\$|\\\(|\\\[/.test(root.textContent||''))msg('數學公式套件（KaTeX）載入失敗，目前無法顯示根號與算式，請檢查網路連線或確認未封鎖 cdnjs.cloudflare.com',true);
+    return;
+  }
+  try{renderMathInElement(root,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false},{left:'\\[',right:'\\]',display:true}],throwOnError:false,strict:false})}catch(e){console.warn('KaTeX',e)}
 }
+const bkMask=(html,hint,forceHide)=>{
+  const rev=forceHide?'':(BK.mask?'':' rev');
+  return'<div class="mask'+rev+'" data-a="bkpeek" data-hint="'+esc(hint||'點擊顯示')+'"><span class="mi">'+html+'</span></div>';
+};
+const bkOrigHtml=it=>{
+  const optsHtml=it.options.map(o=>'<div class="opt '+(o.isKey?'k':o.isWrongPick?'m':'')+'"><b>'+esc(o.k)+'</b><div style="flex:1">'+escm(o.v)+(o.note?'<span class="bk-optnote">筆記：'+esc(o.note)+'</span>':'')+'</div></div>').join('');
+  const extraNotes=[it.why&&'<div><b>為何選錯：</b>'+esc(it.why)+'</div>',it.right&&'<div><b>正確理由：</b>'+esc(it.right)+'</div>',it.appendNote&&'<div><b>重做補充：</b>'+esc(it.appendNote)+'</div>'].filter(Boolean).join('');
+  return'<details class="bk-orig"><summary>展開原題與選項</summary>'+(it.passage?'<details><summary>展開題組文章</summary>'+blks(it.passage)+'</details>':'')+blks(it.blocks)+optsHtml+(extraNotes?'<div class="bk-note">'+extraNotes+'</div>':'')+'</details>';
+};
+const bkStar=it=>'<button class="bk-star'+(it.isStar?' on':'')+'" data-a="bkstar" data-id="'+esc(it.id)+'" title="標註或取消重點">'+(it.isStar?'⭐ 重點':'☆ 標重點')+'</button>';
+const bkDone=(it,t)=>'<button class="bk-star bk-done'+(it.isDone?' on':'')+'" data-a="bkdone" data-id="'+esc(it.id)+'" title="標為已熟：不再出現在待複習；之後同題或同概念答錯會自動退回">'+(t||(it.isDone?'✓ 已熟':'☐ 標熟了'))+'</button>';
+const bkRel=it=>it.isRelapsed?'<span class="bk-badge ng" title="標過熟了之後又答錯，已自動加入重點">熟了又錯</span>':'';
+const bkQuickItem=it=>{
+  const cue=stemCue(it.blocks);
+  const firstImg=it.blocks.find(b=>b.id&&U[b.id]);
+  const cueHtml=cue?'<p class="bk-cue">'+escm(cue)+(firstImg?' <span class="bk-badge">含圖</span>':'')+'</p>':(firstImg?'<img class="fig bk-thumb" data-a="zoom" data-src="'+U[firstImg.id]+'" src="'+U[firstImg.id]+'" alt="">':'<p class="bk-cue"><small>（圖表或無文字題幹，請展開原題檢視）</small></p>');
+  const keyOpts=it.options.filter(o=>o.isKey);
+  const ansLine=keyOpts.length?'<div><b>✓ 正解：</b>'+keyOpts.map(o=>'<b>('+esc(o.k)+')</b> '+escm(o.v)).join('；')+'</div>':(it.key?'<div><b>✓ 正解：</b>'+esc(it.key)+'</div>':'');
+  const ruleLine=it.fix?'<div><b>下次判斷：</b>'+esc(it.fix)+'</div>':(it.right?'<div><b>正確理由：</b>'+esc(it.right)+'</div>':(it.why?'<div><b>為何選錯：</b>'+esc(it.why)+'</div>':'<small>（尚未填寫判斷句或訂正筆記）</small>'));
+  return'<div class="bk-qitem"><div style="margin-bottom:4px">'+bkStar(it)+bkDone(it)+bkRel(it)+(it.cause?'<span class="bk-badge wn">'+esc(it.cause)+'</span>':'')+'<small>'+esc(it.ref)+'</small> '+(it.isWeak?'<span class="bk-badge ng">目前弱點</span>':'<span class="bk-badge ok">已練對</span>')+'</div>'+cueHtml+bkMask(ansLine+ruleLine,'點擊顯示正解與判斷規則')+bkOrigHtml(it)+'</div>';
+};
+const bkQuickCon=kg=>{
+  const wN=kg.items.reduce((a,x)=>a+x.wrongN,0),gN=kg.items.reduce((a,x)=>a+x.guessN,0);
+  const isUnk=kg.k==='（未標概念）',rawPt=isUnk?'':(S.points[kg.k]||''),pt=rawPt.trim(),editing=!isUnk&&!BOOK_ONLY&&BK.editPt===kg.k;
+  const btn=(isUnk||BOOK_ONLY)?'':' <button class="ghost" data-a="bkpt" data-k="'+esc(kg.k)+'">'+(editing?'完成編輯':pt?'✎ 編輯重點':'＋ 補常錯重點')+'</button>';
+  const rule=editing?'<div class="bk-rule"><b>常錯重點（自動儲存，同步至彙整頁與重點卡）</b><textarea data-f="pt" data-g="'+esc(kg.k)+'" placeholder="這個概念常錯在哪、下次怎麼判斷">'+esc(rawPt)+'</textarea></div>':pt?'<div class="bk-rule"><b>常錯重點</b>'+bkMask(esc(pt),'點擊顯示常錯重點')+'</div>':'';
+  return'<div class="bk-con"><div><b>'+esc(kg.k)+'</b> <span class="bk-badge ng">錯 '+wN+(gN?'・猜 '+gN:'')+'</span>'+btn+'</div>'+rule+
+    '<details class="bk-qlist"'+(!pt||editing?' open':'')+'><summary>'+(pt?'相關錯題 '+kg.items.length+' 題（點擊展開考點對照與原題）':'相關錯題 '+kg.items.length+' 題')+'</summary>'+kg.items.map(bkQuickItem).join('')+'</details></div>';
+};
+const bkQuickCat=(ct,sub)=>'<details open class="sj"><summary><b>'+esc(ct)+'</b></summary>'+
+  groupForQuick(sub,S.tree).map(sg=>'<details open class="ch"><summary><b>'+esc(sg.s)+'</b></summary>'+
+    sg.chaps.map(cg=>'<details open class="ch"><summary>'+esc(cg.c)+'</summary>'+cg.cons.map(bkQuickCon).join('')+'</details>').join('')+
+  '</details>').join('')+
+'</details>';
 function vBook(){
-  const hd='<header><h2>錯題本</h2><div class="mk"><button data-a="ana">分析</button><button data-a="home">返回</button></div></header>';
+  const hd=BOOK_ONLY?'<header><h2>錯題本</h2></header>':'<header><h2>錯題本</h2><div class="mk"><button data-a="ana">分析</button><button data-a="home">返回</button></div></header>';
   const all=buildBookItems();
   if(!all.length)return hd+'<p class="empty">還沒有答錯或勾選「猜的」題目。對答案並檢討後，這裡會自動彙整錯題本。</p><span id="msg"></span>';
-  const subs=[...new Set(all.map(it=>it.sub||'（未標科目）'))];
-  if(BK.sub&&!subs.includes(BK.sub))BK.sub='';
-  const items=filterBookItems(all);
-  const maskBox=(html,hint,forceHide)=>{
-    const rev=forceHide?'':(BK.mask?'':' rev');
-    return'<div class="mask'+rev+'" data-a="bkpeek" data-hint="'+esc(hint||'點擊顯示')+'"><span class="mi">'+html+'</span></div>';
-  };
+  const catName=it=>it.cat||'（未分類）';
+  const rkCat=s=>{const i=S.subjs.indexOf(s);return i<0?9999:i};
+  const cats=[...new Set(all.map(catName))].sort((a,b)=>rkCat(a)-rkCat(b));
+  if(BK.cat&&!cats.includes(BK.cat))BK.cat='';
+  const base=filterBookItems(all),pc={todo:0,ok:0,done:0};
+  base.forEach(it=>{pc[pileOf(it)]++});
+  const items=BK.pile==='all'?base:base.filter(it=>pileOf(it)===BK.pile);
+  const maskBox=bkMask;
   const ctrl='<div class="bk-bar">'+
+    '<div class="mk"><input type="search" data-f="bkq" value="'+esc(BK.q)+'" placeholder="搜尋題目關鍵字、概念、考卷、筆記（空白分隔＝同時符合）" style="flex:1 1 12em;width:auto;margin:0">'+(BK.q?'<button data-a="bkqclr">清除</button>':'')+'</div>'+
     '<div class="mk">'+
       '<button class="'+(BK.mode==='quick'?'on':'')+'" data-a="bkmode" data-v="quick">速覽模式（概念重點）</button>'+
       '<button class="'+(BK.mode==='card'?'on':'')+'" data-a="bkmode" data-v="card">精簡錯題卡</button>'+
-      '<button class="pri" style="margin-left:auto" data-a="expbook"'+(items.length?'':' disabled')+'>匯出獨立網頁（'+items.length+' 題）</button>'+
+      '<button class="pri" style="margin-left:auto" data-a="expbook"'+(items.length?'':' disabled')+'>'+(BOOK_ONLY?'💾 另存（含目前重點）':'匯出獨立網頁')+'（'+items.length+' 題）</button>'+
     '</div>'+
     '<div class="mk">'+
-      [['weak','目前弱點'],['ever','全部歷史（含猜對）'],['rep','反覆錯 ≥ 2 次']].map(([v,t])=>'<button class="'+(BK.scope===v?'on':'')+'" data-a="bkscope" data-v="'+v+'">'+t+'</button>').join('')+
-      '<select data-f="bksub"><option value="">全部科目</option>'+subs.map(s=>'<option value="'+esc(s)+'"'+(BK.sub===s?' selected':'')+'>'+esc(s)+'</option>').join('')+'</select>'+
+      [['todo','待複習'],['ok','已練對'],['done','已熟'],['all','全部']].map(([v,t])=>'<button class="'+(BK.pile===v?'on':'')+'" data-a="bkpile" data-v="'+v+'">'+t+' '+(v==='all'?pc.todo+pc.ok+pc.done:pc[v])+'</button>').join('')+
+    '</div>'+
+    '<div class="mk">'+
+      '<button class="'+(BK.fStar?'on':'')+'" data-a="bkflt" data-v="fStar">⭐ 重點</button>'+
+      '<button class="'+(BK.fRep?'on':'')+'" data-a="bkflt" data-v="fRep">反覆錯 ≥ 2 次</button>'+
+      '<select data-f="bkcat"><option value="">全部分類</option>'+cats.map(s=>'<option value="'+esc(s)+'"'+(BK.cat===s?' selected':'')+'>'+esc(s)+'</option>').join('')+'</select>'+
       (BK.mode==='card'?'<select data-f="bkper">'+[[5,'每頁 5 題'],[10,'每頁 10 題'],[20,'每頁 20 題'],[0,'不分頁']].map(([n,t])=>'<option value="'+n+'"'+(BK.per===n?' selected':'')+'>'+t+'</option>').join('')+'</select>':'')+
     '</div>'+
     (BK.mode==='card'?'<div class="mk">'+
@@ -2271,29 +2140,9 @@ function vBook(){
 
   let body='';
   if(!items.length){
-    body='<p class="empty">目前篩選條件下沒有題目，可切換範圍或科目。</p>';
+    body='<p class="empty">'+(BK.q?'找不到符合「'+esc(BK.q)+'」的題目。搜尋只在目前的範圍與分類內進行，可切換「全部歷史」或「全部分類」再找。':'目前篩選條件下沒有題目，可切換範圍或分類。')+'</p>';
   }else if(BK.mode==='quick'){
-    body=groupForQuick(items,S.tree).map(sg=>'<details open class="sj"><summary><b>'+esc(sg.s)+'</b></summary>'+
-      sg.chaps.map(cg=>'<details open class="ch"><summary>'+esc(cg.c)+'</summary>'+
-        cg.cons.map(kg=>{
-          const wN=kg.items.reduce((a,x)=>a+x.wrongN,0),gN=kg.items.reduce((a,x)=>a+x.guessN,0);
-          const isUnk=kg.k==='（未標概念）',rawPt=isUnk?'':(S.points[kg.k]||''),pt=rawPt.trim(),editing=!isUnk&&BK.editPt===kg.k;
-          const qHtml=kg.items.map(it=>{
-            const cue=stemCue(it.blocks);
-            const firstImg=it.blocks.find(b=>b.id&&U[b.id]);
-            const cueHtml=cue?'<p class="bk-cue">'+escm(cue)+(firstImg?' <span class="bk-badge">含圖</span>':'')+'</p>':(firstImg?'<img class="fig bk-thumb" data-a="zoom" data-src="'+U[firstImg.id]+'" src="'+U[firstImg.id]+'" alt="">':'<p class="bk-cue"><small>（圖表或無文字題幹，請展開原題檢視）</small></p>');
-            const keyOpts=it.options.filter(o=>o.isKey);
-            const ansLine=keyOpts.length?'<div><b>✓ 正解：</b>'+keyOpts.map(o=>'<b>('+esc(o.k)+')</b> '+escm(o.v)).join('；')+'</div>':(it.key?'<div><b>✓ 正解：</b>'+esc(it.key)+'</div>':'');
-            const ruleLine=it.fix?'<div><b>下次判斷：</b>'+esc(it.fix)+'</div>':(it.right?'<div><b>正確理由：</b>'+esc(it.right)+'</div>':(it.why?'<div><b>為何選錯：</b>'+esc(it.why)+'</div>':'<small>（尚未填寫判斷句或訂正筆記）</small>'));
-            const optsHtml=it.options.map(o=>'<div class="opt '+(o.isKey?'k':o.isWrongPick?'m':'')+'"><b>'+esc(o.k)+'</b><div style="flex:1">'+escm(o.v)+(o.note?'<span class="bk-optnote">筆記：'+esc(o.note)+'</span>':'')+'</div></div>').join('');
-            const extraNotes=[it.why&&'<div><b>為何選錯：</b>'+esc(it.why)+'</div>',it.right&&'<div><b>正確理由：</b>'+esc(it.right)+'</div>',it.appendNote&&'<div><b>重做補充：</b>'+esc(it.appendNote)+'</div>'].filter(Boolean).join('');
-            const origHtml='<details class="bk-orig"><summary>展開原題與選項</summary>'+(it.passage?'<details><summary>展開題組文章</summary>'+blks(it.passage)+'</details>':'')+blks(it.blocks)+optsHtml+(extraNotes?'<div class="bk-note">'+extraNotes+'</div>':'')+'</details>';
-            return'<div class="bk-qitem"><div style="margin-bottom:4px">'+(it.cause?'<span class="bk-badge wn">'+esc(it.cause)+'</span>':'')+'<small>'+esc(it.ref)+'</small> '+(it.isWeak?'<span class="bk-badge ng">目前弱點</span>':'<span class="bk-badge ok">已練對</span>')+'</div>'+cueHtml+maskBox(ansLine+ruleLine,'點擊顯示正解與判斷規則')+origHtml+'</div>';
-          }).join('');
-          return'<div class="bk-con"><div><b>'+esc(kg.k)+'</b> <span class="bk-badge ng">錯 '+wN+(gN?'・猜 '+gN:'')+'</span>'+(isUnk?'':' <button class="ghost" data-a="bkpt" data-k="'+esc(kg.k)+'">'+(editing?'完成編輯':pt?'✎ 編輯重點':'＋ 補常錯重點')+'</button>')+'</div>'+
-            (editing?'<div class="bk-rule"><b>常錯重點（自動儲存，同步至彙整頁與重點卡）</b><textarea data-f="pt" data-g="'+esc(kg.k)+'" placeholder="這個概念常錯在哪、下次怎麼判斷">'+esc(rawPt)+'</textarea></div>':pt?'<div class="bk-rule"><b>常錯重點</b>'+maskBox(esc(pt),'點擊顯示常錯重點')+'</div>':'')+
-            '<details class="bk-qlist"'+(!pt||editing?' open':'')+'><summary>'+(pt?'相關錯題 '+kg.items.length+' 題（點擊展開考點對照與原題）':'相關錯題 '+kg.items.length+' 題')+'</summary>'+qHtml+'</details></div>';
-        }).join('')+'</details>').join('')+'</details>').join('');
+    body=cats.map(ct=>{const sub=items.filter(it=>catName(it)===ct);return sub.length?bkQuickCat(ct,sub):''}).join('');
   }else{
     const per=BK.per===0?items.length:BK.per,pages=Math.max(1,Math.ceil(items.length/per));
     if(BK.page>pages)BK.page=pages;
@@ -2309,6 +2158,7 @@ function vBook(){
       }).join('');
       const head='<div class="bk-hd"><small>#'+(start+i+1)+'・'+esc(it.ref)+'</small> '+
         '<span class="bk-badge '+(it.isWeak?'ng':'ok')+'">'+(it.isWeak?(it.lastSt==='x'?'最近答錯':'最近猜對'):'已練對')+'（錯 '+it.wrongN+(it.guessN?'・猜 '+it.guessN:'')+'/'+it.attN+'）</span>'+
+        bkStar(it)+(isQuiz?'':bkDone(it))+bkRel(it)+'<span class="bk-badge">'+esc(catName(it))+'</span>'+
         (it.cause?'<span class="bk-badge wn">'+esc(it.cause)+'</span>':'')+
         (it.sub?'<span class="bk-badge">'+esc(it.sub)+(it.chap?' / '+esc(it.chap):'')+'</span>':'')+
         it.cons.map(k=>'<span class="bk-badge">'+esc(k)+'</span>').join('')+'</div>';
@@ -2316,7 +2166,7 @@ function vBook(){
         (!isQuiz&&dimCnt>0?'<button class="ghost bk-expand" data-a="bkoptall">＋ 顯示其餘 '+dimCnt+' 個無關選項</button>':'');
       const notes=[it.why&&'<div><b>為何選錯：</b>'+esc(it.why)+'</div>',it.right&&'<div><b>正確理由：</b>'+esc(it.right)+'</div>',it.appendNote&&'<div><b>重做補充：</b>'+esc(it.appendNote)+'</div>'].filter(Boolean).join('');
       if(isQuiz){
-        const ans='<div><b>正解：'+esc(it.key||'無')+'</b>（最近作答：'+esc(it.lastMine||'未答')+'）</div>'+(it.fix?'<div><b>下次判斷：</b>'+esc(it.fix)+'</div>':'')+(notes||(!it.fix?'<small>尚未填寫文字訂正筆記</small>':''));
+        const ans='<div><b>正解：'+esc(it.key||'無')+'</b>（最近作答：'+esc(it.lastMine||'未答')+'）</div>'+(it.fix?'<div><b>下次判斷：</b>'+esc(it.fix)+'</div>':'')+(notes||(!it.fix?'<small>尚未填寫文字訂正筆記</small>':''))+'<div style="margin-top:8px">'+bkDone(it,it.isDone?'✓ 已熟（點擊取消）':'✓ 熟了')+'</div>';
         return'<article class="bk-card bk-quiz">'+head+stem+maskBox(ans,'點擊掀開正解與解析',true)+'</article>';
       }
       const topRule=it.fix?'<div class="bk-rule"><b>下次怎麼判斷</b>'+maskBox(esc(it.fix),'點擊顯示判斷句')+'</div>':'';
@@ -2361,6 +2211,7 @@ document.addEventListener('click',async e=>{
   if(d.a==='book'){S.view='book';BK.page=1;BK.editPt='';await loadBookAssets();render();scrollTo(0,0);return}
   if(d.a==='bkpt'){flushSave();BK.editPt=BK.editPt===d.k?'':d.k;render();scrollTo(0,y);return}
   if(d.a==='bkqall'){const on=d.v==='1';document.querySelectorAll('.bk-qlist').forEach(x=>{x.open=on});return}
+  if(d.a==='bkqclr'){BK.q='';BK.page=1;render();scrollTo(0,y);return}
   if(d.a==='bkpeek'){
     if(window.getSelection&&String(window.getSelection()))return;
     const rev=t.classList.toggle('rev');
@@ -2374,15 +2225,30 @@ document.addEventListener('click',async e=>{
     document.querySelectorAll('.bk-quiz').forEach(c=>c.classList.toggle('revealed',on));
     return;
   }
-  if(['bkmode','bkview','bkscope','bkmask','bkpage'].includes(d.a)){
+  if(['bkmode','bkview','bkpile','bkflt','bkmask','bkpage'].includes(d.a)){
     if(d.a==='bkmode'){flushSave();BK.mode=d.v;BK.page=1;BK.editPt=''}
     else if(d.a==='bkview'){BK.dir=d.v;BK.page=1}
-    else if(d.a==='bkscope'){BK.scope=d.v;BK.page=1}
+    else if(d.a==='bkpile'){BK.pile=d.v;BK.page=1}
+    else if(d.a==='bkflt'){BK[d.v]=!BK[d.v];BK.page=1}
     else if(d.a==='bkmask'){BK.mask=!BK.mask}
     else if(d.a==='bkpage'){BK.page=Math.max(1,+d.v||1)}
     render();scrollTo(0,d.a==='bkpage'?0:y);return;
   }
   // 原因：切主題不必存資料、也不該跳回頁首，只重畫並保留捲動位置。
+  if(d.a==='bkstar'){
+    const g=groups().find(x=>x.id===d.id);
+    if(!g){msg('找不到這題（可能已被刪除）',true);return}
+    const on=!g.all.some(x=>x.q.star);
+    g.all.forEach(x=>{x.q.star=on});
+    save();render();scrollTo(0,y);return;
+  }
+  if(d.a==='bkdone'){
+    const g=groups().find(x=>x.id===d.id);
+    if(!g){msg('找不到這題（可能已被刪除）',true);return}
+    const on=!g.all.some(x=>x.q.mastered);
+    g.all.forEach(x=>{if(on){x.q.mastered=true;delete x.q.relapsed}else delete x.q.mastered});
+    save();render();scrollTo(0,y);return;
+  }
   if(d.a==='theme'){setTheme(themeNow()==='light'?'dark':'light',true);render();scrollTo(0,y);return}
   if(d.a==='zoom'){const o=document.createElement('div');o.id='lb';o.dataset.a='unzoom';o.innerHTML='<img src="'+d.src+'" alt="">';document.body.appendChild(o);return}
   if(d.a==='unzoom'){t.remove();return}
@@ -2422,13 +2288,13 @@ document.addEventListener('click',async e=>{
       const c=cat(),pool=groups().filter(g=>(c.all||everWeak(g))&&catHit(g,c));
       if(!pool.length){msg('沒有符合的題目',true);return}
       for(let i=pool.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[pool[i],pool[j]]=[pool[j],pool[i]]}
-      const picks=pool.slice(0,c.n).sort((x,y)=>{const u=x.all[0].p.created,v=y.all[0].p.created;return u===v?x.canon.no-y.canon.no:u<v?-1:1});
+      const picks=rankPick(pool).slice(0,c.n).sort((x,y)=>{const u=x.all[0].p.created,v=y.all[0].p.created;return u===v?x.canon.no-y.canon.no:u<v?-1:1});
       const np=build(picks,'抽題・'+catLabel(c));
       S.papers.unshift(np);S.cur=np.id;S.view='paper';await loadAssets(np);break}
     case'st':{
       const n=+d.n;
       if(n===3){S.view='sum';break}
-      S.view='paper';if(n===2&&!p.graded)grade(p);p.stage=n;if(n===2)loadCardView(p,true);break;
+      S.view='paper';if(n===2&&!p.graded){grade(p);relapse(p,p.questions)}p.stage=n;if(n===2)loadCardView(p,true);break;
     }
     case'ana':S.view='ana';break;
     case'cmp':S.view='compose';break;
@@ -2444,7 +2310,7 @@ document.addEventListener('click',async e=>{
     case'sort':S.sort=d.v;break;
     case'compose':{const np=compose(d.k);if(!np){msg('沒有符合的題目', true);return}S.papers.unshift(np);S.cur=np.id;S.view='paper';await loadAssets(np);break}
     case'start':p.started=true;p.stage=1;S.edit=null;S.em=null;break;
-    case'submit':{p.started=false;if(!p.graded)grade(p);p.stage=2;loadCardView(p,true);break}
+    case'submit':{p.started=false;if(!p.graded){grade(p);relapse(p,p.questions)}p.stage=2;loadCardView(p,true);break}
     case'ign':p.ignImgs=[...new Set([...(p.ignImgs||[]),d.id])];break;
     case'ignall':{const kp=new Set(p.keyImgs||[]);p.ignImgs=[...new Set([...(p.ignImgs||[]),...orph(p).filter(id=>!kp.has(id))])];break}
     case'unign':p.ignImgs=[];break;
@@ -2601,8 +2467,8 @@ document.addEventListener('click',async e=>{
     case'cleartags':
       if(S.delc==='t'+p.id){withSync(p,()=>p.questions.forEach(z=>{z.sub='';z.chap='';z.cons=[]}));S.delc=null}else S.delc='t'+p.id;
       break;
-    case'mark':q.st=d.v;q.manual=1;p.gradedAt=new Date().toISOString();break;
-    case'auto':delete q.manual;grade(p);break;
+    case'mark':{const was=q.st;q.st=d.v;q.manual=1;p.gradedAt=new Date().toISOString();if(d.v==='x'&&was!=='x')relapse(p,[q]);break}
+    case'auto':delete q.manual;regrade(p);break;
     case'nmmark':{const n=p.nm[+d.i];n.ok=n.ok===d.v?'':d.v;break}
     case'jump':{
       let el=$('#q'+d.no);
@@ -2681,8 +2547,9 @@ document.addEventListener('change',async e=>{
     EXPO.add(p.id+':'+q.no);t.value='';validate(p);tw.forEach(([x])=>validate(x));await loadAssets(p);await save();render();return;
   }
   const f=t.dataset.f;if(!f)return;
-  if(f==='bksub'||f==='bkper'||f==='bkkeyonly'){
-    if(f==='bksub'){BK.sub=t.value;BK.page=1}
+  if(f==='bkq'){clearTimeout(BKQ_TM);bkSearch(t);return}
+  if(f==='bkcat'||f==='bkper'||f==='bkkeyonly'){
+    if(f==='bkcat'){BK.cat=t.value;BK.page=1}
     else if(f==='bkper'){BK.per=+t.value;BK.page=1}
     else if(f==='bkkeyonly'){BK.keyOnly=t.checked}
     render();return;
@@ -2702,6 +2569,7 @@ document.addEventListener('change',async e=>{
   else if(f==='n1'||f==='n2')S[f]=Math.max(0,Math.floor(+t.value)||0);
   else if(f==='shuf')S.shuf=t.checked;
   else if(f==='guess')q.guess=t.checked;
+  else if(f==='star'){[[p,q],...twins(p,q)].forEach(([,y])=>{y.star=t.checked})}
   else if(f==='skip'){S.skip=S.skip||{};const k=qidOf(p,q);if(t.checked)S.skip[k]=1;else delete S.skip[k]}
   else if(f==='appnote')q.appendNote=t.value;
   else if(f==='sub'||f==='chap')withSync(p,()=>setTag(p,+t.dataset.i,f,t.value.trim()));
@@ -2718,7 +2586,7 @@ document.addEventListener('change',async e=>{
   else q[f]=t.value;
   const y=scrollY;
   if(SAVE_TM){clearTimeout(SAVE_TM);SAVE_TM=0}
-  save();if(['th','sub','chap','con','key','cat','catsub','catn','guess','skip','psubj'].includes(f)||/^(eb|pb|eo|ex):/.test(f)){render();scrollTo(0,y)}
+  save();if(['th','sub','chap','con','key','cat','catsub','catn','guess','star','skip','psubj'].includes(f)||/^(eb|pb|eo|ex):/.test(f)){render();scrollTo(0,y)}
 });
 
 // 原因：筆記原本只在 change（離開輸入框）才寫入；打字到一半關頁、切換 App 或重新整理時 change 不會觸發，整段筆記會消失且沒有任何提示。改成邊打邊更新記憶體、停手後存檔，頁面隱藏時立刻存。
@@ -2726,6 +2594,10 @@ let SAVE_TM=0;
 const flushSave=()=>{if(SAVE_TM){clearTimeout(SAVE_TM);SAVE_TM=0;save()}};
 document.addEventListener('input',e=>{
   const t=e.target,f=t.dataset&&t.dataset.f;if(!f)return;
+  if(f==='bkq'){
+    if(BKQ_COMP||e.isComposing)return;
+    clearTimeout(BKQ_TM);BKQ_TM=setTimeout(()=>bkSearch(t),200);return;
+  }
   if(f==='sub'||f==='chap'){
     const box=t.closest('.tg');
     if(box){
@@ -2744,12 +2616,28 @@ document.addEventListener('input',e=>{
   clearTimeout(SAVE_TM);SAVE_TM=setTimeout(()=>{SAVE_TM=0;save()},800);
 });
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')flushSave()});
+let BKQ_TM=0,BKQ_COMP=false;
+function bkSearch(t){
+  BKQ_TM=0;
+  if(BKQ_COMP||BK.q===t.value)return;
+  BK.q=t.value;BK.page=1;
+  const a=t.selectionStart,b=t.selectionEnd,y=scrollY;
+  render();
+  const n=$('[data-f="bkq"]');
+  if(n){n.focus({preventScroll:true});n.setSelectionRange(a,b)}
+  scrollTo(0,y);
+}
+document.addEventListener('compositionstart',e=>{if(e.target.dataset&&e.target.dataset.f==='bkq')BKQ_COMP=true});
+document.addEventListener('compositionend',e=>{
+  if(!e.target.dataset||e.target.dataset.f!=='bkq')return;
+  BKQ_COMP=false;clearTimeout(BKQ_TM);BKQ_TM=setTimeout(()=>bkSearch(e.target),200);
+});
 addEventListener('pagehide',flushSave);
 window.ExamReview={buildCards,SINKS,IMPORTERS,render,state:()=>S,pushToCardnote};
 // 原因：handler 或 render 丟例外時畫面不更新、使用者看不到任何訊息；至少讓它大聲報錯。
 addEventListener('error',e=>msg('未預期的錯誤：'+(e.message||e),true));
 addEventListener('unhandledrejection',e=>msg('未預期的錯誤：'+((e.reason&&e.reason.message)||e.reason),true));
-load().then(async()=>{if(location.hash==='#import')S.view='import';await initAutoBackup();render()});
+load().then(async()=>{if(BOOK_ONLY){render();return}if(location.hash==='#import')S.view='import';await initAutoBackup();render()});
 render();
 </script>
 </body>

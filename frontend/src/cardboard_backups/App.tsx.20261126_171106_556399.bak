@@ -1,4 +1,5 @@
 // @depends-on ./components/Markdown.tsx (CardOpenProvider, notifyCardDeleted, notifyCardTitleUpdated)
+// @depends-on ./components/RightPanel.tsx (NoteEditorPane 依當前 boardId 查詢 b.notes；靈感筆記 "note:<id>" 隸屬單一白板，切換 boardId 時必須清除 selected 的 note: 前綴，否則會拿舊白板的 noteId 查新白板並誤報找不到)
 // @depends-on ./components/Editor.tsx (onReturnToBoard：經 RightPanel.tsx 的 CardEditorPane → ContentTab 傳入 Editor；只有中央編輯器傳，值必須與「← 返回」按鈕同一個 closeCenterEditor，兩條退出路徑才一致)
 // @depends-on ./components/RightPanel.tsx (Filter：loadSavedView 逐欄位白名單還原，Filter 新增欄位時要同步改，否則重整後該欄位會被丟掉)
 // @depends-on ./lib/device.ts (initDeviceEnvironment)
@@ -23,13 +24,14 @@ import { subscribeOpenLiterature } from "./components/LiteratureField";
 import { LiteratureLibrary } from "./components/LiteratureLibrary";
 import { LiteraturePicker } from "./components/LiteraturePicker";
 import { CardOpenProvider, notifyCardDeleted, notifyCardTitleUpdated } from "./components/Markdown";
+import { MindMapOverview } from "./components/MindMapOverview";
 import { CardEditorPane, RightPanel, type Filter, type LiteraturePatch, type TabKey } from "./components/RightPanel";
 import { initDeviceEnvironment } from "./lib/device";
 import { useNotify } from "./notify";
 import type { BoardLink, BoardSummary, CardDetail, CardSummary, RelationType, Tag } from "./types";
 
 const VIEW_KEY = "cardboard:view";
-type ViewMode = "board" | "graph" | "cards" | "daily" | "literature";
+type ViewMode = "board" | "graph" | "cards" | "daily" | "literature" | "mindmap";
 
 // 還原重新整理前的白板、視圖與篩選；欄位型別不符一律丟棄，退回預設
 function loadSavedView(): { boardId: string | null; viewMode: ViewMode; filter: Filter } {
@@ -43,7 +45,8 @@ function loadSavedView(): { boardId: string | null; viewMode: ViewMode; filter: 
       v.viewMode === "graph" ||
       v.viewMode === "cards" ||
       v.viewMode === "daily" ||
-      v.viewMode === "literature"
+      v.viewMode === "literature" ||
+      v.viewMode === "mindmap"
     )
       view.viewMode = v.viewMode;
     const f = v.filter;
@@ -584,6 +587,27 @@ export default function App() {
     </div>
   );
 
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+
+  const changeBoard = useCallback(
+    (id: string | null) => {
+      if (id !== boardId && selectedRef.current?.startsWith("note:")) {
+        setSelected(null);
+        setCenterEditing(false);
+      }
+      setBoardId(id);
+    },
+    [boardId],
+  );
+
+  useEffect(() => {
+    if (selectedRef.current?.startsWith("note:")) {
+      setSelected(null);
+      setCenterEditing(false);
+    }
+  }, [boardId]);
+
   // 切換視圖一律同時關掉中央編輯，所以切換列在任何狀態下都能顯示在同一個位置
   const switchView = (mode: ViewMode) => {
     setViewMode(mode);
@@ -611,7 +635,7 @@ export default function App() {
           onToggleTheme={toggleTheme}
           onToggleCollapse={toggleLeft}
           onSelectBoard={(id) => {
-            setBoardId(id);
+            changeBoard(id);
             setViewMode("board");
             setCenterEditing(false);
             setFilter({});
@@ -624,6 +648,11 @@ export default function App() {
             setCenterEditing(false);
           }}
           dailyOpen={viewMode === "daily"}
+          onOpenMindmap={() => {
+            setViewMode("mindmap");
+            setCenterEditing(false);
+          }}
+          mindmapOpen={viewMode === "mindmap"}
           onFilter={(f) => {
             setFilter(f);
             setViewMode("cards");
@@ -787,33 +816,26 @@ export default function App() {
               boards={boards}
               rightOpen={rightOpen}
               onToggleRight={() => setRightOpen((o) => !o)}
-              onSelectCard={showCardInContent}
-              onJumpBoardToCards={(targetBoardId) => {
-                setBoardId(targetBoardId);
-                setFilter({});
-                setViewMode("cards");
+            onSelectCard={showCardInContent}
+            onJumpBoardToCards={(targetBoardId) => {
+              changeBoard(targetBoardId);
+              setFilter({});
+              setViewMode("cards");
+              setCenterEditing(false);
+            }}
+            onBoardsChanged={refreshBoards}
+            report={report}
+            info={info}
+          />
+        ) : !isStandalone && viewMode !== "cards" ? (
+          <>
+            <Board "board"} && active="{!centerEditing" boardId="{boardId}" boards="{boards}" onSelectBoard="{(id)" ref="{boardRef}" selectedCardId="{selected}" toolsSlot="{toolsSlot}" viewMode="=="> {
+                changeBoard(id);
+                setViewMode("board");
                 setCenterEditing(false);
+                setFilter({});
               }}
               onBoardsChanged={refreshBoards}
-              report={report}
-              info={info}
-            />
-          ) : !isStandalone && viewMode !== "cards" ? (
-            <>
-              <Board
-                ref={boardRef}
-                boardId={boardId}
-                selectedCardId={selected}
-                active={!centerEditing && viewMode === "board"}
-                toolsSlot={toolsSlot}
-                boards={boards}
-                onSelectBoard={(id) => {
-                  setBoardId(id);
-                  setViewMode("board");
-                  setCenterEditing(false);
-                  setFilter({});
-                }}
-                onBoardsChanged={refreshBoards}
                 onSelectCard={selectCard}
                 onOpenCard={openCardInCenter}
                 onLinksChanged={bump}
@@ -989,7 +1011,7 @@ export default function App() {
             onLiteratureChanged={onLiteratureChanged}
             onTagsChanged={onTagsChanged}
             onOpenBoard={(id) => {
-              setBoardId(id);
+              changeBoard(id);
               setViewMode("board");
               setCenterEditing(false);
             }}

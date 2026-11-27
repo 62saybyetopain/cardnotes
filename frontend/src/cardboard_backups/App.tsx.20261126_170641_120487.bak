@@ -626,6 +626,11 @@ export default function App() {
             setCenterEditing(false);
           }}
           dailyOpen={viewMode === "daily"}
+          onOpenMindmap={() => {
+            setViewMode("mindmap");
+            setCenterEditing(false);
+          }}
+          mindmapOpen={viewMode === "mindmap"}
           onFilter={(f) => {
             setFilter(f);
             setViewMode("cards");
